@@ -40,7 +40,9 @@ let envrc_content ~prefix ~dune_cache_root =
 
 let make_env ~prefix ~dune_cache_root =
   let vars = env_vars ~prefix ~dune_cache_root in
-  let dominated = List.map (fun (k, _) -> String.uppercase_ascii k) vars in
+  let dominated =
+    "PATH" :: List.map (fun (k, _) -> String.uppercase_ascii k) vars
+  in
   let has_prefix s k =
     let k = k ^ "=" in
     String.length s >= String.length k
@@ -53,11 +55,8 @@ let make_env ~prefix ~dune_cache_root =
     Unix.environment () |> Array.to_list
     |> List.filter (fun s -> not (List.exists (has_prefix s) dominated))
   in
+  let path_entry = "PATH=" ^ (prefix / "bin") ^ ":" ^ current_path in
   let env_pairs =
-    List.map
-      (fun (k, v) ->
-        if k = "PATH" then k ^ "=" ^ (prefix / "bin") ^ ":" ^ current_path
-        else k ^ "=" ^ v)
-      vars
+    path_entry :: List.map (fun (k, v) -> k ^ "=" ^ v) vars
   in
   Array.of_list (env_pairs @ base)

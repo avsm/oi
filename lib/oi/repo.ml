@@ -92,11 +92,11 @@ let ensure ~data_dir =
       let dir = repo_dir ~data_dir r.name in
       let pkg_dir = dir / "packages" in
       if not (Sys.file_exists pkg_dir) then begin
-        Log.app (fun m -> m "Cloning %s from %s..." r.name r.url);
+        Log.info (fun m -> m "Cloning %s from %s..." r.name r.url);
         pull_repo ~label:r.name ~url_s:r.url ~dst:dir
       end
       else if needs_update ~dir ~max_age_seconds:one_day then begin
-        Log.app (fun m -> m "Updating %s..." r.name);
+        Log.info (fun m -> m "Updating %s..." r.name);
         try pull_repo ~label:r.name ~url_s:r.url ~dst:dir
         with exn ->
           Log.warn (fun m ->
@@ -112,11 +112,11 @@ let ensure_extra ~data_dir urls =
       let dir = data_dir / "repos" / name in
       let pkg_dir = dir / "packages" in
       if not (Sys.file_exists pkg_dir) then begin
-        Log.app (fun m -> m "Cloning extra repo %s..." url_s);
+        Log.info (fun m -> m "Cloning extra repo %s..." url_s);
         pull_repo ~label:name ~url_s ~dst:dir
       end
       else if needs_update ~dir ~max_age_seconds:one_day then begin
-        Log.app (fun m -> m "Updating extra repo %s..." name);
+        Log.info (fun m -> m "Updating extra repo %s..." name);
         try pull_repo ~label:name ~url_s ~dst:dir with _ -> ()
       end;
       if Sys.file_exists pkg_dir then Some pkg_dir else None)

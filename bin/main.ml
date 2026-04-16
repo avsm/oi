@@ -209,9 +209,10 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
           build_plan
         end
         else begin
-          Fmt.pr "Fetching %d layer(s) from registry (%d needed)...@."
-            (List.length available)
-            (List.length source_hashes);
+          Logs.info (fun m ->
+              m "Fetching %d layer(s) from registry (%d needed)..."
+                (List.length available)
+                (List.length source_hashes));
           Eio.Fiber.all
             (List.map
                (fun hash () ->
@@ -831,6 +832,65 @@ let which_cmd =
 
 (* -- sync ---------------------------------------------------------------- *)
 
+(* Run a full sync in [cwd]: solve the deps declared in *.opam files,
+   build/fetch layers, assemble [cwd]/_oi/prefix, and (re)write .envrc.
+   Returns the path to the assembled prefix. When [quiet] is true,
+   narration goes to Logs.info (hidden at default verbosity); otherwise
+   it prints to stdout. *)
+let do_sync ?(quiet = false) ~proc_mgr ~fs ~clock ~sys ~platform ~os_key
+    ~cache ~data_dir ~registry ~cwd () =
+  let say fmt =
+    if quiet then Fmt.kstr (fun s -> Logs.info (fun m -> m "%s" s)) fmt
+    else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
+  in
+  init_opam_root ~fs ~data_dir;
+  Oi.Repo.ensure ~data_dir;
+  let deps = deps_from_opam_files ~fs cwd in
+  if deps = [] then
+    Oi.Error.config_error "No .opam files found in %s." cwd;
+  say "Dependencies from opam files: %s" (String.concat ", " deps);
+  let conf = make_conf ~platform in
+  let remote = remote_of_registry registry in
+  let names = List.map OpamPackage.Name.of_string deps in
+  let layer_hashes =
+    solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
+      ~os_key ?remote names
+  in
+  let oi_dir = cwd / "_oi" in
+  let prefix = oi_dir / "prefix" in
+  Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix);
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / oi_dir);
+  let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
+  D10.Prefix.assemble d10 ~layer_hashes ~dst:Eio.Path.(fs / prefix);
+  let envrc_path = Eio.Path.(fs / cwd / ".envrc") in
+  let dune_cache_root = Oi.Cache.dune_root cache in
+  let envrc = Oi.Prefix.envrc_content ~prefix ~dune_cache_root in
+  (try Eio.Path.unlink envrc_path with Eio.Exn.Io _ -> ());
+  Eio.Path.save ~create:(`Exclusive 0o644) envrc_path envrc;
+  say "Wrote .envrc (run 'direnv allow' to activate)";
+  say "Prefix assembled at %s (%d packages)" prefix
+    (List.length layer_hashes);
+  prefix
+
+(* True if [cwd]/_oi/prefix is missing, or any *.opam in [cwd] has been
+   modified more recently than the prefix directory. *)
+let needs_sync ~cwd ~prefix =
+  match Unix.stat prefix with
+  | exception Unix.Unix_error _ -> true
+  | st ->
+      let prefix_mtime = st.Unix.st_mtime in
+      let opam_files =
+        try
+          Sys.readdir cwd |> Array.to_list
+          |> List.filter (fun f -> Filename.check_suffix f ".opam")
+        with Sys_error _ -> []
+      in
+      List.exists
+        (fun f ->
+          try (Unix.stat (cwd / f)).Unix.st_mtime > prefix_mtime
+          with Unix.Unix_error _ -> false)
+        opam_files
+
 let sync_cmd =
   let run () data_dir cache_dir registry =
     with_error_handling @@ fun () ->
@@ -838,38 +898,10 @@ let sync_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
-    init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir;
     let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
-    let deps = deps_from_opam_files ~fs cwd in
-    if deps = [] then
-      Oi.Error.config_error "No .opam files found in current directory.";
-    Fmt.pr "Dependencies from opam files: %s@." (String.concat ", " deps);
-    let conf = make_conf ~platform in
-    let remote = remote_of_registry registry in
-    let names = List.map OpamPackage.Name.of_string deps in
-    let layer_hashes =
-      solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-        ~os_key ?remote names
-    in
-    (* Assemble into _oi/prefix/ *)
-    let oi_dir = cwd / "_oi" in
-    let prefix = oi_dir / "prefix" in
-    Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix);
-    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / oi_dir);
-    let all_hashes = layer_hashes in
-    let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
-    D10.Prefix.assemble d10 ~layer_hashes:all_hashes ~dst:Eio.Path.(fs / prefix);
-    (* Write .envrc with direnv stdlib calls *)
-    let root_envrc = cwd / ".envrc" in
-    let envrc_path = Eio.Path.(fs / root_envrc) in
-    let dune_cache_root = Oi.Cache.dune_root cache in
-    let envrc = Oi.Prefix.envrc_content ~prefix ~dune_cache_root in
-    (try Eio.Path.unlink envrc_path with Eio.Exn.Io _ -> ());
-    Eio.Path.save ~create:(`Exclusive 0o644) envrc_path envrc;
-    Fmt.pr "Wrote .envrc (run 'direnv allow' to activate)@.";
-    Fmt.pr "Prefix assembled at %s (%d packages)@." prefix
-      (List.length layer_hashes)
+    ignore
+      (do_sync ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir
+         ~registry ~cwd ())
   in
   let info =
     Cmd.info "sync"
@@ -878,6 +910,66 @@ let sync_cmd =
   in
   Cmd.v info
     Term.(const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term)
+
+(* -- exec ---------------------------------------------------------------- *)
+
+let exec_cmd =
+  let run () data_dir cache_dir registry cmd args =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
+    let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
+    let prefix = cwd / "_oi" / "prefix" in
+    if needs_sync ~cwd ~prefix then begin
+      Logs.info (fun m -> m "Syncing %s before exec" cwd);
+      ignore
+        (do_sync ~quiet:true ~proc_mgr ~fs ~clock ~sys ~platform ~os_key
+           ~cache ~data_dir ~registry ~cwd ())
+    end;
+    let env_arr =
+      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+    in
+    exit (run_exec proc_mgr ~env:env_arr (cmd :: args))
+  in
+  let cmd =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"CMD" ~doc:"Command to execute" [])
+  in
+  let args =
+    Arg.(
+      value & pos_right 0 string []
+      & info ~docv:"ARG" ~doc:"Arguments passed to CMD" [])
+  in
+  let info =
+    Cmd.info "exec"
+      ~doc:"Run a command in the project's _oi/prefix/ environment"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Runs $(b,CMD) with PATH, OCAMLLIB, and related variables set so \
+             that the toolchain assembled under $(b,_oi/prefix/) is picked \
+             up — identical to sourcing the $(b,.envrc) written by $(b,oi \
+             sync).";
+          `P
+            "Auto-syncs when $(b,_oi/prefix/) is missing or when any \
+             $(b,*.opam) in the current directory is newer than the prefix, \
+             so $(b,oi exec) works without a separate $(b,oi sync) step.";
+          `P "Examples:";
+          `Pre
+            "  oi exec dune build\n\
+            \  oi exec -- ocamlformat --check .\n\
+            \  oi exec utop";
+        ]
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term
+      $ cmd $ args)
 
 (* -- config -------------------------------------------------------------- *)
 
@@ -1535,6 +1627,7 @@ let () =
     Cmd.group info
       [
         run_cmd;
+        exec_cmd;
         which_cmd;
         plan_cmd;
         sync_cmd;
