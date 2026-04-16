@@ -47,6 +47,19 @@ let resolve_in_path ~env exe =
         in
         Stdlib.Option.value ~default:exe found
 
+let find_in_path ~env exe =
+  let s = resolve_in_path ~env exe in
+  if s = exe && not (String.contains exe '/') then None else Some s
+
+(* Many opam patches use GNU-patch features (e.g. unified context,
+   `diff -ruN` of empty files) that BSD /usr/bin/patch on macOS rejects.
+   If `gpatch` is on PATH (from Homebrew's gpatch / coreutils) we prefer
+   it; otherwise fall back to `patch` and hope for the best. *)
+let patch_cmd =
+  lazy
+    (let env = Unix.environment () in
+     match find_in_path ~env "gpatch" with Some p -> p | None -> "patch")
+
 let run_cmd ~proc_mgr ~fs ~env ~cwd ~pkg cmd =
   let cmd_s = String.concat " " cmd in
   Log.debug (fun m -> m "  + %s" cmd_s);
@@ -142,7 +155,7 @@ let apply_patches ~proc_mgr ~fs (p : Plan.package_plan) =
       if Sys.file_exists patch_file then
         run_cmd ~proc_mgr ~fs ~env:(Unix.environment ()) ~cwd:p.build_dir
           ~pkg:p.pkg
-          [ "patch"; "-p1"; "-i"; patch_file ])
+          [ Lazy.force patch_cmd; "-p1"; "-i"; patch_file ])
     p.patches
 
 let apply_substs (p : Plan.package_plan) =
