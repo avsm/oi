@@ -50,7 +50,6 @@ type t = {
 val create :
   Opam_ctx.t ->
   cache_root:string ->
-  packages_dirs:string list ->
   os_key:string ->
   ocaml_version:string ->
   Action.t ->

@@ -35,3 +35,13 @@ val dep_names :
 val load_opam : string list -> OpamPackage.t -> OpamFile.OPAM.t option
 (** [load_opam packages_dirs pkg] searches [packages_dirs] in order for the opam
     file of [pkg]. *)
+
+val topo_sort :
+  packages_dirs:string list ->
+  Opam_ctx.t ->
+  OpamPackage.t list ->
+  OpamPackage.t list
+(** [topo_sort ~packages_dirs ctx pkgs] returns [pkgs] in topological order
+    (dependencies before dependents). Safe to call on the union of several
+    solver results — the relative order already produced by the solver is not
+    required. *)

@@ -27,15 +27,9 @@ let pp fmt = function
       Fmt.pf fmt "%a fetch %s: %s" Fmt.(styled `Red string) "error:" url msg
   | Msg s -> Fmt.pf fmt "%a %s" Fmt.(styled `Red string) "error:" s
 
-exception Build_error of { pkg : string; cmd : string; output : string }
-
 let () =
   Printexc.register_printer (function
     | E e -> Some (Fmt.str "%a" pp e)
-    | Build_error { pkg; cmd; output } ->
-        Some
-          (Fmt.str "@[<v>Package %s failed:@,  command: %s@,@,%s@]" pkg cmd
-             output)
     | _ -> None)
 
 let not_found target fmt =
@@ -44,3 +38,4 @@ let not_found target fmt =
 let msg fmt = Fmt.kstr (fun s -> raise (Msg s)) fmt
 let no_solution diagnostic = raise (No_solution { msg = diagnostic })
 let config_error fmt = Fmt.kstr (fun msg -> raise (Config_error { msg })) fmt
+let build_failed ~pkg ~cmd ~output = raise (Build_failed { pkg; cmd; output })

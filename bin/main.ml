@@ -125,29 +125,21 @@ let run_exec proc_mgr ~env cmd =
   match Eio.Process.await child with `Exited n -> n | `Signaled n -> 128 + n
 
 (* Wrap command body to catch structured errors *)
+let pp_one_exn fmt = function
+  | Oi.Error.E e -> Oi.Error.pp fmt e
+  | Failure msg -> Fmt.pf fmt "%a %s" Fmt.(styled `Red string) "error:" msg
+  | e ->
+      Fmt.pf fmt "%a %s"
+        Fmt.(styled `Red string)
+        "error:" (Printexc.to_string e)
+
 let with_error_handling f =
   try f () with
-  | Oi.Error.E e ->
-      Fmt.epr "%a@." Oi.Error.pp e;
-      exit 1
-  | Failure msg ->
-      Fmt.epr "%a %s@." Fmt.(styled `Red string) "error:" msg;
-      exit 1
-  | Oi.Error.Build_error { pkg; cmd; output } ->
-      Fmt.epr "%a@." Oi.Error.pp (Build_failed { pkg; cmd; output });
+  | (Oi.Error.E _ | Failure _) as exn ->
+      Fmt.epr "%a@." pp_one_exn exn;
       exit 1
   | Eio.Exn.Multiple exns ->
-      List.iter
-        (fun (e, _bt) ->
-          match e with
-          | Oi.Error.Build_error { pkg; cmd; output } ->
-              Fmt.epr "%a@." Oi.Error.pp (Build_failed { pkg; cmd; output })
-          | Oi.Error.E e -> Fmt.epr "%a@." Oi.Error.pp e
-          | e ->
-              Fmt.epr "%a %s@."
-                Fmt.(styled `Red string)
-                "error:" (Printexc.to_string e))
-        exns;
+      List.iter (fun (e, _bt) -> Fmt.epr "%a@." pp_one_exn e) exns;
       exit 1
 
 let get_packages_dirs ~data_dir =
@@ -158,6 +150,25 @@ let get_packages_dirs ~data_dir =
 
 let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
   { sys; fs; clock; root = Oi.Cache.root cache; os_key }
+
+(* Standard per-command bootstrap. Returns the fields most commands derive
+   from the Eio environment, plus the configured cache. *)
+let bootstrap env cache_dir =
+  let proc_mgr = Eio.Stdenv.process_mgr env in
+  let fs = Eio.Stdenv.fs env in
+  let clock = Eio.Stdenv.clock env in
+  let sys = D10.Sysops.create ~proc_mgr ~fs in
+  let platform = Osrel.detect ~proc_mgr ~fs in
+  let os_key = D10.Os_key.(to_string (of_platform platform)) in
+  let cache = Oi.Cache.create ~root:cache_dir fs in
+  (proc_mgr, fs, clock, sys, platform, os_key, cache)
+
+(* Does the Eio path exist? Follows symlinks. *)
+let path_exists fs path =
+  try
+    ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / path));
+    true
+  with Eio.Exn.Io _ -> false
 
 (* -- Remote registry helpers ---------------------------------------------- *)
 
@@ -172,8 +183,7 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
         List.filter_map
           (fun (node : Oi.Action.node) ->
             match node.method_ with
-            | Oi.Action.Source { is_virtual = false } ->
-                Some (Oi.Action.node_hash ~packages_dirs build_plan node)
+            | Oi.Action.Source { is_virtual = false } -> Some node.layer_hash
             | _ -> None)
           (Oi.Action.nodes build_plan)
       in
@@ -249,18 +259,18 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
           fun h -> Hashtbl.mem idx h
       | None -> fun _ -> false
     in
-    Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has ~packages_dirs) build_plan;
+    Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has) build_plan;
     exit 0
   end;
   let build_plan =
     fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan
   in
-  let hashes = Oi.Action.layer_hashes ~packages_dirs build_plan in
+  let hashes = Oi.Action.layer_hashes build_plan in
   (* Check if the requested packages' layers are cached *)
   let targets_cached =
     List.for_all
       (fun name ->
-        match Oi.Action.layer_hash_for ~packages_dirs build_plan name with
+        match Oi.Action.layer_hash_for build_plan name with
         | Some h -> D10.Layer.succeeded d10 ~hash:h
         | None -> true)
       names
@@ -271,7 +281,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   end
   else begin
     let exec_plan =
-      Oi.Plan.create ctx ~cache_root ~packages_dirs ~os_key
+      Oi.Plan.create ctx ~cache_root ~os_key
         ~ocaml_version:conf.ocaml_version build_plan
     in
     Oi.Execute.run ~proc_mgr ~fs
@@ -307,13 +317,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
   let run_dir = Oi.Cache.run_dir cache ~hash:script_hash in
   let run_dir_s = Eio.Path.native_exn run_dir in
   let cached_bin = run_dir_s / "main.exe" in
-  let cached_exists =
-    try
-      ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / cached_bin));
-      true
-    with Eio.Exn.Io _ -> false
-  in
-  if cached_exists then
+  if path_exists fs cached_bin then
     exit
       (run_exec proc_mgr
          ~env:
@@ -344,7 +348,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
-        Oi.Plan.create ctx ~cache_root ~packages_dirs ~os_key
+        Oi.Plan.create ctx ~cache_root ~os_key
           ~ocaml_version:conf.ocaml_version plan
       in
       Oi.Execute.run ~proc_mgr ~fs
@@ -360,25 +364,13 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
     Eio.Process.run proc_mgr ~env:build_env
       [ "/bin/sh"; "-c"; Fmt.str "cd %s && dune build main.exe 2>&1" build_dir ];
     let built = build_dir / "_build" / "default" / "main.exe" in
-    let built_exists =
-      try
-        ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / built));
-        true
-      with Eio.Exn.Io _ -> false
-    in
-    if built_exists then begin
+    if path_exists fs built then begin
       let content = Eio.Path.load Eio.Path.(fs / built) in
       Eio.Path.save ~create:(`Or_truncate 0o755)
         Eio.Path.(fs / cached_bin)
         content
     end;
-    let cached_now =
-      try
-        ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / cached_bin));
-        true
-      with Eio.Exn.Io _ -> false
-    in
-    let exe = if cached_now then cached_bin else built in
+    let exe = if path_exists fs cached_bin then cached_bin else built in
     exit (run_exec proc_mgr ~env:build_env (exe :: args))
   end
 
@@ -387,13 +379,9 @@ let run_cmd =
       args =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     init_opam_root ~fs ~data_dir;
     Oi.Repo.ensure ~data_dir;
     let conf = make_conf ~platform in
@@ -418,13 +406,7 @@ let run_cmd =
 
       let bin = prefix / "bin" / target in
       Logs.info (fun m -> m "Looking for binary: %s" bin);
-      let bin_exists =
-        try
-          ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / bin));
-          true
-        with Eio.Exn.Io _ -> false
-      in
-      if bin_exists then begin
+      if path_exists fs bin then begin
         Logs.info (fun m -> m "Found binary, executing");
         exit
           (run_exec proc_mgr
@@ -447,9 +429,8 @@ let run_cmd =
     (* Only .ml files are treated as scripts *)
     let cwd = Eio.Stdenv.cwd env in
     if Filename.check_suffix target ".ml" then begin
-      (try ignore (Eio.Path.stat ~follow:true Eio.Path.(cwd / target))
-       with Eio.Exn.Io _ ->
-         Oi.Error.not_found target "file not found: %s" target);
+      if not (path_exists cwd target) then
+        Oi.Error.not_found target "file not found: %s" target;
       (* For scripts, solve deps first to get a prefix with the compiler *)
       let all_script_deps =
         Oi.Script.parse_deps_from_file target @ extra_deps
@@ -661,13 +642,9 @@ let plan_cmd =
   let run () data_dir cache_dir targets with_repos =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let _proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     init_opam_root ~fs ~data_dir;
     Oi.Repo.ensure ~data_dir;
     let conf = make_conf ~platform in
@@ -685,14 +662,12 @@ let plan_cmd =
       | Error msg -> Oi.Error.no_solution msg
     in
     let d10 =
-      make_d10 ~sys ~fs
-        ~clock:(Eio.Stdenv.clock env :> D10.Config.clk)
-        ~cache ~os_key
+      make_d10 ~sys ~fs ~clock:(clock :> D10.Config.clk) ~cache ~os_key
     in
     let action_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
     let plan =
-      Oi.Plan.create ctx ~cache_root:(Oi.Cache.root_s cache) ~packages_dirs
-        ~os_key ~ocaml_version:conf.ocaml_version action_plan
+      Oi.Plan.create ctx ~cache_root:(Oi.Cache.root_s cache) ~os_key
+        ~ocaml_version:conf.ocaml_version action_plan
     in
     Fmt.pr "%a@." Oi.Plan.pp plan
   in
@@ -720,25 +695,15 @@ let env_cmd =
   let run () data_dir cache_dir =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     let dune_cache_root = Oi.Cache.dune_root cache in
     (* Detect _oi/ project directory *)
     let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
     let oi_prefix = cwd / "_oi" / "prefix" in
-    let has_oi_prefix =
-      try
-        ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / oi_prefix));
-        true
-      with Eio.Exn.Io _ -> false
-    in
     let prefix =
-      if has_oi_prefix then oi_prefix
+      if path_exists fs oi_prefix then oi_prefix
       else begin
         (* Fall back to a minimal compiler-only prefix *)
         init_opam_root ~fs ~data_dir;
@@ -812,18 +777,11 @@ let which_cmd =
   let run () cache_dir registry pattern =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
-    let index_path =
-      ensure_local_index ~sys ~fs
-        ~clock:(Eio.Stdenv.clock env :> D10.Config.clk)
-        ~cache ~os_key
+    let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
+      bootstrap env cache_dir
     in
+    let clk = (clock :> D10.Config.clk) in
+    let index_path = ensure_local_index ~sys ~fs ~clock:clk ~cache ~os_key in
     (* Merge remote index *)
     (match ensure_remote_index ~sys ~fs ~cache ~os_key ~registry with
     | Some remote_path -> merge_remote_into_local ~index_path ~remote_path
@@ -835,13 +793,7 @@ let which_cmd =
     else begin
       (* Determine which hashes are available locally *)
       let d10 : D10.Config.t =
-        {
-          sys;
-          fs;
-          clock = (Eio.Stdenv.clock env :> D10.Config.clk);
-          root = Oi.Cache.root cache;
-          os_key;
-        }
+        { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
       in
       List.iter
         (fun (binary, pkg_name, pkg_ver, hash) ->
@@ -874,13 +826,9 @@ let sync_cmd =
   let run () data_dir cache_dir registry =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     init_opam_root ~fs ~data_dir;
     Oi.Repo.ensure ~data_dir;
     let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
@@ -927,12 +875,9 @@ let sync_cmd =
 let config_cmd =
   let run () cache_dir data_dir =
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
+    let _proc_mgr, fs, _clock, sys, _platform, os_key, _cache =
+      bootstrap env cache_dir
+    in
     Fmt.pr "@[<v>%a@," Fmt.(styled `Bold string) "Platform";
     Fmt.pr "  os-key:     %s@," os_key;
     Fmt.pr "  ocaml:      %s (relocatable)@," ocaml_version;
@@ -977,11 +922,9 @@ let clean_cmd =
   let run () cache_dir data_dir all toolchains sources binaries dune_cache repos
       dry_run =
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let _proc_mgr, fs, _clock, sys, _platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
     let clean_any =
       all || toolchains || sources || binaries || dune_cache || repos
     in
@@ -1075,12 +1018,9 @@ let clean_cmd =
 let registry_show_cmd =
   let run () cache_dir _data_dir target =
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
+    let _proc_mgr, fs, _clock, sys, _platform, os_key, _cache =
+      bootstrap env cache_dir
+    in
     let layers_dir = cache_dir / "layers" / os_key in
     match target with
     | None ->
@@ -1223,10 +1163,9 @@ let registry_show_cmd =
 let registry_index_cmd =
   let run () cache_dir =
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    let _proc_mgr, fs, clock, sys, _platform, _os_key, _cache =
+      bootstrap env cache_dir
+    in
     let layers_root = cache_dir / "layers" in
     let total_layers = ref 0 in
     let total_bins = ref 0 in
@@ -1269,13 +1208,9 @@ let registry_export_cmd =
   let run () cache_dir output =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
     let dst = Eio.Path.(fs / output) in
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
@@ -1312,104 +1247,20 @@ let registry_export_cmd =
   Cmd.v info Term.(const run $ log_term $ cache_dir_term $ output)
 
 let registry_build_cmd =
-  (* Topological sort of a merged package list using Kahn's algorithm.
-     Each solution from the solver is already topo-sorted, but the union
-     of multiple solutions needs re-sorting. *)
-  let topo_sort ctx ~packages_dirs pkgs =
-    let module N = OpamPackage.Name in
-    let in_solution =
-      List.fold_left
-        (fun s p -> N.Set.add (OpamPackage.name p) s)
-        N.Set.empty pkgs
-    in
-    let pkg_by_name =
-      List.fold_left
-        (fun m p -> N.Map.add (OpamPackage.name p) p m)
-        N.Map.empty pkgs
-    in
-    let rdeps : (N.t, N.t list) Hashtbl.t = Hashtbl.create 256 in
-    let in_deg : (N.t, int) Hashtbl.t = Hashtbl.create 256 in
-    List.iter
-      (fun pkg ->
-        let name = OpamPackage.name pkg in
-        if not (Hashtbl.mem in_deg name) then Hashtbl.replace in_deg name 0;
-        let deps =
-          Oi.Solve.dep_names ~packages_dirs ctx pkg in_solution
-          |> N.Set.elements
-          |> List.filter (fun n -> N.Set.mem n in_solution)
-        in
-        Hashtbl.replace in_deg name (List.length deps);
-        List.iter
-          (fun dep ->
-            let cur = try Hashtbl.find rdeps dep with Not_found -> [] in
-            Hashtbl.replace rdeps dep (name :: cur))
-          deps)
-      pkgs;
-    let queue = Queue.create () in
-    Hashtbl.iter (fun n d -> if d = 0 then Queue.add n queue) in_deg;
-    let result = ref [] in
-    while not (Queue.is_empty queue) do
-      let name = Queue.pop queue in
-      result := name :: !result;
-      List.iter
-        (fun dep ->
-          let d = Hashtbl.find in_deg dep - 1 in
-          Hashtbl.replace in_deg dep d;
-          if d = 0 then Queue.add dep queue)
-        (try Hashtbl.find rdeps name with Not_found -> [])
-    done;
-    List.filter_map (fun n -> N.Map.find_opt n pkg_by_name) (List.rev !result)
-  in
   (* Group solutions by layer-hash compatibility. Two solutions are compatible
      if every package name appearing in both has the same layer hash — this
      catches version differences AND different dep contexts (e.g. depopts). *)
   let group_solutions ctx ~packages_dirs solutions =
-    (* Compute per-package layer hashes for a solution using the same
-       recursive algorithm as Action.plan. *)
+    (* Per-package layer hashes, keyed by package name as a string. *)
     let hash_map_of pkgs =
-      let in_solution =
-        List.fold_left
-          (fun s p -> OpamPackage.Name.Set.add (OpamPackage.name p) s)
-          OpamPackage.Name.Set.empty pkgs
-      in
-      let pkg_by_name =
-        List.fold_left
-          (fun m p -> OpamPackage.Name.Map.add (OpamPackage.name p) p m)
-          OpamPackage.Name.Map.empty pkgs
-      in
-      (* Compute transitive deps for each package in topo order *)
-      let trans_deps : (OpamPackage.Name.t, OpamPackage.Name.Set.t) Hashtbl.t =
-        Hashtbl.create 64
-      in
       let m = Hashtbl.create 64 in
+      let plan = Oi.Action.plan ctx ~packages_dirs pkgs in
       List.iter
-        (fun pkg ->
-          let name = OpamPackage.name pkg in
-          let name_s = OpamPackage.Name.to_string name in
-          let deps =
-            Oi.Solve.dep_names ~packages_dirs ctx pkg in_solution
-            |> OpamPackage.Name.Set.elements
-            |> List.filter (fun n -> OpamPackage.Name.Set.mem n in_solution)
-          in
-          let trans =
-            List.fold_left
-              (fun acc dep_name ->
-                let acc = OpamPackage.Name.Set.add dep_name acc in
-                match Hashtbl.find_opt trans_deps dep_name with
-                | Some s -> OpamPackage.Name.Set.union acc s
-                | None -> acc)
-              OpamPackage.Name.Set.empty deps
-          in
-          Hashtbl.replace trans_deps name trans;
-          let all_dep_pkgs =
-            OpamPackage.Name.Set.elements trans
-            |> List.filter_map (fun n ->
-                OpamPackage.Name.Map.find_opt n pkg_by_name
-                |> Option.map (fun p -> p))
-          in
-          let h = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
-          Hashtbl.replace m name_s h)
-        pkgs;
+        (fun (node : Oi.Action.node) ->
+          Hashtbl.replace m
+            (OpamPackage.Name.to_string (OpamPackage.name node.pkg))
+            node.layer_hash)
+        (Oi.Action.nodes plan);
       m
     in
     let compatible hmap group_hmap =
@@ -1448,13 +1299,9 @@ let registry_build_cmd =
   let run () data_dir cache_dir dry_run registry with_repos targets =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let platform = Osrel.detect ~proc_mgr ~fs in
-    let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
     init_opam_root ~fs ~data_dir;
     Oi.Repo.ensure ~data_dir;
     let conf = make_conf ~platform in
@@ -1520,7 +1367,9 @@ let registry_build_cmd =
         let group_ctx =
           Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf
         in
-        let sorted_pkgs = topo_sort group_ctx ~packages_dirs merged_pkgs in
+        let sorted_pkgs =
+          Oi.Solve.topo_sort ~packages_dirs group_ctx merged_pkgs
+        in
         if n_groups > 1 then
           Fmt.pr "Group %d/%d [%s]: %d packages@." (gi + 1) n_groups
             group_targets (List.length sorted_pkgs)
@@ -1545,9 +1394,7 @@ let registry_build_cmd =
                 fun h -> Hashtbl.mem idx h
             | None -> fun _ -> false
           in
-          Fmt.pr "%a@."
-            (Oi.Action.pp_tree ~remote_has ~packages_dirs)
-            build_plan
+          Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has) build_plan
         end
         else begin
           Fmt.pr "%d to build, %d cached@." n_source
@@ -1559,7 +1406,7 @@ let registry_build_cmd =
             in
             try
               let exec_plan =
-                Oi.Plan.create group_ctx ~cache_root ~packages_dirs ~os_key
+                Oi.Plan.create group_ctx ~cache_root ~os_key
                   ~ocaml_version:conf.ocaml_version build_plan
               in
               Oi.Execute.run ~proc_mgr ~fs

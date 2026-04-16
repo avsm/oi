@@ -6,19 +6,26 @@ let log_src = Logs.Src.create "oi.action"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
-type method_ = Source of { is_virtual : bool } | Binary of string
+type method_ = Source of { is_virtual : bool } | Binary
 
 type node = {
   pkg : OpamPackage.t;
   opam : OpamFile.OPAM.t;
   method_ : method_;
   deps : OpamPackage.Name.t list;
+  layer_hash : string;
 }
 
 type t = {
   nodes_by_name : node OpamPackage.Name.Map.t;
   topo_order : OpamPackage.Name.t list;
 }
+
+let is_virtual opam =
+  OpamFile.OPAM.build opam = []
+  && OpamFile.OPAM.install opam = []
+  && OpamFile.OPAM.url opam = None
+  && OpamFile.OPAM.extra_sources opam = []
 
 let plan ctx ?d10 ~packages_dirs pkgs =
   let in_solution =
@@ -46,7 +53,6 @@ let plan ctx ?d10 ~packages_dirs pkgs =
           | Some o -> o
           | None -> OpamFile.OPAM.create pkg
         in
-        (* Compute transitive closure: direct deps + their transitive deps *)
         let trans =
           List.fold_left
             (fun acc dep_name ->
@@ -57,7 +63,6 @@ let plan ctx ?d10 ~packages_dirs pkgs =
             OpamPackage.Name.Set.empty deps
         in
         Hashtbl.replace transitive_deps name trans;
-        (* Hash includes pkg + all transitive deps *)
         let all_dep_pkgs =
           OpamPackage.Name.Set.elements trans
           |> List.filter_map (fun n ->
@@ -67,31 +72,14 @@ let plan ctx ?d10 ~packages_dirs pkgs =
         let layer_hash = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
         let method_ =
           match d10 with
-          | Some d10 ->
-              if D10.Layer.succeeded d10 ~hash:layer_hash then Binary layer_hash
-              else begin
-                let is_virtual =
-                  OpamFile.OPAM.build opam = []
-                  && OpamFile.OPAM.install opam = []
-                  && OpamFile.OPAM.url opam = None
-                  && OpamFile.OPAM.extra_sources opam = []
-                in
-                Source { is_virtual }
-              end
-          | None ->
-              let is_virtual =
-                OpamFile.OPAM.build opam = []
-                && OpamFile.OPAM.install opam = []
-                && OpamFile.OPAM.url opam = None
-                && OpamFile.OPAM.extra_sources opam = []
-              in
-              Source { is_virtual }
+          | Some d10 when D10.Layer.succeeded d10 ~hash:layer_hash -> Binary
+          | _ -> Source { is_virtual = is_virtual opam }
         in
         Log.debug (fun m ->
             m "Plan %s: deps=[%s]"
               (OpamPackage.to_string pkg)
               (String.concat ", " (List.map OpamPackage.Name.to_string deps)));
-        let node = { pkg; opam; method_; deps } in
+        let node = { pkg; opam; method_; deps; layer_hash } in
         let installed = OpamPackage.Name.Set.add name installed in
         (installed, OpamPackage.Name.Map.add name node nodes, order @ [ name ]))
       (OpamPackage.Name.Set.empty, OpamPackage.Name.Map.empty, [])
@@ -155,44 +143,14 @@ let dep_pkgs_of t node =
       |> Stdlib.Option.map (fun n -> n.pkg))
     node.deps
 
-(* Compute the layer hash for a node, including its full transitive deps.
-   Must match the hash computed during [plan]. *)
-let node_hash ~packages_dirs t node =
-  (* Collect transitive closure of deps *)
-  let visited = Hashtbl.create 64 in
-  let rec collect n =
-    let name = OpamPackage.name n.pkg in
-    if not (Hashtbl.mem visited name) then begin
-      Hashtbl.replace visited name n.pkg;
-      List.iter
-        (fun dep_name ->
-          match OpamPackage.Name.Map.find_opt dep_name t.nodes_by_name with
-          | Some dep_node -> collect dep_node
-          | None -> ())
-        n.deps
-    end
-  in
-  List.iter
-    (fun dep_name ->
-      match OpamPackage.Name.Map.find_opt dep_name t.nodes_by_name with
-      | Some dep_node -> collect dep_node
-      | None -> ())
-    node.deps;
-  let all_dep_pkgs =
-    Hashtbl.fold (fun name pkg acc -> (name, pkg) :: acc) visited []
-    |> List.sort (fun (a, _) (b, _) -> OpamPackage.Name.compare a b)
-    |> List.map snd
-  in
-  D10.Layer.hash ~packages_dirs (node.pkg :: all_dep_pkgs)
-
 let pp_method_short ~remote_has fmt = function
-  | Binary _ -> Fmt.pf fmt "%a" Fmt.(styled `Green string) "binary"
+  | Binary -> Fmt.pf fmt "%a" Fmt.(styled `Green string) "binary"
   | Source { is_virtual } ->
       if is_virtual then Fmt.pf fmt "%a" Fmt.(styled `Faint string) "virtual"
       else if remote_has then Fmt.pf fmt "%a" Fmt.(styled `Cyan string) "remote"
       else Fmt.pf fmt "%a" Fmt.(styled `Blue string) "source"
 
-let pp_tree ?(remote_has = fun _ -> false) ~packages_dirs fmt t =
+let pp_tree ?(remote_has = fun _ -> false) fmt t =
   let groups = parallel_groups t in
   let n_groups = List.length groups in
   Fmt.pf fmt "@[<v>";
@@ -211,11 +169,10 @@ let pp_tree ?(remote_has = fun _ -> false) ~packages_dirs fmt t =
           let node = find t name in
           let pkg_s = OpamPackage.to_string node.pkg in
           let b = if i = n - 1 then "└── " else "├── " in
-          let hash = node_hash ~packages_dirs t node in
           Fmt.pf fmt "%s%s%a %a@," cont b
             Fmt.(styled `Bold string)
             pkg_s
-            (pp_method_short ~remote_has:(remote_has hash))
+            (pp_method_short ~remote_has:(remote_has node.layer_hash))
             node.method_)
         names)
     groups;
@@ -223,13 +180,8 @@ let pp_tree ?(remote_has = fun _ -> false) ~packages_dirs fmt t =
 
 (* -- Layer hashing ------------------------------------------------------- *)
 
-let layer_hash_for ~packages_dirs t name =
+let layer_hash_for t name =
   OpamPackage.Name.Map.find_opt name t.nodes_by_name
-  |> Stdlib.Option.map (node_hash ~packages_dirs t)
+  |> Stdlib.Option.map (fun n -> n.layer_hash)
 
-let layer_hashes ~packages_dirs t =
-  List.filter_map
-    (fun name ->
-      OpamPackage.Name.Map.find_opt name t.nodes_by_name
-      |> Stdlib.Option.map (node_hash ~packages_dirs t))
-    t.topo_order
+let layer_hashes t = List.map (fun name -> (find t name).layer_hash) t.topo_order

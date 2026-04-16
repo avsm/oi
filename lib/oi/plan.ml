@@ -35,19 +35,7 @@ type t = {
   total_packages : int;
 }
 
-let resolve_plan ctx ~cache_root ~packages_dirs ~os_key:_ action_plan =
-  (* Build a map from package name to its layer hash for dep lookup *)
-  let hash_of_name = Hashtbl.create 64 in
-  List.iter
-    (fun name ->
-      match
-        OpamPackage.Name.Map.find_opt name (Action.nodes_by_name action_plan)
-      with
-      | None -> ()
-      | Some node ->
-          let h = Action.node_hash ~packages_dirs action_plan node in
-          Hashtbl.replace hash_of_name name h)
-    (Action.topo_order action_plan);
+let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
   let prefix = cache_root / "build" / "prefix" in
   let groups = Action.parallel_groups action_plan in
   (* Track which packages have been "installed" in the synthetic ctx
@@ -78,28 +66,27 @@ let resolve_plan ctx ~cache_root ~packages_dirs ~os_key:_ action_plan =
             let pkg = node.Action.pkg in
             let opam = node.Action.opam in
             let pkg_s = OpamPackage.to_string pkg in
-            let layer_hash = Action.node_hash ~packages_dirs action_plan node in
+            let layer_hash = node.Action.layer_hash in
             let method_ =
               match node.Action.method_ with
-              | Action.Binary _ -> `Binary
+              | Action.Binary -> `Binary
               | Action.Source _ -> `Source
             in
             (* Dependency layers needed for this build *)
             let dep_layers =
               List.filter_map
                 (fun dep_name ->
-                  match Hashtbl.find_opt hash_of_name dep_name with
+                  match
+                    OpamPackage.Name.Map.find_opt dep_name
+                      (Action.nodes_by_name action_plan)
+                  with
                   | None -> None
-                  | Some h ->
-                      let dep_pkg_s =
-                        match
-                          OpamPackage.Name.Map.find_opt dep_name
-                            (Action.nodes_by_name action_plan)
-                        with
-                        | Some n -> OpamPackage.to_string n.Action.pkg
-                        | None -> OpamPackage.Name.to_string dep_name
-                      in
-                      Some { pkg = dep_pkg_s; hash = h })
+                  | Some n ->
+                      Some
+                        {
+                          pkg = OpamPackage.to_string n.Action.pkg;
+                          hash = n.Action.layer_hash;
+                        })
                 node.Action.deps
             in
             let source =
@@ -173,10 +160,8 @@ let resolve_plan ctx ~cache_root ~packages_dirs ~os_key:_ action_plan =
       { stage = i + 1; packages })
     groups
 
-let create ctx ~cache_root ~packages_dirs ~os_key ~ocaml_version action_plan =
-  let groups =
-    resolve_plan ctx ~cache_root ~packages_dirs ~os_key action_plan
-  in
+let create ctx ~cache_root ~os_key ~ocaml_version action_plan =
+  let groups = resolve_plan ctx ~cache_root ~os_key action_plan in
   let total_packages =
     List.fold_left (fun acc g -> acc + List.length g.packages) 0 groups
   in

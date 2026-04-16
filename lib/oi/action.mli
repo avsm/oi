@@ -15,7 +15,7 @@
 type method_ =
   | Source of { is_virtual : bool }
       (** Build from source. Virtual packages have no build/install commands. *)
-  | Binary of string  (** Restore from cached layer at the given hash. *)
+  | Binary  (** Restore from the cached layer at [node.layer_hash]. *)
 
 type node = {
   pkg : OpamPackage.t;
@@ -23,6 +23,8 @@ type node = {
   method_ : method_;
   deps : OpamPackage.Name.t list;
       (** Direct dependencies within the plan (determines execution order). *)
+  layer_hash : string;
+      (** Content hash of the package plus its transitive in-plan deps. *)
 }
 (** A single package action in the plan. *)
 
@@ -59,26 +61,23 @@ val total : t -> int
 
 val find : t -> OpamPackage.Name.t -> node
 val dep_pkgs_of : t -> node -> OpamPackage.t list
-val node_hash : packages_dirs:string list -> t -> node -> string
 val nodes_by_name : t -> node OpamPackage.Name.Map.t
 val topo_order : t -> OpamPackage.Name.t list
 val parallel_groups : t -> OpamPackage.Name.t list list
 
 (** {1 Layer hashes} *)
 
-val layer_hash_for :
-  packages_dirs:string list -> t -> OpamPackage.Name.t -> string option
-(** [layer_hash_for ~packages_dirs t name] returns the layer hash for a specific
-    package, or [None] if the package is not in the plan. *)
+val layer_hash_for : t -> OpamPackage.Name.t -> string option
+(** [layer_hash_for t name] returns the layer hash for a specific package, or
+    [None] if the package is not in the plan. *)
 
-val layer_hashes : packages_dirs:string list -> t -> string list
-(** [layer_hashes ~packages_dirs t] returns the layer hash for each package in
-    the plan, in topological order. Used for prefix assembly. *)
+val layer_hashes : t -> string list
+(** [layer_hashes t] returns the layer hash for each package in the plan, in
+    topological order. Used for prefix assembly. *)
 
 (** {1 Dry-run output} *)
 
-val pp_tree :
-  ?remote_has:(string -> bool) -> packages_dirs:string list -> t Fmt.t
-(** [pp_tree ?remote_has ~packages_dirs] renders the action graph as a
-    dependency tree. [Source] packages whose layer hash satisfies [remote_has]
-    are shown as "remote" (cyan) instead of "source" (blue). *)
+val pp_tree : ?remote_has:(string -> bool) -> t Fmt.t
+(** [pp_tree ?remote_has] renders the action graph as a dependency tree.
+    [Source] packages whose layer hash satisfies [remote_has] are shown as
+    "remote" (cyan) instead of "source" (blue). *)

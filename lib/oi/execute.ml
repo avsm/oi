@@ -80,21 +80,11 @@ let run_cmd ~proc_mgr ~fs ~env ~cwd ~pkg cmd =
   match Eio.Process.await child with
   | `Exited 0 -> ()
   | `Exited n ->
-      raise
-        (Error.Build_error
-           {
-             pkg;
-             cmd = cmd_s;
-             output = Fmt.str "exited with code %d\n\n%s" n output;
-           })
+      Error.build_failed ~pkg ~cmd:cmd_s
+        ~output:(Fmt.str "exited with code %d\n\n%s" n output)
   | `Signaled n ->
-      raise
-        (Error.Build_error
-           {
-             pkg;
-             cmd = cmd_s;
-             output = Fmt.str "killed by signal %d\n\n%s" n output;
-           })
+      Error.build_failed ~pkg ~cmd:cmd_s
+        ~output:(Fmt.str "killed by signal %d\n\n%s" n output)
 
 (* -- Fetching ------------------------------------------------------------- *)
 
@@ -283,7 +273,7 @@ let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
             (fun (pkg, exn) ->
               Progress.interject_with (fun () ->
                   match exn with
-                  | Error.Build_error { pkg = p; cmd; output } ->
+                  | Error.E (Build_failed { pkg = p; cmd; output }) ->
                       Fmt.epr
                         "@.@[<v>\x1b[1;31mFAIL\x1b[0m %s@,command: %s@,@,%s@]@."
                         p cmd output

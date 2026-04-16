@@ -17,10 +17,6 @@ type t =
 exception E of t
 (** The single exception used for all user-facing errors. *)
 
-exception Build_error of { pkg : string; cmd : string; output : string }
-(** Raised when a build or install command fails. Caught by the executor for
-    per-package error reporting, and by main.ml for top-level display. *)
-
 val raise : t -> 'a
 (** [raise e] raises {!E}[ e]. *)
 
@@ -38,3 +34,6 @@ val no_solution : string -> 'a
 
 val config_error : ('a, Format.formatter, unit, 'b) format4 -> 'a
 (** [config_error fmt ...] raises a Config_error. *)
+
+val build_failed : pkg:string -> cmd:string -> output:string -> 'a
+(** [build_failed ~pkg ~cmd ~output] raises a Build_failed error. *)
