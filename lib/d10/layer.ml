@@ -136,32 +136,27 @@ let parse_index contents =
   let idx = Hashtbl.create 64 in
   String.split_on_char '\n' contents
   |> List.iter (fun line ->
-         let parts =
-           String.split_on_char ' ' line
-           |> List.filter (fun s -> s <> "")
-         in
-         match parts with
-         | [ sha; filename; size_s ] | [ sha; filename; size_s; _ ] ->
-             if Filename.check_suffix filename ".tar.zst" then begin
-               let hash = Filename.chop_suffix filename ".tar.zst" in
-               let size =
-                 try Int64.of_string size_s with Failure _ -> 0L
-               in
-               Hashtbl.replace idx hash { sha256 = sha; size }
-             end
-         | [ sha; filename ] ->
-             if Filename.check_suffix filename ".tar.zst" then begin
-               let hash = Filename.chop_suffix filename ".tar.zst" in
-               Hashtbl.replace idx hash { sha256 = sha; size = 0L }
-             end
-         | _ -> ());
+      let parts =
+        String.split_on_char ' ' line |> List.filter (fun s -> s <> "")
+      in
+      match parts with
+      | [ sha; filename; size_s ] | [ sha; filename; size_s; _ ] ->
+          if Filename.check_suffix filename ".tar.zst" then begin
+            let hash = Filename.chop_suffix filename ".tar.zst" in
+            let size = try Int64.of_string size_s with Failure _ -> 0L in
+            Hashtbl.replace idx hash { sha256 = sha; size }
+          end
+      | [ sha; filename ] ->
+          if Filename.check_suffix filename ".tar.zst" then begin
+            let hash = Filename.chop_suffix filename ".tar.zst" in
+            Hashtbl.replace idx hash { sha256 = sha; size = 0L }
+          end
+      | _ -> ());
   idx
 
 let write_index ~dst os_key =
   let os_dir = Eio.Path.(dst / os_key) in
-  let files =
-    try Eio.Path.read_dir os_dir with Eio.Exn.Io _ -> []
-  in
+  let files = try Eio.Path.read_dir os_dir with Eio.Exn.Io _ -> [] in
   let entries =
     List.filter_map
       (fun f ->
@@ -198,7 +193,7 @@ let fetch_remote_index (c : Config.t) ~remote =
     let contents = Eio.Path.load tmp in
     let parsed = parse_index contents in
     Hashtbl.iter (Hashtbl.replace idx) parsed;
-    (try Eio.Path.unlink tmp with _ -> ())
+    try Eio.Path.unlink tmp with _ -> ()
   end;
   idx
 
@@ -217,9 +212,7 @@ let pull_remote (c : Config.t) ~remote ~hash ?sha256 () =
     let tmp_file = Eio.Path.(os_layer_dir / (hash ^ ".tar.zst.tmp")) in
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_layer_dir;
     let ok = Sysops.Curl.fetch c.sys ~url ~dst:tmp_file in
-    let cleanup_tmp () =
-      try Eio.Path.unlink tmp_file with _ -> ()
-    in
+    let cleanup_tmp () = try Eio.Path.unlink tmp_file with _ -> () in
     if ok then begin
       (* Verify sha256 if provided *)
       let checksum_ok =
@@ -228,8 +221,7 @@ let pull_remote (c : Config.t) ~remote ~hash ?sha256 () =
         | Some expected ->
             let actual =
               OpamHash.contents
-                (OpamHash.compute ~kind:`SHA256
-                   (Eio.Path.native_exn tmp_file))
+                (OpamHash.compute ~kind:`SHA256 (Eio.Path.native_exn tmp_file))
             in
             if actual = expected then true
             else begin
@@ -242,9 +234,9 @@ let pull_remote (c : Config.t) ~remote ~hash ?sha256 () =
       if checksum_ok then begin
         Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 layer_dir;
         (try Sysops.Tar.extract c.sys ~archive:tmp_file ~dst:layer_dir ()
-         with Failure msg ->
+         with Failure msg -> (
            Logs.warn (fun m -> m "Failed to extract %s: %s" hash msg);
-           (try Eio.Path.rmtree ~missing_ok:true layer_dir with _ -> ()));
+           try Eio.Path.rmtree ~missing_ok:true layer_dir with _ -> ()));
         cleanup_tmp ();
         succeeded c ~hash
       end
@@ -261,6 +253,26 @@ let pull_remote (c : Config.t) ~remote ~hash ?sha256 () =
 
 (* -- Export -------------------------------------------------------------- *)
 
+(* Recursively list files under [root], returning paths relative to [root]. *)
+let list_files_under root =
+  let root_s = Eio.Path.native_exn root in
+  let prefix_len = String.length root_s + 1 in
+  let files = ref [] in
+  let rec scan dir =
+    if Sys.file_exists dir && Sys.is_directory dir then
+      Array.iter
+        (fun name ->
+          let path = Filename.concat dir name in
+          if Sys.is_directory path then scan path
+          else
+            files :=
+              String.sub path prefix_len (String.length path - prefix_len)
+              :: !files)
+        (Sys.readdir dir)
+  in
+  scan root_s;
+  List.sort String.compare !files
+
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
   else
@@ -270,6 +282,24 @@ let export (c : Config.t) ~hash ~dst =
     else begin
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_dir;
       Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:dst_file;
+      (* Write compressed file listing relative to fs/ *)
+      let fs_dir = fs_path c ~hash in
+      if Sysops.file_exists fs_dir then begin
+        let files = list_files_under fs_dir in
+        let content = String.concat "\n" files ^ "\n" in
+        let txt_tmp = Eio.Path.(os_dir / (hash ^ ".txt.tmp")) in
+        Eio.Path.save ~create:(`Or_truncate 0o644) txt_tmp content;
+        Sysops.Cmd.run c.sys
+          [
+            "zstd";
+            "-q";
+            "-f";
+            Eio.Path.native_exn txt_tmp;
+            "-o";
+            Eio.Path.native_exn Eio.Path.(os_dir / (hash ^ ".txt.zst"));
+          ];
+        try Eio.Path.unlink txt_tmp with _ -> ()
+      end;
       true
     end
 

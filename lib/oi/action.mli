@@ -77,6 +77,8 @@ val layer_hashes : packages_dirs:string list -> t -> string list
 
 (** {1 Dry-run output} *)
 
-val pp_tree : t Fmt.t
-(** [pp_tree] renders the action graph as a dependency tree, showing phases and
-    binary vs source method per package. *)
+val pp_tree :
+  ?remote_has:(string -> bool) -> packages_dirs:string list -> t Fmt.t
+(** [pp_tree ?remote_has ~packages_dirs] renders the action graph as a
+    dependency tree. [Source] packages whose layer hash satisfies [remote_has]
+    are shown as "remote" (cyan) instead of "source" (blue). *)

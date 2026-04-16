@@ -286,7 +286,8 @@ let compilation_env t opam =
          against a different OCaml and errors with "disagree over interface
          Misc". Pin it to our prefix. *)
       OpamTypesBase.env_update_resolved "OCAML_TOPLEVEL_PATH" Eq
-        (t.prefix / "lib" / "toplevel") ~comment:"sanitize";
+        (t.prefix / "lib" / "toplevel")
+        ~comment:"sanitize";
       OpamTypesBase.env_update_resolved "OPAM_PACKAGE_NAME" Eq
         (OpamPackage.Name.to_string (OpamFile.OPAM.name opam))
         ~comment:"build env";

@@ -118,9 +118,9 @@ val fetch_remote_index : Config.t -> remote:remote -> remote_index
 val pull_remote :
   Config.t -> remote:remote -> hash:string -> ?sha256:string -> unit -> bool
 (** [pull_remote c ~remote ?sha256 ~hash] downloads layer [hash] from [remote],
-    optionally verifying the SHA-256 checksum of the downloaded archive.
-    Returns [true] if the layer is now available with [exit_status = 0].
-    No-op (returns [true]) if the layer already exists locally. *)
+    optionally verifying the SHA-256 checksum of the downloaded archive. Returns
+    [true] if the layer is now available with [exit_status = 0]. No-op (returns
+    [true]) if the layer already exists locally. *)
 
 (** {1 Export} *)
 
@@ -131,5 +131,5 @@ val export : Config.t -> hash:string -> dst:_ Eio.Path.t -> bool
 
 val export_all : Config.t -> dst:_ Eio.Path.t -> int
 (** [export_all c ~dst] exports all succeeded layers for all os_keys to [dst].
-    Writes [OINDEX.txt] for each os_key after exporting.
-    Returns the number of newly exported layers. *)
+    Writes [OINDEX.txt] for each os_key after exporting. Returns the number of
+    newly exported layers. *)

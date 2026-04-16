@@ -224,9 +224,15 @@ let find_binary db ~binary ~os_key =
        (Fmt.str
           "SELECT l.package_name, l.package_ver, l.hash FROM layer_binaries b \
            JOIN layers l ON b.layer_hash = l.hash WHERE b.binary_name = %s AND \
-           l.os_key = %s AND l.exit_status = 0 ORDER BY l.created DESC"
+           l.os_key = %s AND l.exit_status = 0"
           (quote binary) (quote os_key)));
-  List.rev !results
+  (* Sort by opam version descending — latest version first *)
+  List.sort
+    (fun (_, v1, _) (_, v2, _) ->
+      OpamPackage.Version.compare
+        (OpamPackage.Version.of_string v2)
+        (OpamPackage.Version.of_string v1))
+    (List.rev !results)
 
 let deps db ~hash =
   let results = ref [] in
@@ -315,3 +321,25 @@ let stats db ~os_key =
        l.hash WHERE l.os_key = ?"
   in
   (n_layers, n_binaries, n_files)
+
+(* -- Remote merge --------------------------------------------------------- *)
+
+let merge_remote db ~remote_path =
+  exec db (Fmt.str "ATTACH DATABASE %s AS remote" (quote remote_path));
+  exec db
+    "CREATE TEMP TABLE _new_hashes AS SELECT hash FROM remote.layers WHERE \
+     hash NOT IN (SELECT hash FROM main.layers)";
+  exec db
+    "INSERT INTO layers SELECT * FROM remote.layers WHERE hash IN (SELECT hash \
+     FROM _new_hashes)";
+  exec db
+    "INSERT INTO layer_deps SELECT * FROM remote.layer_deps WHERE layer_hash \
+     IN (SELECT hash FROM _new_hashes)";
+  exec db
+    "INSERT INTO layer_binaries SELECT * FROM remote.layer_binaries WHERE \
+     layer_hash IN (SELECT hash FROM _new_hashes)";
+  exec db
+    "INSERT INTO layer_files SELECT * FROM remote.layer_files WHERE layer_hash \
+     IN (SELECT hash FROM _new_hashes)";
+  exec db "DROP TABLE _new_hashes";
+  exec db "DETACH DATABASE remote"

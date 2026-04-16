@@ -26,7 +26,10 @@ let path_of_env env =
     env
 
 let is_executable path =
-  try Unix.access path [ Unix.X_OK ]; true with Unix.Unix_error _ -> false
+  try
+    Unix.access path [ Unix.X_OK ];
+    true
+  with Unix.Unix_error _ -> false
 
 let resolve_in_path ~env exe =
   if String.contains exe '/' then exe
@@ -37,10 +40,10 @@ let resolve_in_path ~env exe =
         let found =
           String.split_on_char ':' path
           |> List.find_map (function
-               | "" -> None
-               | d ->
-                   let candidate = d / exe in
-                   if is_executable candidate then Some candidate else None)
+            | "" -> None
+            | d ->
+                let candidate = d / exe in
+                if is_executable candidate then Some candidate else None)
         in
         Stdlib.Option.value ~default:exe found
 
@@ -289,8 +292,7 @@ let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
           (* Phase 3: serial install for successfully built packages *)
           List.iter
             (fun (p : Plan.package_plan) ->
-              if p.method_ = `Source && not (Hashtbl.mem failed_pkgs p.pkg)
-              then begin
+              if p.method_ = `Source && not (Hashtbl.mem failed_pkgs p.pkg) then begin
                 report (0, Fmt.str "[%s] %s (install)" stage_s p.pkg);
                 let before = D10.Prefix.snapshot ~fs prefix in
                 (try
@@ -323,5 +325,4 @@ let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
             group.packages)
         plan.groups);
   let n_failed = Hashtbl.length failed_pkgs in
-  if n_failed > 0 then
-    Error.msg "%d package(s) failed to build" n_failed
+  if n_failed > 0 then Error.msg "%d package(s) failed to build" n_failed

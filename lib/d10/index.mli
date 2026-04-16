@@ -48,7 +48,8 @@ val find_layer :
 val find_binary :
   db -> binary:string -> os_key:string -> (string * string * string) list
 (** [find_binary db ~binary ~os_key] returns all layers that provide
-    [bin/<binary>], as [(package_name, package_version, layer_hash)]. *)
+    [bin/<binary>], as [(package_name, package_version, layer_hash)], sorted by
+    opam version descending (latest version first). *)
 
 val deps : db -> hash:string -> (string * string * string) list
 (** [deps db ~hash] returns the direct dependencies of a layer as
@@ -68,3 +69,11 @@ val all_binaries : db -> os_key:string -> (string * string * string) list
 val stats : db -> os_key:string -> int * int * int
 (** [stats db ~os_key] returns [(num_layers, num_binaries, num_files)] for the
     given platform. *)
+
+(** {1 Remote merge} *)
+
+val merge_remote : db -> remote_path:string -> unit
+(** [merge_remote db ~remote_path] imports layers from a remote index database
+    into [db]. Only layers whose hash does not already exist in [db] are
+    inserted (local entries take precedence). Associated deps, binaries, and
+    files for new layers are also imported. *)

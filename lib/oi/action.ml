@@ -131,13 +131,24 @@ let parallel_groups t =
   done;
   List.rev !groups
 
-let pp_method_short fmt = function
+let dep_pkgs_of t node =
+  List.filter_map
+    (fun dep_name ->
+      OpamPackage.Name.Map.find_opt dep_name t.nodes_by_name
+      |> Stdlib.Option.map (fun n -> n.pkg))
+    node.deps
+
+let node_hash ~packages_dirs t node =
+  D10.Layer.hash ~packages_dirs (node.pkg :: dep_pkgs_of t node)
+
+let pp_method_short ~remote_has fmt = function
   | Binary _ -> Fmt.pf fmt "%a" Fmt.(styled `Green string) "binary"
   | Source { is_virtual } ->
       if is_virtual then Fmt.pf fmt "%a" Fmt.(styled `Faint string) "virtual"
+      else if remote_has then Fmt.pf fmt "%a" Fmt.(styled `Cyan string) "remote"
       else Fmt.pf fmt "%a" Fmt.(styled `Blue string) "source"
 
-let pp_tree fmt t =
+let pp_tree ?(remote_has = fun _ -> false) ~packages_dirs fmt t =
   let groups = parallel_groups t in
   let n_groups = List.length groups in
   Fmt.pf fmt "@[<v>";
@@ -156,24 +167,17 @@ let pp_tree fmt t =
           let node = find t name in
           let pkg_s = OpamPackage.to_string node.pkg in
           let b = if i = n - 1 then "└── " else "├── " in
+          let hash = node_hash ~packages_dirs t node in
           Fmt.pf fmt "%s%s%a %a@," cont b
             Fmt.(styled `Bold string)
-            pkg_s pp_method_short node.method_)
+            pkg_s
+            (pp_method_short ~remote_has:(remote_has hash))
+            node.method_)
         names)
     groups;
   Fmt.pf fmt "@]"
 
 (* -- Layer hashing ------------------------------------------------------- *)
-
-let dep_pkgs_of t node =
-  List.filter_map
-    (fun dep_name ->
-      OpamPackage.Name.Map.find_opt dep_name t.nodes_by_name
-      |> Stdlib.Option.map (fun n -> n.pkg))
-    node.deps
-
-let node_hash ~packages_dirs t node =
-  D10.Layer.hash ~packages_dirs (node.pkg :: dep_pkgs_of t node)
 
 let layer_hash_for ~packages_dirs t name =
   OpamPackage.Name.Map.find_opt name t.nodes_by_name

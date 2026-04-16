@@ -50,14 +50,50 @@ let registry_term =
     "Remote layer registry URL. Layers are fetched as \
      <URL>/<os_key>/<hash>.tar.zst before building from source."
   in
-  Arg.(
-    value
-    & opt (some string) None
-    & info ~docv:"URL" ~doc [ "registry" ])
+  Arg.(value & opt (some string) None & info ~docv:"URL" ~doc [ "registry" ])
 
 let remote_of_registry = function
   | None -> None
   | Some url -> Some (`Http_remote url : D10.Layer.remote)
+
+let remote_index_max_age = 3600.0 (* 1 hour *)
+
+(* Ensure the remote registry's index.db is cached locally. Downloads it if
+   missing or older than [remote_index_max_age]. Returns the local path on
+   success. *)
+let ensure_remote_index ~sys ~fs ~cache ~registry =
+  let cache_root = Oi.Cache.root_s cache in
+  let local_path = cache_root / "layers" / "remote-index.db" in
+  let fresh =
+    try
+      let st = Unix.stat local_path in
+      Unix.gettimeofday () -. st.Unix.st_mtime < remote_index_max_age
+    with Unix.Unix_error _ -> false
+  in
+  if fresh then Some local_path
+  else
+    let url = registry ^ "/index.db" in
+    let dst = Eio.Path.(fs / local_path) in
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+      Eio.Path.(fs / cache_root / "layers");
+    if D10.Sysops.Curl.fetch sys ~url ~dst then Some local_path
+    else if Sys.file_exists local_path then begin
+      Logs.warn (fun m -> m "Failed to fetch registry index, using stale cache");
+      Some local_path
+    end
+    else begin
+      Logs.warn (fun m -> m "Failed to fetch registry index from %s" registry);
+      None
+    end
+
+(* Merge the remote index into the local index, creating the local index
+   if it doesn't exist. *)
+let merge_remote_into_local ~index_path ~remote_path =
+  let db = D10.Index.open_ ~path:index_path in
+  (try D10.Index.merge_remote db ~remote_path
+   with Failure msg ->
+     Logs.warn (fun m -> m "Failed to merge remote index: %s" msg));
+  D10.Index.close db
 
 (* -- Helpers ------------------------------------------------------------- *)
 
@@ -109,9 +145,9 @@ let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
 
 (* -- Remote registry helpers ---------------------------------------------- *)
 
-(** Try fetching uncached [Source] layers from [remote]. Returns a new
-    action plan with downloaded layers promoted to [Binary]. No-op when
-    [remote] is [None] or every layer is already cached. *)
+(** Try fetching uncached [Source] layers from [remote]. Returns a new action
+    plan with downloaded layers promoted to [Binary]. No-op when [remote] is
+    [None] or every layer is already cached. *)
 let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
   match remote with
   | None -> build_plan
@@ -139,7 +175,8 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
         end
         else begin
           Fmt.pr "Fetching %d layer(s) from registry (%d needed)...@."
-            (List.length available) (List.length source_hashes);
+            (List.length available)
+            (List.length source_hashes);
           Eio.Fiber.all
             (List.map
                (fun hash () ->
@@ -148,8 +185,7 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
                      (fun (e : D10.Layer.index_entry) -> e.sha256)
                      (Hashtbl.find_opt index hash)
                  in
-                 if D10.Layer.pull_remote d10 ~remote:r ~hash ?sha256 ()
-                 then
+                 if D10.Layer.pull_remote d10 ~remote:r ~hash ?sha256 () then
                    Logs.info (fun m -> m "Fetched %s from registry" hash))
                available);
           Oi.Action.plan ctx ~d10 ~packages_dirs pkgs
@@ -192,7 +228,14 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
   if dry_run then begin
-    Fmt.pr "%a@." Oi.Action.pp_tree build_plan;
+    let remote_has =
+      match remote with
+      | Some r ->
+          let idx = D10.Layer.fetch_remote_index d10 ~remote:r in
+          fun h -> Hashtbl.mem idx h
+      | None -> fun _ -> false
+    in
+    Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has ~packages_dirs) build_plan;
     exit 0
   end;
   let build_plan =
@@ -326,8 +369,8 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
   end
 
 let run_cmd =
-  let run () data_dir cache_dir dry_run registry target with_deps with_repos args
-      =
+  let run () data_dir cache_dir dry_run registry target with_deps with_repos
+      args =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
@@ -407,7 +450,8 @@ let run_cmd =
         if dep_opam_names = [] then []
         else
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~dry_run ~extra_repos:with_repos ?remote dep_opam_names
+            ~conf ~os_key ~dry_run ~extra_repos:with_repos ?remote
+            dep_opam_names
       in
       if dry_run && dep_opam_names = [] then
         (* No deps to solve, but still in dry-run mode — just exit *)
@@ -451,6 +495,14 @@ let run_cmd =
         in
         (* Step 1: Check layer index for which package provides this binary *)
         let index_path = Oi.Cache.root_s cache / "layers" / "index.db" in
+        (* Merge remote registry index if --registry is set *)
+        (match registry with
+        | Some reg -> (
+            match ensure_remote_index ~sys ~fs ~cache ~registry:reg with
+            | Some remote_path ->
+                merge_remote_into_local ~index_path ~remote_path
+            | None -> Logs.info (fun m -> m "Remote index unavailable"))
+        | None -> ());
         let index_exists =
           try
             ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / index_path));
@@ -583,8 +635,8 @@ let run_cmd =
           `P
             "With -n/--dry-run, oi solves and checks the layer cache but does \
              not build or run anything. The output shows each package as \
-             $(b,source) (needs building), $(b,binary) (cached), or \
-             $(b,virtual) (no-op).";
+             $(b,source) (needs building), $(b,binary) (cached), $(b,remote) \
+             (available from registry), or $(b,virtual) (no-op).";
         ]
   in
   Cmd.v info
@@ -719,7 +771,9 @@ let deps_from_opam_files ~fs dir =
   (* Local package names defined by *.opam files in this directory *)
   let local_pkgs =
     List.fold_left
-      (fun acc f -> Hashtbl.replace acc (Filename.chop_suffix f ".opam") true; acc)
+      (fun acc f ->
+        Hashtbl.replace acc (Filename.chop_suffix f ".opam") true;
+        acc)
       (Hashtbl.create 16) opam_files
   in
   let deps = Hashtbl.create 64 in
@@ -791,13 +845,12 @@ let sync_cmd =
         "Scan *.opam files, solve dependencies, build, and assemble _oi/prefix/"
   in
   Cmd.v info
-    Term.(
-      const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term)
+    Term.(const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term)
 
-(* -- tools --------------------------------------------------------------- *)
+(* -- config -------------------------------------------------------------- *)
 
-let tools_cmd =
-  let run () _cache_dir data_dir =
+let config_cmd =
+  let run () cache_dir data_dir =
     Eio_main.run @@ fun env ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
     let fs = Eio.Stdenv.fs env in
@@ -805,8 +858,12 @@ let tools_cmd =
     let sys = D10.Sysops.create ~proc_mgr ~fs in
     let platform = Osrel.detect ~proc_mgr ~fs in
     let os_key = D10.Os_key.(to_string (of_platform platform)) in
-    Fmt.pr "@[<v>%a %s@,@," Fmt.(styled `Bold string) "Platform" os_key;
-    Fmt.pr "  ocaml:  %s (relocatable)@," ocaml_version;
+    Fmt.pr "@[<v>%a@," Fmt.(styled `Bold string) "Platform";
+    Fmt.pr "  os-key:   %s@," os_key;
+    Fmt.pr "  ocaml:    %s (relocatable)@," ocaml_version;
+    Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Directories";
+    Fmt.pr "  data:     %s@," data_dir;
+    Fmt.pr "  cache:    %s@," cache_dir;
     Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Repositories";
     let config = Oi.Repo.config in
     List.iter
@@ -830,34 +887,9 @@ let tools_cmd =
     Fmt.pr "@]@."
   in
   let info =
-    Cmd.info "tools"
-      ~doc:"List available toolchains, repositories, and their status"
+    Cmd.info "config" ~doc:"Show platform, directories, and repository status"
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term $ data_dir_term)
-
-(* -- repo ---------------------------------------------------------------- *)
-
-let repo_cmd =
-  let run () data_dir =
-    Eio_main.run @@ fun env ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let _clock = Eio.Stdenv.clock env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir;
-    Fmt.pr "%a@." Oi.Repo.pp_config Oi.Repo.config;
-    List.iter
-      (fun (r : Oi.Repo.remote) ->
-        let dir = Oi.Repo.repo_dir ~data_dir r.name in
-        if Sys.file_exists (dir / ".git") then
-          Fmt.pr "  %s: %s@." r.name
-            (D10.Sysops.Git.head_short sys ~dir:Eio.Path.(fs / dir))
-        else Fmt.pr "  %s: not cloned@." r.name)
-      Oi.Repo.config.remotes
-  in
-  let info = Cmd.info "repo" ~doc:"Show repository status" in
-  Cmd.v info Term.(const run $ log_term $ data_dir_term)
 
 (* -- clean --------------------------------------------------------------- *)
 
@@ -960,9 +992,9 @@ let clean_cmd =
       const run $ log_term $ cache_dir_term $ data_dir_term $ all $ toolchains
       $ sources $ binaries $ dune_cache $ repos $ dry_run)
 
-(* -- show ---------------------------------------------------------------- *)
+(* -- registry show ------------------------------------------------------- *)
 
-let show_cmd =
+let registry_show_cmd =
   let run () cache_dir _data_dir target =
     Eio_main.run @@ fun env ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
@@ -1108,9 +1140,9 @@ let show_cmd =
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ data_dir_term $ target)
 
-(* -- index --------------------------------------------------------------- *)
+(* -- registry index ------------------------------------------------------ *)
 
-let index_cmd =
+let registry_index_cmd =
   let run () cache_dir =
     Eio_main.run @@ fun env ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
@@ -1178,11 +1210,31 @@ let registry_export_cmd =
     let dst = Eio.Path.(fs / output) in
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
     let count = D10.Layer.export_all d10 ~dst in
-    Fmt.pr "Exported %d layer(s) to %s@." count output
+    Fmt.pr "Exported %d layer(s) to %s@." count output;
+    (* Build index.db in the export directory *)
+    let index_path = output / "index.db" in
+    (try Sys.remove index_path with Sys_error _ -> ());
+    let db = D10.Index.open_ ~path:index_path in
+    let os_keys =
+      try
+        Eio.Path.read_dir dst
+        |> List.filter (fun f ->
+            (not (String.contains f '.')) && Sys.is_directory (output / f))
+      with Eio.Exn.Io _ -> []
+    in
+    List.iter
+      (fun ok ->
+        D10.Index.rebuild { d10 with os_key = ok } db;
+        let nl, nb, _ = D10.Index.stats db ~os_key:ok in
+        Fmt.pr "  %s: %d layers, %d binaries@." ok nl nb)
+      os_keys;
+    D10.Index.close db;
+    Fmt.pr "Index: %s@." index_path
   in
   let output =
     Arg.(
-      required & pos 0 (some string) None
+      required
+      & pos 0 (some string) None
       & info ~docv:"DIR" ~doc:"Output directory for the registry" [])
   in
   let info =
@@ -1276,8 +1328,7 @@ let registry_build_cmd =
                 merged := true;
                 Hashtbl.iter
                   (fun n v ->
-                    if not (Hashtbl.mem gvmap n) then
-                      Hashtbl.replace gvmap n v)
+                    if not (Hashtbl.mem gvmap n) then Hashtbl.replace gvmap n v)
                   vmap;
                 (solution :: gsols, gvmap)
               end
@@ -1332,8 +1383,8 @@ let registry_build_cmd =
     (* 2. Group compatible solutions *)
     let groups = group_solutions solutions in
     let n_groups = List.length groups in
-    Fmt.pr "%d target(s) in %d compatible group(s)@."
-      (List.length solutions) n_groups;
+    Fmt.pr "%d target(s) in %d compatible group(s)@." (List.length solutions)
+      n_groups;
     (* 3. Build each group *)
     let n_build_failed = ref 0 in
     List.iteri
@@ -1361,11 +1412,8 @@ let registry_build_cmd =
         if n_groups > 1 then
           Fmt.pr "Group %d/%d [%s]: %d packages@." (gi + 1) n_groups
             group_targets (List.length sorted_pkgs)
-        else
-          Fmt.pr "%d unique packages@." (List.length sorted_pkgs);
-        let build_plan =
-          Oi.Action.plan ctx ~d10 ~packages_dirs sorted_pkgs
-        in
+        else Fmt.pr "%d unique packages@." (List.length sorted_pkgs);
+        let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs sorted_pkgs in
         let n_source =
           List.length
             (List.filter
@@ -1375,7 +1423,18 @@ let registry_build_cmd =
                  | _ -> false)
                (Oi.Action.nodes build_plan))
         in
-        if dry_run then Fmt.pr "%a@." Oi.Action.pp_tree build_plan
+        if dry_run then begin
+          let remote_has =
+            match remote with
+            | Some r ->
+                let idx = D10.Layer.fetch_remote_index d10 ~remote:r in
+                fun h -> Hashtbl.mem idx h
+            | None -> fun _ -> false
+          in
+          Fmt.pr "%a@."
+            (Oi.Action.pp_tree ~remote_has ~packages_dirs)
+            build_plan
+        end
         else begin
           Fmt.pr "%d to build, %d cached@." n_source
             (Oi.Action.total build_plan - n_source);
@@ -1384,15 +1443,15 @@ let registry_build_cmd =
               fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx
                 ~pkgs:sorted_pkgs build_plan
             in
-            (try
-               let exec_plan =
-                 Oi.Plan.create ctx ~cache_root ~packages_dirs ~os_key
-                   ~ocaml_version:conf.ocaml_version build_plan
-               in
-               Oi.Execute.run ~proc_mgr ~fs
-                 ~clock:(clock :> D10.Config.clk)
-                 ~sys ~os_key exec_plan
-             with
+            try
+              let exec_plan =
+                Oi.Plan.create ctx ~cache_root ~packages_dirs ~os_key
+                  ~ocaml_version:conf.ocaml_version build_plan
+              in
+              Oi.Execute.run ~proc_mgr ~fs
+                ~clock:(clock :> D10.Config.clk)
+                ~sys ~os_key exec_plan
+            with
             | Oi.Error.E e ->
                 Fmt.epr "%a@." Oi.Error.pp e;
                 incr n_build_failed
@@ -1400,14 +1459,13 @@ let registry_build_cmd =
                 Fmt.epr "%a %s: %s@."
                   Fmt.(styled `Red string)
                   "FAIL (build)" group_targets msg;
-                incr n_build_failed)
+                incr n_build_failed
           end
         end)
       groups;
     if not dry_run then begin
       Fmt.pr "Done: %d target(s)" (List.length solutions);
-      if !n_solve_failed > 0 then
-        Fmt.pr ", %d failed to solve" !n_solve_failed;
+      if !n_solve_failed > 0 then Fmt.pr ", %d failed to solve" !n_solve_failed;
       if !n_build_failed > 0 then
         Fmt.pr ", %d group(s) failed to build" !n_build_failed;
       Fmt.pr "@."
@@ -1431,8 +1489,7 @@ let registry_build_cmd =
   in
   let info =
     Cmd.info "build"
-      ~doc:
-        "Solve and build layers for multiple packages into the local cache"
+      ~doc:"Solve and build layers for multiple packages into the local cache"
   in
   Cmd.v info
     Term.(
@@ -1441,9 +1498,15 @@ let registry_build_cmd =
 
 let registry_cmd =
   let info =
-    Cmd.info "registry" ~doc:"Manage the remote layer registry"
+    Cmd.info "registry" ~doc:"Manage the layer cache and remote registry"
   in
-  Cmd.group info [ registry_export_cmd; registry_build_cmd ]
+  Cmd.group info
+    [
+      registry_show_cmd;
+      registry_index_cmd;
+      registry_export_cmd;
+      registry_build_cmd;
+    ]
 
 (* -- main ---------------------------------------------------------------- *)
 
@@ -1503,10 +1566,7 @@ let () =
         plan_cmd;
         sync_cmd;
         env_cmd;
-        tools_cmd;
-        show_cmd;
-        index_cmd;
-        repo_cmd;
+        config_cmd;
         registry_cmd;
         clean_cmd;
       ]
