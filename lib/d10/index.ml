@@ -58,7 +58,15 @@ let schema =
   CREATE INDEX IF NOT EXISTS idx_files_hash ON layer_files(layer_hash);
 |}
 
+let rec mkdir_p dir =
+  if dir = "/" || dir = "." || dir = "" || Sys.file_exists dir then ()
+  else begin
+    mkdir_p (Filename.dirname dir);
+    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
+
 let open_ ~path =
+  mkdir_p (Filename.dirname path);
   let db = Sqlite3.db_open path in
   exec db schema;
   exec db "PRAGMA journal_mode=WAL";
