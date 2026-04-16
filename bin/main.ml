@@ -44,26 +44,28 @@ let data_dir_term =
     $ arg)
 
 let cache_dir_term = Xdge.Cmd.cache_term app_name
+let default_registry = "https://oi.ci.dev"
 
 let registry_term =
   let doc =
-    "Remote layer registry URL. Layers are fetched as \
-     <URL>/<os_key>/<hash>.tar.zst before building from source."
+    Fmt.str
+      "Remote layer registry URL (default: %s). Layers are fetched as \
+       <URL>/<os_key>/<hash>.tar.zst before building from source."
+      default_registry
   in
-  Arg.(value & opt (some string) None & info ~docv:"URL" ~doc [ "registry" ])
+  Arg.(
+    value & opt string default_registry & info ~docv:"URL" ~doc [ "registry" ])
 
-let remote_of_registry = function
-  | None -> None
-  | Some url -> Some (`Http_remote url : D10.Layer.remote)
-
+let remote_of_registry url = Some (`Http_remote url : D10.Layer.remote)
 let remote_index_max_age = 3600.0 (* 1 hour *)
 
 (* Ensure the remote registry's index.db is cached locally. Downloads it if
    missing or older than [remote_index_max_age]. Returns the local path on
    success. *)
-let ensure_remote_index ~sys ~fs ~cache ~registry =
+let ensure_remote_index ~sys ~fs ~cache ~os_key ~registry =
   let cache_root = Oi.Cache.root_s cache in
-  let local_path = cache_root / "layers" / "remote-index.db" in
+  let os_dir = cache_root / "layers" / os_key in
+  let local_path = os_dir / "remote-index.db" in
   let fresh =
     try
       let st = Unix.stat local_path in
@@ -72,10 +74,9 @@ let ensure_remote_index ~sys ~fs ~cache ~registry =
   in
   if fresh then Some local_path
   else
-    let url = registry ^ "/index.db" in
+    let url = registry ^ "/" ^ os_key ^ "/index.db" in
     let dst = Eio.Path.(fs / local_path) in
-    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-      Eio.Path.(fs / cache_root / "layers");
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
     if D10.Sysops.Curl.fetch sys ~url ~dst then Some local_path
     else if Sys.file_exists local_path then begin
       Logs.warn (fun m -> m "Failed to fetch registry index, using stale cache");
@@ -94,6 +95,21 @@ let merge_remote_into_local ~index_path ~remote_path =
    with Failure msg ->
      Logs.warn (fun m -> m "Failed to merge remote index: %s" msg));
   D10.Index.close db
+
+(* Ensure the local index exists, rebuilding it from the layer cache if
+   missing. Call before any index query in oi run / oi which. *)
+let ensure_local_index ~sys ~fs ~clock ~cache ~os_key =
+  let index_path = Oi.Cache.root_s cache / "layers" / os_key / "index.db" in
+  if not (Sys.file_exists index_path) then begin
+    Logs.info (fun m -> m "Building local index for %s" os_key);
+    let d10 : D10.Config.t =
+      { sys; fs; clock; root = Oi.Cache.root cache; os_key }
+    in
+    let db = D10.Index.open_ ~path:index_path in
+    D10.Index.rebuild d10 db;
+    D10.Index.close db
+  end;
+  index_path
 
 (* -- Helpers ------------------------------------------------------------- *)
 
@@ -137,7 +153,7 @@ let with_error_handling f =
 let get_packages_dirs ~data_dir =
   let dirs = Oi.Repo.packages_dirs ~data_dir in
   if dirs = [] then
-    Oi.Error.config_error "No repositories configured. Run 'oi repo' first.";
+    Oi.Error.config_error "No repositories configured. Run 'oi config' first.";
   dirs
 
 let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
@@ -211,17 +227,15 @@ let make_conf ~platform:(p : Osrel.t) : Oi.Opam_ctx.conf =
     build prefix if needed), return the layer hashes in topo order. When
     [dry_run] is true, print the build plan and exit. *)
 let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-    ~os_key ?(dry_run = false) ?(extra_repos = []) ?remote names =
+    ~os_key ?(dry_run = false) ?(extra_repos = []) ?remote
+    ?(constraints = OpamPackage.Name.Map.empty) names =
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir extra_repos in
   let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir in
   let cache_root = Oi.Cache.root_s cache in
   let build_prefix = cache_root / "build" / "prefix" in
   let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
   let pkgs =
-    match
-      Oi.Solve.solve ctx ~packages_dirs ~constraints:OpamPackage.Name.Map.empty
-        names
-    with
+    match Oi.Solve.solve ctx ~packages_dirs ~constraints names with
     | Ok pkgs -> pkgs
     | Error msg -> Oi.Error.no_solution msg
   in
@@ -385,13 +399,16 @@ let run_cmd =
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
+    let extra_deps = List.map Oi.Script.parse_dep with_deps in
+    let extra_constraints = Oi.Script.constraints extra_deps in
     let solve_assemble_run pkg_names =
       Logs.info (fun m ->
           m "Solving for packages: %s" (String.concat ", " pkg_names));
       let names = List.map OpamPackage.Name.of_string pkg_names in
       let layer_hashes =
         solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-          ~os_key ~dry_run ~extra_repos:with_repos ?remote names
+          ~os_key ~dry_run ~extra_repos:with_repos ?remote
+          ~constraints:extra_constraints names
       in
       Logs.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
       let prefix =
@@ -435,8 +452,7 @@ let run_cmd =
          Oi.Error.not_found target "file not found: %s" target);
       (* For scripts, solve deps first to get a prefix with the compiler *)
       let all_script_deps =
-        Oi.Script.parse_deps_from_file target
-        @ List.map Oi.Script.parse_dep with_deps
+        Oi.Script.parse_deps_from_file target @ extra_deps
       in
       let ocaml_name = OpamPackage.Name.of_string "ocaml" in
       let dep_opam_names =
@@ -446,11 +462,12 @@ let run_cmd =
             else Some d.name)
           all_script_deps
       in
+      let constraints = Oi.Script.constraints all_script_deps in
       let layer_hashes =
         if dep_opam_names = [] then []
         else
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~dry_run ~extra_repos:with_repos ?remote
+            ~conf ~os_key ~dry_run ~extra_repos:with_repos ?remote ~constraints
             dep_opam_names
       in
       if dry_run && dep_opam_names = [] then
@@ -464,7 +481,6 @@ let run_cmd =
     end
     else begin
       (* Include --with deps in every solve *)
-      let extra_deps = List.map Oi.Script.parse_dep with_deps in
       let ocaml_name = OpamPackage.Name.of_string "ocaml" in
       let extra_names =
         List.filter_map
@@ -494,21 +510,16 @@ let run_cmd =
           List.rev (aux [] "" parts)
         in
         (* Step 1: Check layer index for which package provides this binary *)
-        let index_path = Oi.Cache.root_s cache / "layers" / "index.db" in
-        (* Merge remote registry index if --registry is set *)
-        (match registry with
-        | Some reg -> (
-            match ensure_remote_index ~sys ~fs ~cache ~registry:reg with
-            | Some remote_path ->
-                merge_remote_into_local ~index_path ~remote_path
-            | None -> Logs.info (fun m -> m "Remote index unavailable"))
-        | None -> ());
-        let index_exists =
-          try
-            ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / index_path));
-            true
-          with Eio.Exn.Io _ -> false
+        let index_path =
+          ensure_local_index ~sys ~fs
+            ~clock:(Eio.Stdenv.clock env :> D10.Config.clk)
+            ~cache ~os_key
         in
+        (* Merge remote registry index *)
+        (match ensure_remote_index ~sys ~fs ~cache ~os_key ~registry with
+        | Some remote_path -> merge_remote_into_local ~index_path ~remote_path
+        | None -> Logs.info (fun m -> m "Remote index unavailable"));
+        let index_exists = Sys.file_exists index_path in
         let from_index =
           if index_exists then begin
             let os_key =
@@ -795,6 +806,70 @@ let deps_from_opam_files ~fs dir =
     opam_files;
   Hashtbl.fold (fun k _ acc -> k :: acc) deps [] |> List.sort String.compare
 
+(* -- which --------------------------------------------------------------- *)
+
+let which_cmd =
+  let run () cache_dir registry pattern =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let _clock = Eio.Stdenv.clock env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    let platform = Osrel.detect ~proc_mgr ~fs in
+    let os_key = D10.Os_key.(to_string (of_platform platform)) in
+    let cache = Oi.Cache.create ~root:cache_dir fs in
+    let index_path =
+      ensure_local_index ~sys ~fs
+        ~clock:(Eio.Stdenv.clock env :> D10.Config.clk)
+        ~cache ~os_key
+    in
+    (* Merge remote index *)
+    (match ensure_remote_index ~sys ~fs ~cache ~os_key ~registry with
+    | Some remote_path -> merge_remote_into_local ~index_path ~remote_path
+    | None -> ());
+    let db = D10.Index.open_ ~path:index_path in
+    let results = D10.Index.search_binary db ~pattern ~os_key in
+    D10.Index.close db;
+    if results = [] then Fmt.pr "No binaries matching %s@." pattern
+    else begin
+      (* Determine which hashes are available locally *)
+      let d10 : D10.Config.t =
+        {
+          sys;
+          fs;
+          clock = (Eio.Stdenv.clock env :> D10.Config.clk);
+          root = Oi.Cache.root cache;
+          os_key;
+        }
+      in
+      List.iter
+        (fun (binary, pkg_name, pkg_ver, hash) ->
+          let source =
+            if D10.Layer.succeeded d10 ~hash then
+              Fmt.str "%a" Fmt.(styled `Green string) "local"
+            else Fmt.str "%a" Fmt.(styled `Cyan string) "remote"
+          in
+          Fmt.pr "%-20s %s.%-12s (%s)@." binary pkg_name pkg_ver source)
+        results
+    end
+  in
+  let pattern =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"PATTERN"
+          ~doc:
+            "Binary name to search for. Use * as wildcard (e.g. ocaml* or \
+             *format*)."
+          [])
+  in
+  let info = Cmd.info "which" ~doc:"Search for binaries in the layer index" in
+  Cmd.v info
+    Term.(const run $ log_term $ cache_dir_term $ registry_term $ pattern)
+
+(* -- sync ---------------------------------------------------------------- *)
+
 let sync_cmd =
   let run () data_dir cache_dir registry =
     with_error_handling @@ fun () ->
@@ -859,11 +934,14 @@ let config_cmd =
     let platform = Osrel.detect ~proc_mgr ~fs in
     let os_key = D10.Os_key.(to_string (of_platform platform)) in
     Fmt.pr "@[<v>%a@," Fmt.(styled `Bold string) "Platform";
-    Fmt.pr "  os-key:   %s@," os_key;
-    Fmt.pr "  ocaml:    %s (relocatable)@," ocaml_version;
+    Fmt.pr "  os-key:     %s@," os_key;
+    Fmt.pr "  ocaml:      %s (relocatable)@," ocaml_version;
     Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Directories";
-    Fmt.pr "  data:     %s@," data_dir;
-    Fmt.pr "  cache:    %s@," cache_dir;
+    Fmt.pr "  data:       %s@," data_dir;
+    Fmt.pr "  cache:      %s@," cache_dir;
+    Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Registry";
+    Fmt.pr "  url:        %s@," default_registry;
+    Fmt.pr "  index TTL:  %gs@," remote_index_max_age;
     Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Repositories";
     let config = Oi.Repo.config in
     List.iter
@@ -1150,10 +1228,6 @@ let registry_index_cmd =
     let clock = Eio.Stdenv.clock env in
     let sys = D10.Sysops.create ~proc_mgr ~fs in
     let layers_root = cache_dir / "layers" in
-    let index_path = layers_root / "index.db" in
-    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / layers_root);
-    let db = D10.Index.open_ ~path:index_path in
-    (* Index all os_key subdirectories *)
     let total_layers = ref 0 in
     let total_bins = ref 0 in
     let total_files = ref 0 in
@@ -1161,12 +1235,9 @@ let registry_index_cmd =
       Array.iter
         (fun entry ->
           let dir = layers_root / entry in
-          if
-            Sys.is_directory dir && entry <> "." && entry <> ".."
-            && (not (Filename.check_suffix entry ".db"))
-            && (not (Filename.check_suffix entry ".db-shm"))
-            && not (Filename.check_suffix entry ".db-wal")
-          then begin
+          if Sys.is_directory dir && entry.[0] <> '.' then begin
+            let index_path = dir / "index.db" in
+            let db = D10.Index.open_ ~path:index_path in
             D10.Index.rebuild
               {
                 D10.Config.sys;
@@ -1177,16 +1248,15 @@ let registry_index_cmd =
               }
               db;
             let nl, nb, nf = D10.Index.stats db ~os_key:entry in
+            D10.Index.close db;
             Fmt.pr "  %s: %d layers, %d binaries, %d files@." entry nl nb nf;
             total_layers := !total_layers + nl;
             total_bins := !total_bins + nb;
             total_files := !total_files + nf
           end)
         (Sys.readdir layers_root);
-    D10.Index.close db;
     Fmt.pr "Total: %d layers, %d binaries, %d files@." !total_layers !total_bins
-      !total_files;
-    Fmt.pr "Index: %s@." index_path
+      !total_files
   in
   let info =
     Cmd.info "index" ~doc:"Build a SQLite index of the binary layer cache"
@@ -1211,25 +1281,23 @@ let registry_export_cmd =
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
     let count = D10.Layer.export_all d10 ~dst in
     Fmt.pr "Exported %d layer(s) to %s@." count output;
-    (* Build index.db in the export directory *)
-    let index_path = output / "index.db" in
-    (try Sys.remove index_path with Sys_error _ -> ());
-    let db = D10.Index.open_ ~path:index_path in
+    (* Build per-os_key index.db in the export directory *)
     let os_keys =
       try
         Eio.Path.read_dir dst
-        |> List.filter (fun f ->
-            (not (String.contains f '.')) && Sys.is_directory (output / f))
+        |> List.filter (fun f -> Sys.is_directory (output / f))
       with Eio.Exn.Io _ -> []
     in
     List.iter
       (fun ok ->
+        let index_path = output / ok / "index.db" in
+        (try Sys.remove index_path with Sys_error _ -> ());
+        let db = D10.Index.open_ ~path:index_path in
         D10.Index.rebuild { d10 with os_key = ok } db;
         let nl, nb, _ = D10.Index.stats db ~os_key:ok in
+        D10.Index.close db;
         Fmt.pr "  %s: %d layers, %d binaries@." ok nl nb)
-      os_keys;
-    D10.Index.close db;
-    Fmt.pr "Index: %s@." index_path
+      os_keys
   in
   let output =
     Arg.(
@@ -1292,49 +1360,88 @@ let registry_build_cmd =
     done;
     List.filter_map (fun n -> N.Map.find_opt n pkg_by_name) (List.rev !result)
   in
-  (* Group solutions by version-compatibility. Two solutions are compatible
-     if every package name appearing in both has the same version. *)
-  let group_solutions solutions =
-    let version_map_of pkgs =
+  (* Group solutions by layer-hash compatibility. Two solutions are compatible
+     if every package name appearing in both has the same layer hash — this
+     catches version differences AND different dep contexts (e.g. depopts). *)
+  let group_solutions ctx ~packages_dirs solutions =
+    (* Compute per-package layer hashes for a solution using the same
+       recursive algorithm as Action.plan. *)
+    let hash_map_of pkgs =
+      let in_solution =
+        List.fold_left
+          (fun s p -> OpamPackage.Name.Set.add (OpamPackage.name p) s)
+          OpamPackage.Name.Set.empty pkgs
+      in
+      let pkg_by_name =
+        List.fold_left
+          (fun m p -> OpamPackage.Name.Map.add (OpamPackage.name p) p m)
+          OpamPackage.Name.Map.empty pkgs
+      in
+      (* Compute transitive deps for each package in topo order *)
+      let trans_deps : (OpamPackage.Name.t, OpamPackage.Name.Set.t) Hashtbl.t =
+        Hashtbl.create 64
+      in
       let m = Hashtbl.create 64 in
       List.iter
         (fun pkg ->
-          Hashtbl.replace m
-            (OpamPackage.Name.to_string (OpamPackage.name pkg))
-            (OpamPackage.version pkg))
+          let name = OpamPackage.name pkg in
+          let name_s = OpamPackage.Name.to_string name in
+          let deps =
+            Oi.Solve.dep_names ~packages_dirs ctx pkg in_solution
+            |> OpamPackage.Name.Set.elements
+            |> List.filter (fun n -> OpamPackage.Name.Set.mem n in_solution)
+          in
+          let trans =
+            List.fold_left
+              (fun acc dep_name ->
+                let acc = OpamPackage.Name.Set.add dep_name acc in
+                match Hashtbl.find_opt trans_deps dep_name with
+                | Some s -> OpamPackage.Name.Set.union acc s
+                | None -> acc)
+              OpamPackage.Name.Set.empty deps
+          in
+          Hashtbl.replace trans_deps name trans;
+          let all_dep_pkgs =
+            OpamPackage.Name.Set.elements trans
+            |> List.filter_map (fun n ->
+                OpamPackage.Name.Map.find_opt n pkg_by_name
+                |> Option.map (fun p -> p))
+          in
+          let h = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
+          Hashtbl.replace m name_s h)
         pkgs;
       m
     in
-    let compatible vmap group_vmap =
+    let compatible hmap group_hmap =
       Hashtbl.fold
-        (fun name ver ok ->
+        (fun name hash ok ->
           ok
           &&
-          match Hashtbl.find_opt group_vmap name with
+          match Hashtbl.find_opt group_hmap name with
           | None -> true
-          | Some v -> OpamPackage.Version.equal v ver)
-        vmap true
+          | Some h -> String.equal h hash)
+        hmap true
     in
     let groups = ref [] in
     List.iter
       (fun ((_, pkgs) as solution) ->
-        let vmap = version_map_of pkgs in
+        let hmap = hash_map_of pkgs in
         let merged = ref false in
         groups :=
           List.map
-            (fun (gsols, gvmap) ->
-              if !merged then (gsols, gvmap)
-              else if compatible vmap gvmap then begin
+            (fun (gsols, ghmap) ->
+              if !merged then (gsols, ghmap)
+              else if compatible hmap ghmap then begin
                 merged := true;
                 Hashtbl.iter
-                  (fun n v ->
-                    if not (Hashtbl.mem gvmap n) then Hashtbl.replace gvmap n v)
-                  vmap;
-                (solution :: gsols, gvmap)
+                  (fun n h ->
+                    if not (Hashtbl.mem ghmap n) then Hashtbl.replace ghmap n h)
+                  hmap;
+                (solution :: gsols, ghmap)
               end
-              else (gsols, gvmap))
+              else (gsols, ghmap))
             !groups;
-        if not !merged then groups := ([ solution ], vmap) :: !groups)
+        if not !merged then groups := ([ solution ], hmap) :: !groups)
       solutions;
     List.rev !groups
   in
@@ -1381,7 +1488,7 @@ let registry_build_cmd =
     in
     if solutions = [] then Oi.Error.msg "no packages solved successfully";
     (* 2. Group compatible solutions *)
-    let groups = group_solutions solutions in
+    let groups = group_solutions ctx ~packages_dirs solutions in
     let n_groups = List.length groups in
     Fmt.pr "%d target(s) in %d compatible group(s)@." (List.length solutions)
       n_groups;
@@ -1408,12 +1515,19 @@ let registry_build_cmd =
                 pkgs)
             group_solutions
         in
-        let sorted_pkgs = topo_sort ctx ~packages_dirs merged_pkgs in
+        (* Fresh context per group — Plan.create mutates ctx to track
+           installed packages, so groups must not share state. *)
+        let group_ctx =
+          Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf
+        in
+        let sorted_pkgs = topo_sort group_ctx ~packages_dirs merged_pkgs in
         if n_groups > 1 then
           Fmt.pr "Group %d/%d [%s]: %d packages@." (gi + 1) n_groups
             group_targets (List.length sorted_pkgs)
         else Fmt.pr "%d unique packages@." (List.length sorted_pkgs);
-        let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs sorted_pkgs in
+        let build_plan =
+          Oi.Action.plan group_ctx ~d10 ~packages_dirs sorted_pkgs
+        in
         let n_source =
           List.length
             (List.filter
@@ -1440,12 +1554,12 @@ let registry_build_cmd =
             (Oi.Action.total build_plan - n_source);
           if n_source > 0 then begin
             let build_plan =
-              fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx
+              fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx:group_ctx
                 ~pkgs:sorted_pkgs build_plan
             in
             try
               let exec_plan =
-                Oi.Plan.create ctx ~cache_root ~packages_dirs ~os_key
+                Oi.Plan.create group_ctx ~cache_root ~packages_dirs ~os_key
                   ~ocaml_version:conf.ocaml_version build_plan
               in
               Oi.Execute.run ~proc_mgr ~fs
@@ -1563,6 +1677,7 @@ let () =
     Cmd.group info
       [
         run_cmd;
+        which_cmd;
         plan_cmd;
         sync_cmd;
         env_cmd;

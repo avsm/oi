@@ -48,8 +48,20 @@ val find_layer :
 val find_binary :
   db -> binary:string -> os_key:string -> (string * string * string) list
 (** [find_binary db ~binary ~os_key] returns all layers that provide
-    [bin/<binary>], as [(package_name, package_version, layer_hash)], sorted by
-    opam version descending (latest version first). *)
+    [bin/<binary>] or [sbin/<binary>], as
+    [(package_name, package_version, layer_hash)], sorted by opam version
+    descending (latest version first). *)
+
+val search_binary :
+  db ->
+  pattern:string ->
+  os_key:string ->
+  (string * string * string * string) list
+(** [search_binary db ~pattern ~os_key] searches for binaries matching
+    [pattern], returning
+    [(binary_name, package_name, package_version, layer_hash)]. The pattern is
+    matched exactly by default; use [*] as a wildcard (mapped to SQL [LIKE %]).
+    Results are sorted by binary name then opam version descending. *)
 
 val deps : db -> hash:string -> (string * string * string) list
 (** [deps db ~hash] returns the direct dependencies of a layer as

@@ -174,14 +174,23 @@ let rebuild (c : Config.t) db =
                        "INSERT INTO layer_files (layer_hash, path) VALUES (%s, \
                         %s)"
                        (quote hash) (quote path));
-                  (* Track binaries separately *)
-                  if String.length path > 4 && String.sub path 0 4 = "bin/" then
-                    exec db
-                      (Fmt.str
-                         "INSERT INTO layer_binaries (layer_hash, binary_name) \
-                          VALUES (%s, %s)"
-                         (quote hash)
-                         (quote (String.sub path 4 (String.length path - 4)))))
+                  (* Track binaries separately (bin/ and sbin/) *)
+                  let bin_name =
+                    if String.length path > 4 && String.sub path 0 4 = "bin/"
+                    then Some (String.sub path 4 (String.length path - 4))
+                    else if
+                      String.length path > 5 && String.sub path 0 5 = "sbin/"
+                    then Some (String.sub path 5 (String.length path - 5))
+                    else None
+                  in
+                  Option.iter
+                    (fun name ->
+                      exec db
+                        (Fmt.str
+                           "INSERT INTO layer_binaries (layer_hash, \
+                            binary_name) VALUES (%s, %s)"
+                           (quote hash) (quote name)))
+                    bin_name)
                 files
             end)
       entries;
@@ -232,6 +241,34 @@ let find_binary db ~binary ~os_key =
       OpamPackage.Version.compare
         (OpamPackage.Version.of_string v2)
         (OpamPackage.Version.of_string v1))
+    (List.rev !results)
+
+let search_binary db ~pattern ~os_key =
+  let results = ref [] in
+  let cb row =
+    match row with
+    | [| binary; name; version; hash |] ->
+        results := (binary, name, version, hash) :: !results
+    | _ -> ()
+  in
+  (* Convert user wildcards: * → % *)
+  let sql_pattern = String.map (fun c -> if c = '*' then '%' else c) pattern in
+  let op = if String.contains sql_pattern '%' then "LIKE" else "=" in
+  ignore
+    (Sqlite3.exec_not_null_no_headers db ~cb
+       (Fmt.str
+          "SELECT b.binary_name, l.package_name, l.package_ver, l.hash FROM \
+           layer_binaries b JOIN layers l ON b.layer_hash = l.hash WHERE \
+           b.binary_name %s %s AND l.os_key = %s AND l.exit_status = 0"
+          op (quote sql_pattern) (quote os_key)));
+  List.sort
+    (fun (b1, _, v1, _) (b2, _, v2, _) ->
+      let c = String.compare b1 b2 in
+      if c <> 0 then c
+      else
+        OpamPackage.Version.compare
+          (OpamPackage.Version.of_string v2)
+          (OpamPackage.Version.of_string v1))
     (List.rev !results)
 
 let deps db ~hash =

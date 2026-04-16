@@ -24,12 +24,11 @@
 (** {1 Hash computation} *)
 
 val hash : packages_dirs:string list -> OpamPackage.t list -> string
-(** [hash ~packages_dirs pkgs] computes the layer hash for a package and its
-    dependencies. The hash is the MD5 of the concatenated per-package hashes,
-    where each per-package hash is the SHA-512 of the opam file's
-    [effective_part] (which strips volatile metadata like descriptions and
-    URLs). If an opam file is not found in [packages_dirs], the package's
-    name-version string is hashed as a fallback. *)
+(** [hash ~packages_dirs pkgs] computes the layer hash for a set of packages.
+    The hash is the MD5 of the concatenated per-package opam [effective_part]
+    hashes (SHA-512). Callers should pass the package and its full transitive
+    dependency closure so that any change in the dependency tree invalidates the
+    cache. *)
 
 (** {1 Layer metadata}
 
