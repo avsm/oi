@@ -747,7 +747,7 @@ let env_cmd =
     in
     let dune_cache_root = Oi.Cache.dune_root cache in
     (* Detect _oi/ project directory *)
-    let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
+    let cwd = Unix.realpath "." in
     let oi_prefix = cwd / "_oi" / "prefix" in
     let prefix =
       if path_exists fs oi_prefix then oi_prefix
@@ -935,7 +935,7 @@ let sync_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
-    let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
+    let cwd = Unix.realpath "." in
     ignore
       (do_sync ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir
          ~registry ~cwd ())
@@ -957,7 +957,7 @@ let exec_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
-    let cwd = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
+    let cwd = Unix.realpath "." in
     let prefix = cwd / "_oi" / "prefix" in
     if needs_sync ~cwd ~prefix then begin
       Logs.info (fun m -> m "Syncing %s before exec" cwd);
