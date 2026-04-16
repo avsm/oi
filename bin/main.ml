@@ -170,6 +170,15 @@ let path_exists fs path =
     true
   with Eio.Exn.Io _ -> false
 
+(* Parse a CLI target as either "name", "name.version", or an opam atom
+   like "name>=1.0" / "name=1.0". Returns the bare name and an optional
+   version constraint for the solver. *)
+let parse_pkg_target s =
+  match OpamPackage.of_string_opt s with
+  | Some pkg ->
+      (OpamPackage.name pkg, Some (`Eq, OpamPackage.version pkg))
+  | None -> OpamFormula.atom_of_string s
+
 (* -- Remote registry helpers ---------------------------------------------- *)
 
 (** Try fetching uncached [Source] layers from [remote]. Returns a new action
@@ -1317,11 +1326,13 @@ let registry_build_cmd =
     let solutions =
       List.filter_map
         (fun target ->
-          let name = OpamPackage.Name.of_string target in
-          match
-            Oi.Solve.solve ctx ~packages_dirs
-              ~constraints:OpamPackage.Name.Map.empty [ name ]
-          with
+          let name, version_constraint = parse_pkg_target target in
+          let constraints =
+            match version_constraint with
+            | None -> OpamPackage.Name.Map.empty
+            | Some c -> OpamPackage.Name.Map.singleton name c
+          in
+          match Oi.Solve.solve ctx ~packages_dirs ~constraints [ name ] with
           | Ok pkgs ->
               Fmt.pr "Solved %s: %d packages@." target (List.length pkgs);
               Some (target, pkgs)
