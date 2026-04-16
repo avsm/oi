@@ -115,6 +115,12 @@ let switch_env ~prefix =
         [ prefix / "lib" / "stublibs"; prefix / "lib" / "ocaml" / "stublibs" ]
     );
     ("OCAMLFIND_CONF", prefix / "lib" / "findlib.conf");
+    (* The relocatable ocamlfind installs findlib.conf with destdir=".",
+       expecting OCAMLFIND_DESTDIR to be set at use-time. Without this,
+       "ocamlfind install" (e.g. zarith's `make install`) writes files
+       relative to the build cwd rather than into the prefix, and the
+       layer-diff captures nothing. *)
+    ("OCAMLFIND_DESTDIR", prefix / "lib");
     ("OCAMLPATH", String.concat ":" [ prefix / "lib"; prefix / "lib" / "ocaml" ]);
     ("OCAMLTOP_INCLUDE_PATH", prefix / "lib" / "toplevel");
     ("OCAML_TOPLEVEL_PATH", prefix / "lib" / "toplevel");
