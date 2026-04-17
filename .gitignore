@@ -1,3 +1,4 @@
 CLAUDE.md
 _build
 .*.swp
+.worktrees/
