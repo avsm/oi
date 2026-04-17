@@ -10,6 +10,16 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let ( / ) = Filename.concat
 
+(* Cap concurrent package builds. Each in-flight build spawns subprocess
+   pipes (2 fds per capture) plus transient file descriptors for fetch
+   and patch; large stages would otherwise exhaust macOS's default 256
+   soft [rlim]. Honours [OI_BUILD_PARALLELISM] when set; defaults to
+   [min (cpu_count) 8]. *)
+let build_parallelism =
+  match Sys.getenv_opt "OI_BUILD_PARALLELISM" with
+  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 8)
+  | None -> min (Domain.recommended_domain_count ()) 8
+
 (* -- Command execution --------------------------------------------------- *)
 
 (* Resolve an unqualified executable name against the PATH in [env],
@@ -263,23 +273,22 @@ let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
           let build_failures : (string * exn) list ref = ref [] in
           if to_build <> [] then begin
             let active = ref 0 in
-            Eio.Fiber.all
-              (List.map
-                 (fun (p : Plan.package_plan) () ->
-                   active := !active + 1;
-                   report
-                     ( 0,
-                       Fmt.str "[%s] [%d active] %s (build)" stage_s !active
-                         p.pkg );
-                   (try
-                      Eio.Path.rmtree ~missing_ok:true
-                        Eio.Path.(fs / p.build_dir);
-                      build_package ~proc_mgr ~fs p
-                    with exn ->
-                      build_failures := (p.pkg, exn) :: !build_failures;
-                      Hashtbl.replace failed_pkgs p.pkg true);
-                   active := !active - 1)
-                 to_build)
+            Eio.Fiber.List.iter ~max_fibers:build_parallelism
+              (fun (p : Plan.package_plan) ->
+                active := !active + 1;
+                report
+                  ( 0,
+                    Fmt.str "[%s] [%d active] %s (build)" stage_s !active p.pkg
+                  );
+                (try
+                   Eio.Path.rmtree ~missing_ok:true
+                     Eio.Path.(fs / p.build_dir);
+                   build_package ~proc_mgr ~fs p
+                 with exn ->
+                   build_failures := (p.pkg, exn) :: !build_failures;
+                   Hashtbl.replace failed_pkgs p.pkg true);
+                active := !active - 1)
+              to_build
           end;
           (* Report build failures from this stage *)
           List.iter
