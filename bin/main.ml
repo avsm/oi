@@ -257,14 +257,50 @@ let get_packages_dirs ~data_dir =
     Oi.Error.config_error "No repositories configured. Run 'oi config' first.";
   dirs
 
+(* True when the cwd is a dev-mode project: at least one *.opam file
+   is present AND none of them declare a numeric [version:]. opam
+   treats a missing [version:] as the implicit pin-version "dev", so
+   a project without explicit versions is deliberately tracking dev
+   code and the downstream [dev]-version warning would just be noise.
+   A mixed-version workspace (some .opam with numeric versions, some
+   without) counts as non-dev — the numeric files represent a real
+   release cadence. *)
+let project_is_dev ~fs cwd =
+  let opam_files =
+    try
+      Eio.Path.read_dir Eio.Path.(fs / cwd)
+      |> List.filter (fun f -> Filename.check_suffix f ".opam")
+    with Eio.Exn.Io _ -> []
+  in
+  let has_numeric_version file =
+    let path = cwd / file in
+    match
+      OpamFile.OPAM.read_opt (OpamFile.make (OpamFilename.raw path))
+    with
+    | exception _ -> false
+    | None -> false
+    | Some opam -> (
+        match OpamFile.OPAM.version_opt opam with
+        | None -> false
+        | Some v ->
+            let s = OpamPackage.Version.to_string v in
+            String.length s > 0 && s.[0] >= '0' && s.[0] <= '9')
+  in
+  opam_files <> [] && not (List.exists has_numeric_version opam_files)
+
 (* Warn when the solver picks a package with a non-numeric opam version
    (e.g. "dev", "master") AND that candidate came from a non-built-in
    repository. opam's version comparator treats pure-alpha segments as
    higher than any numeric, so an overlay entry with [version: unset]
    or [version: "dev"] silently wins against every stable release that
    satisfies the same [>= X] constraint. Pinned packages are trusted
-   since the user asked for them explicitly. *)
-let warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs solved =
+   since the user asked for them explicitly; dev-mode projects are
+   trusted because pulling in dev transitives is the explicit point of
+   the overlay. *)
+let warn_suspicious_versions ?(dev_mode = false) ~data_dir ~pin_dir
+    ~packages_dirs solved =
+  if dev_mode then ()
+  else
   let builtins = Oi.Repo.packages_dirs ~data_dir in
   let trusted d =
     List.mem d builtins
@@ -412,8 +448,13 @@ let make_conf ~platform:(p : Osrel.t) : Oi.Opam_ctx.conf =
     [dry_run] is true, print the build plan and exit. *)
 let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     ~os_key ?(dry_run = false) ?(extra_repos = []) ?(pins = [])
-    ?(refresh = false) ?remote ?(constraints = OpamPackage.Name.Map.empty)
-    names =
+    ?(refresh = false) ?project_dir ?remote
+    ?(constraints = OpamPackage.Name.Map.empty) names =
+  let dev_mode =
+    match project_dir with
+    | None -> false
+    | Some cwd -> project_is_dev ~fs cwd
+  in
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
@@ -428,7 +469,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     | Ok pkgs -> pkgs
     | Error msg -> Oi.Error.no_solution msg
   in
-  warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs pkgs;
+  warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir ~packages_dirs pkgs;
   let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
   if dry_run then begin
@@ -525,7 +566,12 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
             Fmt.epr "No solution: %s@." msg;
             exit 1
       in
-      warn_suspicious_versions ~data_dir ~pin_dir:None ~packages_dirs pkgs;
+      let dev_mode =
+        let cwd_s, _ = resolved_cwd fs in
+        project_is_dev ~fs cwd_s
+      in
+      warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir:None
+        ~packages_dirs pkgs;
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
@@ -591,7 +637,7 @@ let run_cmd =
       let layer_hashes =
         solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
           ~os_key ~dry_run ~extra_repos:all_extras ~pins:project_pins ~refresh
-          ?remote ~constraints:extra_constraints names
+          ~project_dir:cwd_s ?remote ~constraints:extra_constraints names
       in
       Logs.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
       let prefix =
@@ -871,7 +917,8 @@ let plan_cmd =
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
     in
-    warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs pkgs;
+    warn_suspicious_versions ~dev_mode:(project_is_dev ~fs cwd_s) ~data_dir
+      ~pin_dir ~packages_dirs pkgs;
     let d10 =
       make_d10 ~sys ~fs ~clock:(clock :> D10.Config.clk) ~cache ~os_key
     in
@@ -1055,7 +1102,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   let layer_hashes =
     solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
       ~os_key ~extra_repos:all_extras ~pins:project.pins ~refresh
-      ~constraints:extra_constraints ?remote names
+      ~project_dir:cwd ~constraints:extra_constraints ?remote names
   in
   let oi_dir = cwd / "_oi" in
   let prefix = oi_dir / "prefix" in
@@ -1855,7 +1902,8 @@ let depexts_cmd =
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
     in
-    warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs solved;
+    warn_suspicious_versions ~dev_mode:(project_is_dev ~fs cwd_s) ~data_dir
+      ~pin_dir ~packages_dirs solved;
     let entries = Oi.Depexts.compute ctx ~packages_dirs solved in
     if by_package then
       List.iter
