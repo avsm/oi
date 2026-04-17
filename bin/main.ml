@@ -44,6 +44,46 @@ let data_dir_term =
     $ arg)
 
 let cache_dir_term = Xdge.Cmd.cache_term app_name
+
+let refresh_term =
+  Arg.(
+    value & flag
+    & info
+        ~doc:
+          "Force refresh of all timestamp-driven caches (opam repos, extra \
+           repos, and any other aged caches). Without this flag, caches \
+           older than 24 hours are refreshed automatically; newer ones are \
+           reused."
+        [ "refresh" ])
+
+(* Convert a CLI [--with-repo URL] entry into a [Project.extra_repo] with a
+   deterministic hashed name. We keep the CLI shape (a list of bare URLs)
+   and invent a stable local clone directory name here at the boundary. *)
+let cli_extra_repo_of_url url_s : Oi.Project.extra_repo =
+  let hash = Digest.string url_s |> Digest.to_hex in
+  let name = "extra-" ^ String.sub hash 0 10 in
+  { name; url = url_s }
+
+let cli_extra_repos urls = List.map cli_extra_repo_of_url urls
+
+(* Merge CLI [--with-repo] URLs and project-declared extras. Project
+   extras win on a name collision (CLI URLs are synthesised names and
+   cannot collide with a user-chosen name unless the user picked an
+   [extra-xxxxxxxxxx] prefix, which would be surprising); we instead
+   dedup by name, preferring the project entry. *)
+let merge_extras ~cli ~project =
+  let seen = Hashtbl.create 8 in
+  let acc = ref [] in
+  let push (e : Oi.Project.extra_repo) =
+    if not (Hashtbl.mem seen e.name) then begin
+      Hashtbl.add seen e.name ();
+      acc := e :: !acc
+    end
+  in
+  List.iter push project;
+  List.iter push cli;
+  List.rev !acc
+
 let default_registry = "https://oi.ci.dev"
 
 let registry_term =
@@ -189,6 +229,51 @@ let get_packages_dirs ~data_dir =
     Oi.Error.config_error "No repositories configured. Run 'oi config' first.";
   dirs
 
+(* Warn when the solver picks a package with a non-numeric opam version
+   (e.g. "dev", "master") AND that candidate came from a non-built-in
+   repository. opam's version comparator treats pure-alpha segments as
+   higher than any numeric, so an overlay entry with [version: unset]
+   or [version: "dev"] silently wins against every stable release that
+   satisfies the same [>= X] constraint. Pinned packages are trusted
+   since the user asked for them explicitly. *)
+let warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs solved =
+  let builtins = Oi.Repo.packages_dirs ~data_dir in
+  let trusted d =
+    List.mem d builtins
+    ||
+    match pin_dir with Some p -> d = p | None -> false
+  in
+  let source_dir pkg =
+    List.find_opt
+      (fun d ->
+        let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
+        Sys.file_exists (d / name / OpamPackage.to_string pkg / "opam"))
+      packages_dirs
+  in
+  List.iter
+    (fun pkg ->
+      let ver = OpamPackage.(Version.to_string (version pkg)) in
+      if
+        String.length ver > 0
+        && not (ver.[0] >= '0' && ver.[0] <= '9')
+      then
+        match source_dir pkg with
+        | Some d when not (trusted d) ->
+            Fmt.epr
+              "%a %s picked from non-default repo %s.@.  Its version \
+               %S is non-numeric; opam's version comparator ranks \
+               alphabetic segments above any numeric version, so the \
+               solver preferred it over every stable release \
+               satisfying the same constraint.@.  If this is \
+               unintended, cap the dependency in your *.opam or pin \
+               the specific version you want.@."
+              Fmt.(styled `Yellow string)
+              "warning:"
+              (OpamPackage.to_string pkg)
+              d ver
+        | _ -> ())
+    solved
+
 let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
   { sys; fs; clock; root = Oi.Cache.root cache; os_key }
 
@@ -298,10 +383,15 @@ let make_conf ~platform:(p : Osrel.t) : Oi.Opam_ctx.conf =
     build prefix if needed), return the layer hashes in topo order. When
     [dry_run] is true, print the build plan and exit. *)
 let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-    ~os_key ?(dry_run = false) ?(extra_repos = []) ?remote
-    ?(constraints = OpamPackage.Name.Map.empty) names =
-  let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir extra_repos in
-  let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir in
+    ~os_key ?(dry_run = false) ?(extra_repos = []) ?(pins = [])
+    ?(refresh = false) ?remote ?(constraints = OpamPackage.Name.Map.empty)
+    names =
+  let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
+  let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
+  let packages_dirs =
+    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs
+    @ get_packages_dirs ~data_dir
+  in
   let cache_root = Oi.Cache.root_s cache in
   let build_prefix = cache_root / "build" / "prefix" in
   let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -310,6 +400,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     | Ok pkgs -> pkgs
     | Error msg -> Oi.Error.no_solution msg
   in
+  warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs pkgs;
   let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
   if dry_run then begin
@@ -406,6 +497,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
             Fmt.epr "No solution: %s@." msg;
             exit 1
       in
+      warn_suspicious_versions ~data_dir ~pin_dir:None ~packages_dirs pkgs;
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
@@ -436,28 +528,42 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
   end
 
 let run_cmd =
-  let run () data_dir cache_dir dry_run registry target with_deps with_repos
-      args =
+  let run () data_dir cache_dir refresh dry_run registry target with_deps
+      with_repos args =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir;
+    Oi.Repo.ensure ~data_dir ~refresh ();
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
     let extra_deps = List.map Oi.Script.parse_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
+    (* Resolve the cwd once; reused for project-extras loading and the
+       script-file existence check below. *)
+    let cwd_s, cwd = resolved_cwd fs in
+    (* Load project extras (if any *.opam in cwd). A missing/unreadable
+       directory degrades to "no extras"; malformed metadata still raises
+       [Error.E] so the user sees the problem. *)
+    let project_extras, project_pins =
+      match Oi.Project.load ~fs cwd_s with
+      | exception Sys_error _ -> ([], [])
+      | exception Eio.Exn.Io _ -> ([], [])
+      | p -> (p.extra_repos, p.pins)
+    in
+    let cli_extras = cli_extra_repos with_repos in
+    let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
     let solve_assemble_run pkg_names =
       Logs.info (fun m ->
           m "Solving for packages: %s" (String.concat ", " pkg_names));
       let names = List.map OpamPackage.Name.of_string pkg_names in
       let layer_hashes =
         solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-          ~os_key ~dry_run ~extra_repos:with_repos ?remote
-          ~constraints:extra_constraints names
+          ~os_key ~dry_run ~extra_repos:all_extras ~pins:project_pins ~refresh
+          ?remote ~constraints:extra_constraints names
       in
       Logs.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
       let prefix =
@@ -488,7 +594,6 @@ let run_cmd =
       end
     in
     (* Only .ml files are treated as scripts *)
-    let _cwd_s, cwd = resolved_cwd fs in
     if Filename.check_suffix target ".ml" then begin
       if not (path_exists cwd target) then
         Oi.Error.not_found target "file not found: %s" target;
@@ -509,8 +614,8 @@ let run_cmd =
         if dep_opam_names = [] then []
         else
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~dry_run ~extra_repos:with_repos ?remote ~constraints
-            dep_opam_names
+            ~conf ~os_key ~dry_run ~extra_repos:all_extras
+            ~pins:project_pins ~refresh ?remote ~constraints dep_opam_names
       in
       if dry_run && dep_opam_names = [] then
         (* No deps to solve, but still in dry-run mode — just exit *)
@@ -586,8 +691,12 @@ let run_cmd =
              configured repo — a missing package name cannot possibly
              provide the binary, and attempting to solve for it wastes
              a full solver run. *)
+          let pin_dir =
+            Oi.Pin.materialize ~fs ~sys ~cache ~refresh project_pins
+          in
           let packages_dirs =
-            Oi.Repo.ensure_extra ~data_dir with_repos
+            Stdlib.Option.to_list pin_dir
+            @ Oi.Repo.ensure_extra ~data_dir ~refresh all_extras
             @ Oi.Repo.packages_dirs ~data_dir
           in
           let package_exists name =
@@ -694,23 +803,40 @@ let run_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ data_dir_term $ cache_dir_term $ dry_run
-      $ registry_term $ target $ with_deps $ with_repos $ args)
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ dry_run $ registry_term $ target $ with_deps $ with_repos $ args)
 
 (* -- plan ---------------------------------------------------------------- *)
 
 let plan_cmd =
-  let run () data_dir cache_dir targets with_repos =
+  let run () data_dir cache_dir refresh targets with_repos =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let _proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir;
+    Oi.Repo.ensure ~data_dir ~refresh ();
     let conf = make_conf ~platform in
-    let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir with_repos in
-    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir in
+    let cwd_s, _ = resolved_cwd fs in
+    (* Load project extras (if any *.opam in cwd). A missing/unreadable
+       directory degrades to "no extras"; malformed metadata still raises
+       [Error.E] so the user sees the problem. *)
+    let project_extras, project_pins =
+      match Oi.Project.load ~fs cwd_s with
+      | exception Sys_error _ -> ([], [])
+      | exception Eio.Exn.Io _ -> ([], [])
+      | p -> (p.extra_repos, p.pins)
+    in
+    let all_extras =
+      merge_extras ~cli:(cli_extra_repos with_repos) ~project:project_extras
+    in
+    let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
+    let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh project_pins in
+    let packages_dirs =
+      Stdlib.Option.to_list pin_dir @ extra_pkg_dirs
+      @ get_packages_dirs ~data_dir
+    in
     let names = List.map OpamPackage.Name.of_string targets in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -722,6 +848,7 @@ let plan_cmd =
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
     in
+    warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs pkgs;
     let d10 =
       make_d10 ~sys ~fs ~clock:(clock :> D10.Config.clk) ~cache ~os_key
     in
@@ -747,13 +874,13 @@ let plan_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ data_dir_term $ cache_dir_term $ targets
-      $ with_repos)
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ targets $ with_repos)
 
 (* -- env ----------------------------------------------------------------- *)
 
 let env_cmd =
-  let run () data_dir cache_dir =
+  let run () data_dir cache_dir refresh =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -768,11 +895,11 @@ let env_cmd =
       else begin
         (* Fall back to a minimal compiler-only prefix *)
         init_opam_root ~fs ~data_dir;
-        Oi.Repo.ensure ~data_dir;
+        Oi.Repo.ensure ~data_dir ~refresh ();
         let conf = make_conf ~platform in
         let layer_hashes =
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key
+            ~conf ~os_key ~refresh
             [ OpamPackage.Name.of_string "ocaml" ]
         in
         assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes
@@ -793,44 +920,11 @@ let env_cmd =
   let info =
     Cmd.info "env" ~doc:"Print shell environment for the current project"
   in
-  Cmd.v info Term.(const run $ log_term $ data_dir_term $ cache_dir_term)
+  Cmd.v info
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term)
 
 (* -- init ---------------------------------------------------------------- *)
-
-(* -- sync ---------------------------------------------------------------- *)
-
-(* Scan directory for *.opam files and extract dependency names *)
-let deps_from_opam_files ~fs dir =
-  let opam_files =
-    Eio.Path.read_dir Eio.Path.(fs / dir)
-    |> List.filter (fun f -> Filename.check_suffix f ".opam")
-  in
-  (* Local package names defined by *.opam files in this directory *)
-  let local_pkgs =
-    List.fold_left
-      (fun acc f ->
-        Hashtbl.replace acc (Filename.chop_suffix f ".opam") true;
-        acc)
-      (Hashtbl.create 16) opam_files
-  in
-  let deps = Hashtbl.create 64 in
-  List.iter
-    (fun file ->
-      let path = dir / file in
-      try
-        let opam = OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw path)) in
-        let extract_names formula =
-          OpamFormula.fold_left
-            (fun () (name, _) ->
-              let s = OpamPackage.Name.to_string name in
-              if s <> "ocaml" && not (Hashtbl.mem local_pkgs s) then
-                Hashtbl.replace deps s true)
-            () formula
-        in
-        extract_names (OpamFile.OPAM.depends opam)
-      with _ -> Logs.warn (fun m -> m "Could not parse %s" file))
-    opam_files;
-  Hashtbl.fold (fun k _ acc -> k :: acc) deps [] |> List.sort String.compare
 
 (* -- which --------------------------------------------------------------- *)
 
@@ -888,24 +982,33 @@ let which_cmd =
    Returns the path to the assembled prefix. When [quiet] is true,
    narration goes to Logs.info (hidden at default verbosity); otherwise
    it prints to stdout. *)
-let do_sync ?(quiet = false) ~proc_mgr ~fs ~clock ~sys ~platform ~os_key
-    ~cache ~data_dir ~registry ~cwd () =
+let do_sync ?(quiet = false) ?(refresh = false) ~proc_mgr ~fs ~clock ~sys
+    ~platform ~os_key ~cache ~data_dir ~registry ~cwd () =
   let say fmt =
     if quiet then Fmt.kstr (fun s -> Logs.info (fun m -> m "%s" s)) fmt
     else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
   in
   init_opam_root ~fs ~data_dir;
-  Oi.Repo.ensure ~data_dir;
-  let deps = deps_from_opam_files ~fs cwd in
+  Oi.Repo.ensure ~data_dir ~refresh ();
+  let project = Oi.Project.load ~fs cwd in
+  let deps = project.deps in
   if deps = [] then
     Oi.Error.config_error "No .opam files found in %s." cwd;
   say "Dependencies from opam files: %s" (String.concat ", " deps);
+  if project.extra_repos <> [] then
+    say "Extra repositories: %s"
+      (String.concat ", "
+         (List.map
+            (fun (e : Oi.Project.extra_repo) ->
+              Fmt.str "%s (%s)" e.name e.url)
+            project.extra_repos));
   let conf = make_conf ~platform in
   let remote = remote_of_registry registry in
   let names = List.map OpamPackage.Name.of_string deps in
   let layer_hashes =
     solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-      ~os_key ?remote names
+      ~os_key ~extra_repos:project.extra_repos ~pins:project.pins ~refresh
+      ?remote names
   in
   let oi_dir = cwd / "_oi" in
   let prefix = oi_dir / "prefix" in
@@ -943,7 +1046,7 @@ let needs_sync ~cwd ~prefix =
         opam_files
 
 let sync_cmd =
-  let run () data_dir cache_dir registry =
+  let run () data_dir cache_dir refresh registry =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -951,8 +1054,8 @@ let sync_cmd =
     in
     let cwd, _ = resolved_cwd fs in
     ignore
-      (do_sync ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir
-         ~registry ~cwd ())
+      (do_sync ~refresh ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache
+         ~data_dir ~registry ~cwd ())
   in
   let info =
     Cmd.info "sync"
@@ -960,12 +1063,14 @@ let sync_cmd =
         "Scan *.opam files, solve dependencies, build, and assemble _oi/prefix/"
   in
   Cmd.v info
-    Term.(const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term)
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ registry_term)
 
 (* -- exec ---------------------------------------------------------------- *)
 
 let exec_cmd =
-  let run () data_dir cache_dir registry cmd args =
+  let run () data_dir cache_dir refresh registry cmd args =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -976,8 +1081,8 @@ let exec_cmd =
     if needs_sync ~cwd ~prefix then begin
       Logs.info (fun m -> m "Syncing %s before exec" cwd);
       ignore
-        (do_sync ~quiet:true ~proc_mgr ~fs ~clock ~sys ~platform ~os_key
-           ~cache ~data_dir ~registry ~cwd ())
+        (do_sync ~quiet:true ~refresh ~proc_mgr ~fs ~clock ~sys ~platform
+           ~os_key ~cache ~data_dir ~registry ~cwd ())
     end;
     let env_arr =
       Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
@@ -1019,8 +1124,8 @@ let exec_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term
-      $ cmd $ args)
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ registry_term $ cmd $ args)
 
 (* -- config -------------------------------------------------------------- *)
 
@@ -1059,7 +1164,33 @@ let config_cmd =
           Fmt.(styled `Bold string)
           r.name status r.url)
       config.remotes;
-    Fmt.pr "@]@."
+    Fmt.pr "@]@.";
+    let cwd_s, _ = resolved_cwd fs in
+    let proj =
+      match Oi.Project.load ~fs cwd_s with
+      | exception Sys_error _ -> None
+      | exception Eio.Exn.Io _ -> None
+      | p -> Some p
+    in
+    (match proj with
+    | None -> ()
+    | Some p ->
+        if p.extra_repos <> [] then begin
+          Fmt.pr "@.Project extra repositories:@.";
+          List.iter
+            (fun (r : Oi.Project.extra_repo) ->
+              Fmt.pr "  %-20s %s@." r.name r.url)
+            p.extra_repos
+        end;
+        if p.pins <> [] then begin
+          Fmt.pr "@.Project pin-depends:@.";
+          List.iter
+            (fun (pin : Oi.Project.pin) ->
+              Fmt.pr "  %-20s %s@."
+                (OpamPackage.to_string pin.pkg)
+                (OpamUrl.to_string pin.url))
+            p.pins
+        end)
   in
   let info =
     Cmd.info "config" ~doc:"Show platform, directories, and repository status"
@@ -1443,17 +1574,19 @@ let registry_build_cmd =
       solutions;
     List.rev !groups
   in
-  let run () data_dir cache_dir dry_run registry with_repos targets =
+  let run () data_dir cache_dir refresh dry_run registry with_repos targets =
     with_error_handling @@ fun () ->
     Eio_main.run @@ fun env ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir;
+    Oi.Repo.ensure ~data_dir ~refresh ();
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
-    let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir with_repos in
+    let extra_pkg_dirs =
+      Oi.Repo.ensure_extra ~data_dir ~refresh (cli_extra_repos with_repos)
+    in
     let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
@@ -1473,6 +1606,8 @@ let registry_build_cmd =
           match Oi.Solve.solve ctx ~packages_dirs ~constraints [ name ] with
           | Ok pkgs ->
               Fmt.pr "Solved %s: %d packages@." target (List.length pkgs);
+              warn_suspicious_versions ~data_dir ~pin_dir:None ~packages_dirs
+                pkgs;
               Some (target, pkgs)
           | Error msg ->
               Fmt.epr "%a %s: %s@."
@@ -1602,8 +1737,91 @@ let registry_build_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ data_dir_term $ cache_dir_term $ dry_run
-      $ registry_term $ with_repos $ targets)
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ dry_run $ registry_term $ with_repos $ targets)
+
+(* -- depexts ------------------------------------------------------------- *)
+
+let depexts_cmd =
+  let run () data_dir cache_dir refresh by_package os_override =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let _proc_mgr, fs, _clock, sys, platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
+    let cwd_s, _ = resolved_cwd fs in
+    init_opam_root ~fs ~data_dir;
+    Oi.Repo.ensure ~data_dir ~refresh ();
+    let proj = Oi.Project.load ~fs cwd_s in
+    if proj.deps = [] then
+      Oi.Error.config_error
+        "No dependencies declared in %s (need at least one *.opam with \
+         non-local depends)"
+        cwd_s;
+    let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh proj.pins in
+    let extras = Oi.Repo.ensure_extra ~data_dir ~refresh proj.extra_repos in
+    let packages_dirs =
+      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~data_dir
+    in
+    let conf =
+      let c = make_conf ~platform in
+      match os_override with
+      | None -> c
+      | Some os -> { c with os }
+    in
+    let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
+    let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
+    let names = List.map OpamPackage.Name.of_string proj.deps in
+    let solved =
+      match
+        Oi.Solve.solve ctx ~packages_dirs
+          ~constraints:OpamPackage.Name.Map.empty names
+      with
+      | Ok pkgs -> pkgs
+      | Error msg -> Oi.Error.no_solution msg
+    in
+    warn_suspicious_versions ~data_dir ~pin_dir ~packages_dirs solved;
+    let entries = Oi.Depexts.compute ctx ~packages_dirs solved in
+    if by_package then
+      List.iter
+        (fun { Oi.Depexts.pkg; sys_pkgs } ->
+          OpamSysPkg.Set.iter
+            (fun s ->
+              Fmt.pr "%s\t%s@."
+                (OpamPackage.to_string pkg)
+                (OpamSysPkg.to_string s))
+            sys_pkgs)
+        entries
+    else begin
+      let all =
+        List.fold_left
+          (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
+          OpamSysPkg.Set.empty entries
+      in
+      OpamSysPkg.Set.iter
+        (fun s -> Fmt.pr "%s@." (OpamSysPkg.to_string s))
+        all
+    end
+  in
+  let by_package =
+    Arg.(value & flag & info ~doc:"Group depexts by package" [ "by-package" ])
+  in
+  let os_override =
+    Arg.(
+      value
+      & opt (some string) None
+      & info ~docv:"OS"
+          ~doc:"Override the platform 'os' variable (e.g. linux, macos)"
+          [ "os" ])
+  in
+  let info =
+    Cmd.info "depexts"
+      ~doc:"Print system packages required by the project's dependencies"
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ by_package $ os_override)
 
 (* -- registry docker ---------------------------------------------------- *)
 
@@ -1791,6 +2009,7 @@ let () =
         sync_cmd;
         env_cmd;
         config_cmd;
+        depexts_cmd;
         registry_cmd;
         clean_cmd;
       ]
