@@ -14,7 +14,9 @@
   fmt.tty
   logs
   logs.fmt
-  logs.cli))
+  logs.cli
+  dockerfile
+  dockerfile-opam))
 
 (executable
  (name d10_main)

@@ -56,13 +56,17 @@ let registry_term =
   Arg.(
     value & opt string default_registry & info ~docv:"URL" ~doc [ "registry" ])
 
-let remote_of_registry url = Some (`Http_remote url : D10.Layer.remote)
+let remote_of_registry = function
+  | "" -> None
+  | url -> Some (`Http_remote url : D10.Layer.remote)
 let remote_index_max_age = 3600.0 (* 1 hour *)
 
 (* Ensure the remote registry's index.db is cached locally. Downloads it if
    missing or older than [remote_index_max_age]. Returns the local path on
    success. *)
 let ensure_remote_index ~sys ~fs ~cache ~os_key ~registry =
+  if registry = "" then None
+  else
   let cache_root = Oi.Cache.root_s cache in
   let os_dir = cache_root / "layers" / os_key in
   let local_path = os_dir / "remote-index.db" in
@@ -1606,6 +1610,132 @@ let registry_build_cmd =
       const run $ log_term $ data_dir_term $ cache_dir_term $ dry_run
       $ registry_term $ with_repos $ targets)
 
+(* -- registry docker ---------------------------------------------------- *)
+
+let registry_docker_cmd =
+  let default_distros : Registry_docker.Distro.t list =
+    [
+      `Alpine `Latest;
+      `Debian `Stable;
+      `Ubuntu `V22_04;
+      `Ubuntu `V24_04;
+      `Ubuntu `V25_10;
+      `Fedora `Latest;
+    ]
+  in
+  let run () packages_file output_dir src_context =
+    with_error_handling @@ fun () ->
+    let pkgs = Registry_docker.parse_packages_file packages_file in
+    if pkgs = [] then
+      Oi.Error.msg "no packages found in %s (all blank/comment lines)"
+        packages_file;
+    (try Unix.mkdir output_dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
+    let pkgs_path = output_dir / "packages.txt" in
+    Registry_docker.write_packages_file pkgs_path pkgs;
+    let df_oi = Registry_docker.dockerfile_oi ~src_context in
+    let df_reg =
+      Registry_docker.dockerfile_registry ~src_context
+        ~packages_ctx_path:pkgs_path ~distros:default_distros
+    in
+    let oi_path = output_dir / "Dockerfile.oi" in
+    let reg_path = output_dir / "Dockerfile.registry" in
+    Registry_docker.write_dockerfile oi_path df_oi;
+    Registry_docker.write_dockerfile reg_path df_reg;
+    let per_distro_paths =
+      List.map
+        (fun d ->
+          let fname = Registry_docker.one_distro_filename d in
+          let path = output_dir / fname in
+          let df =
+            Registry_docker.dockerfile_one_distro ~src_context
+              ~packages_ctx_path:pkgs_path d
+          in
+          Registry_docker.write_dockerfile path df;
+          (d, path, fname))
+        default_distros
+    in
+    Fmt.pr "Wrote:@.";
+    Fmt.pr "  %s (%d packages)@." pkgs_path (List.length pkgs);
+    Fmt.pr "  %s@." oi_path;
+    Fmt.pr "  %s@." reg_path;
+    List.iter (fun (_, path, _) -> Fmt.pr "  %s@." path) per_distro_paths;
+    Fmt.pr "@.";
+    Fmt.pr "Static oi release binary:@.";
+    Fmt.pr "  docker buildx build -f %s --output type=local,dest=./oi-bin .@."
+      oi_path;
+    Fmt.pr "Registry layer export (all distros):@.";
+    Fmt.pr
+      "  docker buildx build -f %s --output type=local,dest=./registry .@."
+      reg_path;
+    Fmt.pr "Single-distro tests:@.";
+    List.iter
+      (fun (_, path, fname) ->
+        let tag =
+          String.sub fname (String.length "Dockerfile.")
+            (String.length fname - String.length "Dockerfile.")
+        in
+        Fmt.pr
+          "  docker buildx build -f %s --output type=local,dest=./registry-%s \
+           .@."
+          path tag)
+      per_distro_paths
+  in
+  let packages_file =
+    Arg.(
+      required
+      & pos 0 (some file) None
+      & info ~docv:"FILE"
+          ~doc:
+            "Packages file: one opam target per line ($(b,name), \
+             $(b,name.version), $(b,name>=1.0)). $(b,#) starts a comment."
+          [])
+  in
+  let output_dir =
+    Arg.(
+      value & opt string "."
+      & info ~docv:"DIR"
+          ~doc:
+            "Directory to write Dockerfile.oi, Dockerfile.registry, and \
+             packages.txt (created if missing)."
+          [ "o"; "output" ])
+  in
+  let src_context =
+    Arg.(
+      value & opt string "."
+      & info ~docv:"PATH"
+          ~doc:
+            "Path to the oi source tree, relative to the Docker build \
+             context. Defaults to the context root."
+          [ "src" ])
+  in
+  let info =
+    Cmd.info "docker"
+      ~doc:"Generate a multi-stage Dockerfile that builds a registry export"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Writes $(b,Dockerfile.oi) (a standalone static musl build of \
+             $(b,oi) on alpine) and $(b,Dockerfile.registry) (a multi-stage \
+             file that runs $(b,oi registry build) in parallel across \
+             alpine, debian-stable, ubuntu 22.04/24.04/25.10, and fedora \
+             latest, merging each per-distro $(b,oi registry export) into a \
+             final $(b,FROM scratch) stage).";
+          `P
+            "Build the registry with BuildKit so the final scratch stage is \
+             materialised on your host:";
+          `Pre
+            "  docker buildx build -f Dockerfile.registry \
+             --output type=local,dest=./registry .";
+          `P
+            "The oi source tree must be inside the Docker build context so \
+             the builder stage can compile it. Invoke $(b,docker buildx \
+             build) from the oi source root.";
+        ]
+  in
+  Cmd.v info
+    Term.(const run $ log_term $ packages_file $ output_dir $ src_context)
+
 let registry_cmd =
   let info =
     Cmd.info "registry" ~doc:"Manage the layer cache and remote registry"
@@ -1616,6 +1746,7 @@ let registry_cmd =
       registry_index_cmd;
       registry_export_cmd;
       registry_build_cmd;
+      registry_docker_cmd;
     ]
 
 (* -- main ---------------------------------------------------------------- *)

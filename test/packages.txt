@@ -9,7 +9,6 @@ ocaml-lsp-server
 odoc
 base
 core
-cohttp-async
 core_bench
 doi2bib
 ocamlformat.0.28.1
@@ -20,5 +19,4 @@ utop
 opam-publish
 ppxlib
 opam-devel
-core_extended
 eio_main

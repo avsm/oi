@@ -47,4 +47,6 @@
   fmt
   logs
   jsont
-  bytesrw))
+  bytesrw
+  (dockerfile (>= 8.3.0))
+  (dockerfile-opam (>= 8.3.0))))

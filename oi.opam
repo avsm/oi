@@ -22,6 +22,8 @@ depends: [
   "logs"
   "jsont"
   "bytesrw"
+  "dockerfile" {>= "8.3.0"}
+  "dockerfile-opam" {>= "8.3.0"}
   "odoc" {with-doc}
 ]
 build: [
