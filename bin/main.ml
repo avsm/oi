@@ -1622,7 +1622,7 @@ let registry_cmd =
 
 let () =
   let info =
-    Cmd.info "oi" ~version:"0.1.0" ~doc:"Stateless OCaml package builder"
+    Cmd.info "oi" ~version:"0.1.4" ~doc:"Stateless OCaml package builder"
       ~man:
         [
           `S Manpage.s_description;
