@@ -1368,23 +1368,18 @@ let registry_export_cmd =
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
     let count = D10.Layer.export_all d10 ~dst in
     Fmt.pr "Exported %d layer(s) to %s@." count output;
-    (* Build per-os_key index.db in the export directory *)
-    let os_keys =
-      try
-        Eio.Path.read_dir dst
-        |> List.filter (fun f -> Sys.is_directory (output / f))
-      with Eio.Exn.Io _ -> []
-    in
-    List.iter
-      (fun ok ->
-        let index_path = output / ok / "index.db" in
-        (try Sys.remove index_path with Sys_error _ -> ());
-        let db = D10.Index.open_ ~path:index_path in
-        D10.Index.rebuild { d10 with os_key = ok } db;
-        let nl, nb, _ = D10.Index.stats db ~os_key:ok in
-        D10.Index.close db;
-        Fmt.pr "  %s: %d layers, %d binaries@." ok nl nb)
-      os_keys
+    (* Rebuild the index.db only for this container's os_key. Sibling os_key
+       subdirs may exist alongside ours when [dst] is a shared volume (e.g.
+       docker-compose bind mount) — leave their indices alone. *)
+    if Sys.file_exists (output / os_key) then begin
+      let index_path = output / os_key / "index.db" in
+      (try Sys.remove index_path with Sys_error _ -> ());
+      let db = D10.Index.open_ ~path:index_path in
+      D10.Index.rebuild d10 db;
+      let nl, nb, _ = D10.Index.stats db ~os_key in
+      D10.Index.close db;
+      Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
+    end
   in
   let output =
     Arg.(
@@ -1633,14 +1628,8 @@ let registry_docker_cmd =
     let pkgs_path = output_dir / "packages.txt" in
     Registry_docker.write_packages_file pkgs_path pkgs;
     let df_oi = Registry_docker.dockerfile_oi ~src_context in
-    let df_reg =
-      Registry_docker.dockerfile_registry ~src_context
-        ~packages_ctx_path:pkgs_path ~distros:default_distros
-    in
     let oi_path = output_dir / "Dockerfile.oi" in
-    let reg_path = output_dir / "Dockerfile.registry" in
     Registry_docker.write_dockerfile oi_path df_oi;
-    Registry_docker.write_dockerfile reg_path df_reg;
     let per_distro_paths =
       List.map
         (fun d ->
@@ -1651,34 +1640,26 @@ let registry_docker_cmd =
               ~packages_ctx_path:pkgs_path d
           in
           Registry_docker.write_dockerfile path df;
-          (d, path, fname))
+          (d, path))
         default_distros
     in
+    let compose_path = output_dir / "docker-compose.yml" in
+    let compose_yaml =
+      Registry_docker.docker_compose_yaml ~distros:default_distros
+        ~registry_host_path:"./registry"
+    in
+    Registry_docker.write_file compose_path compose_yaml;
     Fmt.pr "Wrote:@.";
     Fmt.pr "  %s (%d packages)@." pkgs_path (List.length pkgs);
     Fmt.pr "  %s@." oi_path;
-    Fmt.pr "  %s@." reg_path;
-    List.iter (fun (_, path, _) -> Fmt.pr "  %s@." path) per_distro_paths;
+    List.iter (fun (_, path) -> Fmt.pr "  %s@." path) per_distro_paths;
+    Fmt.pr "  %s@." compose_path;
     Fmt.pr "@.";
     Fmt.pr "Static oi release binary:@.";
     Fmt.pr "  docker buildx build -f %s --output type=local,dest=./oi-bin .@."
       oi_path;
-    Fmt.pr "Registry layer export (all distros):@.";
-    Fmt.pr
-      "  docker buildx build -f %s --output type=local,dest=./registry .@."
-      reg_path;
-    Fmt.pr "Single-distro tests:@.";
-    List.iter
-      (fun (_, path, fname) ->
-        let tag =
-          String.sub fname (String.length "Dockerfile.")
-            (String.length fname - String.length "Dockerfile.")
-        in
-        Fmt.pr
-          "  docker buildx build -f %s --output type=local,dest=./registry-%s \
-           .@."
-          path tag)
-      per_distro_paths
+    Fmt.pr "Run the registry build + export (all distros in parallel):@.";
+    Fmt.pr "  docker compose up --build   # exports to ./registry/@."
   in
   let packages_file =
     Arg.(
@@ -1710,27 +1691,27 @@ let registry_docker_cmd =
   in
   let info =
     Cmd.info "docker"
-      ~doc:"Generate a multi-stage Dockerfile that builds a registry export"
+      ~doc:"Generate per-distro Dockerfiles and a docker-compose.yml that \
+            run oi registry build + export"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Writes $(b,Dockerfile.oi) (a standalone static musl build of \
-             $(b,oi) on alpine) and $(b,Dockerfile.registry) (a multi-stage \
-             file that runs $(b,oi registry build) in parallel across \
-             alpine, debian-stable, ubuntu 22.04/24.04/25.10, and fedora \
-             latest, merging each per-distro $(b,oi registry export) into a \
-             final $(b,FROM scratch) stage).";
+            "Writes $(b,Dockerfile.oi) (standalone static musl build of \
+             $(b,oi)), one $(b,Dockerfile.<distro>) per distro (alpine \
+             latest, debian stable, ubuntu 22.04/24.04/25.10, fedora \
+             latest), and a $(b,docker-compose.yml) that bind-mounts \
+             $(b,./registry) onto $(b,/out) in every service.";
           `P
-            "Build the registry with BuildKit so the final scratch stage is \
-             materialised on your host:";
-          `Pre
-            "  docker buildx build -f Dockerfile.registry \
-             --output type=local,dest=./registry .";
+            "Each per-distro image has a $(b,CMD) that runs $(b,oi registry \
+             build --registry=) for the packages in $(b,packages.txt) then \
+             $(b,oi registry export /out). Running the compose project \
+             executes all distros in parallel and leaves the exported \
+             layers on the host:";
+          `Pre "  docker compose up --build";
           `P
-            "The oi source tree must be inside the Docker build context so \
-             the builder stage can compile it. Invoke $(b,docker buildx \
-             build) from the oi source root.";
+            "Each service exits when its build+export completes; \
+             $(b,compose up) returns when every service has finished.";
         ]
   in
   Cmd.v info

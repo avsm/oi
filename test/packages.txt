@@ -2,14 +2,12 @@ mirage
 cohttp-lwt-unix
 crockford
 ocluster
-async
 utop
 irmin
 ocaml-lsp-server
 odoc
 base
 core
-core_bench
 doi2bib
 ocamlformat.0.28.1
 ocamlformat

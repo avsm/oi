@@ -21,6 +21,13 @@ let of_platform (p : Osrel.t) =
         match String.split_on_char '.' p.os.version with
         | major :: _ -> major
         | [] -> p.os.version)
+    | `Linux `Alpine -> (
+        (* Alpine patch releases (e.g. 3.20.4) are security updates that keep
+           binary compatibility within a major.minor series, so collapse to
+           "3.20" for cache-key purposes. *)
+        match String.split_on_char '.' p.os.version with
+        | major :: minor :: _ -> major ^ "." ^ minor
+        | _ -> p.os.version)
     | _ -> p.os.version
   in
   let arch = Osrel.Arch.to_string p.arch in
