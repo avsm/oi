@@ -21,3 +21,4 @@ opam-publish
 ppxlib
 opam-devel
 core_extended
+eio_main
