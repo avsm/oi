@@ -18,3 +18,7 @@ opam-publish
 ppxlib
 opam-devel
 eio_main
+opam-0install
+uutf
+uunf
+jsonm
