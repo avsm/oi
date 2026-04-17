@@ -162,6 +162,25 @@ let docker_compose_yaml ~distros ~registry_host_path =
       Printf.ksprintf out "    volumes:\n";
       Printf.ksprintf out "      - %s:/out\n" registry_host_path)
     distros;
+  (* Extra one-shot service: drop the static musl oi binary at
+     /out/oi-linux-<arch>. Reuses the alpine image so no separate build. *)
+  (match distros with
+  | [] -> ()
+  | first :: _ ->
+      let alpine_img = "oi-registry-" ^ service_name first in
+      let alpine_file = one_distro_filename first in
+      Printf.ksprintf out "  oi-binary:\n";
+      Printf.ksprintf out "    build:\n";
+      Printf.ksprintf out "      context: .\n";
+      Printf.ksprintf out "      dockerfile: %s\n" alpine_file;
+      Printf.ksprintf out "    image: %s\n" alpine_img;
+      (* Escape [$] as [$$] so compose passes a literal [$(uname -m)] to the
+         container shell instead of trying to interpolate a compose var. *)
+      Printf.ksprintf out
+        "    command: [\"sh\", \"-c\", \"cp /usr/local/bin/oi \
+         /out/oi-linux-$$(uname -m)\"]\n";
+      Printf.ksprintf out "    volumes:\n";
+      Printf.ksprintf out "      - %s:/out\n" registry_host_path);
   Buffer.contents buf
 
 (* -- Package-list parsing ----------------------------------------------- *)
