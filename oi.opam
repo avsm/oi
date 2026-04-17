@@ -14,7 +14,6 @@ depends: [
   "opam-format" {>= "2.2.0"}
   "opam-state" {>= "2.2.0"}
   "opam-client" {>= "2.2.0"}
-  "opam-installer" {>= "2.2.0"}
   "opam-0install" {>= "0.4"}
   "progress" {>= "0.4"}
   "xdge" {>= "1.0"}

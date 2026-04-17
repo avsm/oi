@@ -199,8 +199,8 @@ let install_package ~proc_mgr ~fs (p : Plan.package_plan) =
       run_cmd ~proc_mgr ~fs ~env:p.env ~cwd:p.build_dir ~pkg:p.pkg cmd)
     p.install_commands;
   if Sys.file_exists p.install_file then
-    run_cmd ~proc_mgr ~fs ~env:p.env ~cwd:p.build_dir ~pkg:p.pkg
-      [ "opam-installer"; "--prefix=" ^ p.prefix; p.install_file ]
+    Installer.install ~fs ~prefix:p.prefix ~build_dir:p.build_dir
+      ~install_file:p.install_file
 
 (* -- Main loop ------------------------------------------------------------ *)
 

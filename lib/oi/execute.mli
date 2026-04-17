@@ -6,8 +6,8 @@
 
     Executes a {!Plan.t} by processing stages sequentially. Within each stage,
     fetch and build run in parallel via Eio fibers. Install is serialised at
-    stage boundaries. Uses {!Subst} for [.in] file expansion and
-    [opam-installer] CLI for [.install] file processing.
+    stage boundaries. Uses {!Installer} to process [.install] files directly
+    via the opam libraries (no external [opam-installer] binary).
 
     Layers are captured via {!D10.Prefix.diff} and stored in the d10 cache for
     future reuse. *)
