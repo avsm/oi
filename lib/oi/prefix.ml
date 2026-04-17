@@ -4,9 +4,16 @@
 
 let ( / ) = Filename.concat
 
+(* Canonicalise [p] to an absolute path. Relative paths in OCAMLFIND_CONF /
+   OCAMLLIB break dune (Path.External.of_string rejects them). Falls back to
+   the original string if the path does not yet exist on disk. *)
+let canonical p =
+  try Unix.realpath p with Unix.Unix_error _ -> p
+
 (* -- OCaml-specific environment ------------------------------------------ *)
 
 let env_vars ~prefix ~dune_cache_root =
+  let prefix = canonical prefix in
   Opam_ctx.switch_env ~prefix
   @ [
       ("OCAMLFIND_DESTDIR", prefix / "lib");
@@ -16,6 +23,7 @@ let env_vars ~prefix ~dune_cache_root =
     ]
 
 let envrc_content ~prefix ~dune_cache_root =
+  let prefix = canonical prefix in
   let switch_vars =
     List.map
       (fun (k, v) -> Fmt.str "export %s=\"%s\"" k v)

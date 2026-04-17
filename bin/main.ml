@@ -207,6 +207,16 @@ let path_exists fs path =
     true
   with Eio.Exn.Io _ -> false
 
+(* Resolve the current working directory once, as a canonical absolute path.
+   Returns the string form (for env vars and opam APIs that take strings)
+   and an [Eio.Path.t] rooted at [fs] (for filesystem operations).
+   Using [Unix.realpath] up front avoids the relative "." that
+   [Eio.Stdenv.cwd] would yield via [Eio.Path.native_exn], which leaks
+   into OCAMLFIND_CONF / OCAMLLIB and breaks dune. *)
+let resolved_cwd fs =
+  let s = Unix.realpath "." in
+  (s, Eio.Path.(fs / s))
+
 (* Parse a CLI target as either "name", "name.version", or an opam atom
    like "name>=1.0" / "name=1.0". Returns the bare name and an optional
    version constraint for the solver. *)
@@ -474,7 +484,7 @@ let run_cmd =
       end
     in
     (* Only .ml files are treated as scripts *)
-    let cwd = Eio.Stdenv.cwd env in
+    let _cwd_s, cwd = resolved_cwd fs in
     if Filename.check_suffix target ".ml" then begin
       if not (path_exists cwd target) then
         Oi.Error.not_found target "file not found: %s" target;
@@ -747,10 +757,10 @@ let env_cmd =
     in
     let dune_cache_root = Oi.Cache.dune_root cache in
     (* Detect _oi/ project directory *)
-    let cwd = Unix.realpath "." in
-    let oi_prefix = cwd / "_oi" / "prefix" in
+    let cwd_s, cwd = resolved_cwd fs in
+    let oi_prefix = cwd_s / "_oi" / "prefix" in
     let prefix =
-      if path_exists fs oi_prefix then oi_prefix
+      if path_exists cwd "_oi/prefix" then oi_prefix
       else begin
         (* Fall back to a minimal compiler-only prefix *)
         init_opam_root ~fs ~data_dir;
@@ -935,7 +945,7 @@ let sync_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
-    let cwd = Unix.realpath "." in
+    let cwd, _ = resolved_cwd fs in
     ignore
       (do_sync ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir
          ~registry ~cwd ())
@@ -957,7 +967,7 @@ let exec_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
-    let cwd = Unix.realpath "." in
+    let cwd, _ = resolved_cwd fs in
     let prefix = cwd / "_oi" / "prefix" in
     if needs_sync ~cwd ~prefix then begin
       Logs.info (fun m -> m "Syncing %s before exec" cwd);
