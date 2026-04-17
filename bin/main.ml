@@ -369,7 +369,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
     script_path with_deps args =
   let file_deps = Oi.Script.parse_deps_from_file script_path in
   let cli_deps = List.map Oi.Script.parse_dep with_deps in
-  let all_deps = file_deps @ cli_deps in
+  let all_deps = Oi.Script.dedup (file_deps @ cli_deps) in
   if all_deps = [] then
     Oi.Error.msg
       "No dependencies found. Add [@@@opam pkg1 pkg2] to the first line or use \

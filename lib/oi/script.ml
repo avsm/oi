@@ -46,6 +46,21 @@ let parse_deps_from_file path =
 
 let name_s d = OpamPackage.Name.to_string d.name
 
+(* First-occurrence dedup by package name. Keeps the original constraint when
+   a later duplicate is unconstrained; if both have a constraint, the first
+   wins (callers can reorder to prefer a specific source). *)
+let dedup deps =
+  let seen = Hashtbl.create 16 in
+  List.filter
+    (fun d ->
+      let n = name_s d in
+      if Hashtbl.mem seen n then false
+      else begin
+        Hashtbl.add seen n ();
+        true
+      end)
+    deps
+
 let script_hash path deps =
   let content = In_channel.with_open_bin path In_channel.input_all in
   let dep_str =
