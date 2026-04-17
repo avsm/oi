@@ -1,5 +1,5 @@
 [@@@ai_disclosure "ai-assisted"]
-[@@@ai_model "claude-opus-4-6"]
+[@@@ai_model "claude-opus-4-7"]
 [@@@ai_provider "Anthropic"]
 
 (** Opam repository management using opam's repository libraries.
@@ -26,6 +26,8 @@ let remotes =
   ]
 
 let config = { remotes; default = "relocatable" }
+
+let refresh_max_age = 86_400.0
 
 (* -- Repo pull using opam libraries -------------------------------------- *)
 
@@ -57,6 +59,14 @@ let pull_repo ~label ~url_s ~dst =
   | OpamRepositoryBackend.Update_err exn ->
       Fmt.failwith "Failed to fetch repo %s: %s" label (Printexc.to_string exn)
 
+(* Bump the mtime of [dir] to "now" after a successful pull, so the age
+   check in [dir_needs_refresh] sees a fresh timestamp. *)
+let touch_dir dir =
+  try
+    let now = Unix.time () in
+    Unix.utimes dir now now
+  with Unix.Unix_error _ -> ()
+
 (* -- Repo dirs ----------------------------------------------------------- *)
 
 let repo_dir ~data_dir name = data_dir / "repos" / name
@@ -75,52 +85,48 @@ let packages_dirs ~data_dir =
 
 (* -- Freshness check ----------------------------------------------------- *)
 
-let needs_update ~dir ~max_age_seconds =
-  let fetch_head = dir / ".git" / "FETCH_HEAD" in
+(* [true] when the directory is older than [refresh_max_age], or cannot be
+   stat'd (treated as missing/stale). *)
+let dir_needs_refresh dir =
   try
-    let st = Unix.stat fetch_head in
-    Unix.gettimeofday () -. st.Unix.st_mtime > max_age_seconds
+    let st = Unix.stat dir in
+    Unix.time () -. st.Unix.st_mtime > refresh_max_age
   with Unix.Unix_error _ -> true
-
-let one_day = 86400.0
 
 (* -- Ensure repos are cloned and fresh ----------------------------------- *)
 
-let ensure ~data_dir =
+(* Common clone/pull logic shared by [ensure] and [ensure_extra]. *)
+let ensure_one ~refresh ~label ~url ~dir =
+  let pkg_dir = dir / "packages" in
+  if not (Sys.file_exists pkg_dir) then begin
+    Log.info (fun m -> m "Cloning %s from %s..." label url);
+    pull_repo ~label ~url_s:url ~dst:dir;
+    touch_dir dir
+  end
+  else if refresh || dir_needs_refresh dir then begin
+    Log.info (fun m -> m "Updating %s..." label);
+    (try
+       pull_repo ~label ~url_s:url ~dst:dir;
+       touch_dir dir
+     with exn ->
+       Log.warn (fun m ->
+           m "Failed to update %s: %s" label (Printexc.to_string exn)))
+  end
+
+let ensure ~data_dir ?(refresh = false) () =
   List.iter
     (fun r ->
       let dir = repo_dir ~data_dir r.name in
-      let pkg_dir = dir / "packages" in
-      if not (Sys.file_exists pkg_dir) then begin
-        Log.info (fun m -> m "Cloning %s from %s..." r.name r.url);
-        pull_repo ~label:r.name ~url_s:r.url ~dst:dir
-      end
-      else if needs_update ~dir ~max_age_seconds:one_day then begin
-        Log.info (fun m -> m "Updating %s..." r.name);
-        try pull_repo ~label:r.name ~url_s:r.url ~dst:dir
-        with exn ->
-          Log.warn (fun m ->
-              m "Failed to update %s: %s" r.name (Printexc.to_string exn))
-      end)
+      ensure_one ~refresh ~label:r.name ~url:r.url ~dir)
     config.remotes
 
-let ensure_extra ~data_dir urls =
-  List.filter_map
-    (fun url_s ->
-      let hash = Digest.string url_s |> Digest.to_hex in
-      let name = "extra-" ^ String.sub hash 0 8 in
-      let dir = data_dir / "repos" / name in
-      let pkg_dir = dir / "packages" in
-      if not (Sys.file_exists pkg_dir) then begin
-        Log.info (fun m -> m "Cloning extra repo %s..." url_s);
-        pull_repo ~label:name ~url_s ~dst:dir
-      end
-      else if needs_update ~dir ~max_age_seconds:one_day then begin
-        Log.info (fun m -> m "Updating extra repo %s..." name);
-        try pull_repo ~label:name ~url_s ~dst:dir with _ -> ()
-      end;
-      if Sys.file_exists pkg_dir then Some pkg_dir else None)
-    urls
+let ensure_extra ~data_dir ?(refresh = false) extras =
+  List.map
+    (fun (e : Project.extra_repo) ->
+      let dir = repo_dir ~data_dir e.name in
+      ensure_one ~refresh ~label:e.name ~url:e.url ~dir;
+      dir / "packages")
+    extras
 
 (* -- Pretty-printing ----------------------------------------------------- *)
 

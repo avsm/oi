@@ -13,3 +13,24 @@ XDG_DATA_HOME / XDG_CACHE_HOME are used as fallbacks when OI_* are unset.
   $ export XDG_CACHE_HOME=$PWD/xdg-cache
   $ oi config 2>&1 | grep -q "data:       $PWD/xdg-data/oi"
   $ oi config 2>&1 | grep -q "cache:      $PWD/xdg-cache/oi"
+
+Project metadata shown by 'oi config'.
+
+  $ cat > app.opam <<EOF
+  > opam-version: "2.0"
+  > maintainer: "x"
+  > authors: "x"
+  > homepage: "x"
+  > bug-reports: "x"
+  > license: "ISC"
+  > dev-repo: "git+x"
+  > synopsis: "x"
+  > x-opam-repositories: [ ["local" "https://example.com/r"] ]
+  > pin-depends: [ ["foo.dev" "git+https://example.com/foo.git"] ]
+  > depends: [ "fmt" ]
+  > EOF
+  $ oi config 2>&1 | grep -E '^Project|^  local|^  foo\.dev'
+  Project extra repositories:
+    local                https://example.com/r
+  Project pin-depends:
+    foo.dev              git+https://example.com/foo.git

@@ -21,6 +21,10 @@ let run_dir t ~hash =
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(t.fs / dir);
   Eio.Path.(t.fs / dir)
 
+(* -- Pin-depends cache --------------------------------------------------- *)
+
+let pins_dir t = t.root / "pins"
+
 (* -- Cleanup ------------------------------------------------------------- *)
 
 type item = {
@@ -51,6 +55,11 @@ let cleanable_items t ~data_dir =
     };
     { label = "dune"; path = p "dune"; description = "Dune shared build cache" };
     { label = "repos"; path = d "repos"; description = "Cloned repositories" };
+    {
+      label = "pins";
+      path = p "pins";
+      description = "Pin-depends sources and synthesized packages trees";
+    };
   ]
 
 let size ~sys path =

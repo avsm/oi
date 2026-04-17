@@ -205,6 +205,15 @@ let create ~prefix ~packages_dirs ~conf =
         var "jobs" (S (string_of_int conf.jobs)) "Parallel jobs";
         var "make" (S "make") "Make command";
         var "prefix" (S prefix) "Switch prefix";
+        (* Override the auto-detected platform variables from OpamSysPoll
+           with values from [conf]. This lets [--os=linux] (etc.) on a
+           macOS host actually influence depext filter evaluation and
+           dependency formula filtering. *)
+        var "os" (S conf.os) "Operating system";
+        var "os-distribution" (S conf.os_distribution) "OS distribution";
+        var "os-family" (S conf.os_family) "OS family";
+        var "os-version" (S conf.os_version) "OS version";
+        var "arch" (S conf.arch) "Architecture";
       ]
   in
   let gt : OpamStateTypes.unlocked OpamStateTypes.global_state =
