@@ -6,7 +6,7 @@ let log_src = Logs.Src.create "oi.action"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
-type method_ = Source of { is_virtual : bool } | Binary
+type method_ = Source | Binary
 
 type node = {
   pkg : OpamPackage.t;
@@ -20,12 +20,6 @@ type t = {
   nodes_by_name : node OpamPackage.Name.Map.t;
   topo_order : OpamPackage.Name.t list;
 }
-
-let is_virtual opam =
-  OpamFile.OPAM.build opam = []
-  && OpamFile.OPAM.install opam = []
-  && OpamFile.OPAM.url opam = None
-  && OpamFile.OPAM.extra_sources opam = []
 
 let plan ctx ?d10 ~packages_dirs pkgs =
   let in_solution =
@@ -73,7 +67,7 @@ let plan ctx ?d10 ~packages_dirs pkgs =
         let method_ =
           match d10 with
           | Some d10 when D10.Layer.succeeded d10 ~hash:layer_hash -> Binary
-          | _ -> Source { is_virtual = is_virtual opam }
+          | _ -> Source
         in
         Log.debug (fun m ->
             m "Plan %s: deps=[%s]"
@@ -145,9 +139,8 @@ let dep_pkgs_of t node =
 
 let pp_method_short ~remote_has fmt = function
   | Binary -> Fmt.pf fmt "%a" Fmt.(styled `Green string) "binary"
-  | Source { is_virtual } ->
-      if is_virtual then Fmt.pf fmt "%a" Fmt.(styled `Faint string) "virtual"
-      else if remote_has then Fmt.pf fmt "%a" Fmt.(styled `Cyan string) "remote"
+  | Source ->
+      if remote_has then Fmt.pf fmt "%a" Fmt.(styled `Cyan string) "remote"
       else Fmt.pf fmt "%a" Fmt.(styled `Blue string) "source"
 
 let pp_tree ?(remote_has = fun _ -> false) fmt t =

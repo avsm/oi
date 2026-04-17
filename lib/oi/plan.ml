@@ -70,7 +70,7 @@ let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
             let method_ =
               match node.Action.method_ with
               | Action.Binary -> `Binary
-              | Action.Source _ -> `Source
+              | Action.Source -> `Source
             in
             (* Dependency layers needed for this build *)
             let dep_layers =

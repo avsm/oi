@@ -13,8 +13,7 @@
 
 (** How a package will be installed. *)
 type method_ =
-  | Source of { is_virtual : bool }
-      (** Build from source. Virtual packages have no build/install commands. *)
+  | Source  (** Build from source (or fetch from remote registry). *)
   | Binary  (** Restore from the cached layer at [node.layer_hash]. *)
 
 type node = {
@@ -79,5 +78,5 @@ val layer_hashes : t -> string list
 
 val pp_tree : ?remote_has:(string -> bool) -> t Fmt.t
 (** [pp_tree ?remote_has] renders the action graph as a dependency tree.
-    [Source] packages whose layer hash satisfies [remote_has] are shown as
+    {!Source} packages whose layer hash satisfies [remote_has] are shown as
     "remote" (cyan) instead of "source" (blue). *)

@@ -229,8 +229,8 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
         List.filter_map
           (fun (node : Oi.Action.node) ->
             match node.method_ with
-            | Oi.Action.Source { is_virtual = false } -> Some node.layer_hash
-            | _ -> None)
+            | Oi.Action.Source -> Some node.layer_hash
+            | Binary -> None)
           (Oi.Action.nodes build_plan)
       in
       if source_hashes = [] then build_plan
@@ -1517,14 +1517,14 @@ let registry_build_cmd =
         let build_plan =
           Oi.Action.plan group_ctx ~d10 ~packages_dirs sorted_pkgs
         in
-        let n_source =
-          List.length
-            (List.filter
-               (fun (node : Oi.Action.node) ->
-                 match node.method_ with
-                 | Oi.Action.Source { is_virtual = false } -> true
-                 | _ -> false)
-               (Oi.Action.nodes build_plan))
+        let count_by f =
+          List.length (List.filter f (Oi.Action.nodes build_plan))
+        in
+        let n_build =
+          count_by (fun (n : Oi.Action.node) -> n.method_ = Source)
+        in
+        let n_cached =
+          count_by (fun (n : Oi.Action.node) -> n.method_ = Binary)
         in
         if dry_run then begin
           let remote_has =
@@ -1537,9 +1537,8 @@ let registry_build_cmd =
           Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has) build_plan
         end
         else begin
-          Fmt.pr "%d to build, %d cached@." n_source
-            (Oi.Action.total build_plan - n_source);
-          if n_source > 0 then begin
+          Fmt.pr "%d to build, %d cached@." n_build n_cached;
+          if n_build > 0 then begin
             let build_plan =
               fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx:group_ctx
                 ~pkgs:sorted_pkgs build_plan
