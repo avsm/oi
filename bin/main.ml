@@ -880,49 +880,88 @@ let run_cmd =
       & info ~docv:"ARG" ~doc:"Arguments passed to the target" [])
   in
   let info =
-    Cmd.info "run" ~doc:"Run an OCaml script or an installed binary"
+    Cmd.info "run" ~doc:"Run an OCaml script or any opam-packaged binary"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Solve dependencies, build from source (or restore from cache), \
-             assemble a prefix, and run the target. Subsequent runs with the \
-             same dependencies are instant.";
-          `S "BINARY MODE";
+            "$(b,oi run TARGET) figures out what TARGET needs, installs \
+             those dependencies into a local cache (reusing whatever is \
+             already there), and runs TARGET. After the first run with a \
+             given dependency set, subsequent runs with the same \
+             dependencies are near-instant.";
           `P
-            "When TARGET is not a .ml file, oi looks for a binary of that \
-             name. If --with is given, those packages are solved first. \
-             Otherwise oi tries the target name as a package, then dash-split \
-             prefixes (e.g. $(b,ocluster-admin) tries $(b,ocluster-admin), \
-             then $(b,ocluster)).";
-          `P "Examples:";
+            "TARGET can be an installed binary name (for example \
+             $(b,utop)), a $(b,.ml) script file, or an http(s) URL to a \
+             $(b,.ml) script.";
+          `S "RUNNING A BINARY";
+          `P
+            "Give the name of any executable an opam package provides, \
+             and $(b,oi) finds the package that ships it. If the name \
+             doesn't obviously match a package, $(b,oi) also tries \
+             dash-split prefixes: $(b,ocluster-admin) will also try \
+             $(b,ocluster). When $(b,--with) is given, $(b,oi) tries the \
+             listed packages first. This is useful when you already know \
+             which package ships the binary but the binary name differs \
+             from the package name.";
           `Pre
             "  oi run utop\n\
             \  oi run ocamlformat -- --help\n\
             \  oi run --with=crockford roguedoi";
-          `S "SCRIPT MODE";
+          `S "RUNNING A SCRIPT";
           `P
-            "When TARGET ends in .ml, oi treats it as an OCaml script. \
-             Dependencies are declared on the first line using an OCaml \
-             attribute:";
-          `Pre "  [@@@opam fmt cmdliner lwt]";
-          `P "Version constraints use standard opam syntax:";
-          `Pre "  [@@@opam fmt>=0.9.0 cmdliner>=1.2.0]";
+            "Scripts are plain $(b,.ml) files with dependencies declared \
+             on the first line.";
+          `Pre "  [@@@opam fmt cmdliner lwt>=5.0]";
           `P
-            "The script is compiled into a dune project with the declared \
-             packages as libraries. The compiled binary is cached by a hash of \
-             the script contents and its dependencies, so edits trigger a \
-             rebuild but unchanged scripts run instantly.";
-          `P "Examples:";
+            "Each token is an opam package, optionally with a version \
+             constraint ($(b,>=), $(b,>), $(b,<=), $(b,<), or $(b,=)).";
+          `P
+            "If a token contains a dot (for example \
+             $(b,ppx_deriving.show) or $(b,eio.core)), it names a \
+             specific findlib library inside an opam package. The opam \
+             package before the dot is installed and the full name is \
+             passed to the build system.";
+          `P
+            "Packages starting with $(b,ppx_) are wired in as PPX \
+             preprocessors automatically, so $(b,@@deriving show) and \
+             similar annotations just work.";
+          `Pre "  [@@@opam eio.core ppx_deriving.show ppx_jane]";
+          `P
+            "If the build doesn't pick up your packages the way you \
+             expected, $(b,oi run -vv SCRIPT.ml) logs the dune file that \
+             was generated.";
+          `P
+            "Scripts are cached by a hash of the file contents plus the \
+             dependency list. Running the same script again is instant. \
+             Editing it triggers a rebuild. URL targets are fetched to a \
+             fresh temp file on each run, but the content-based hash \
+             means unchanged remote scripts still hit the cache.";
           `Pre
             "  oi run my_script.ml\n\
-            \  oi run my_script.ml --with=tls -- arg1 arg2";
-          `S "DRY RUN";
+            \  oi run my_script.ml --with=tls -- arg1 arg2\n\
+            \  oi run https://gist.example.com/hello.ml";
+          `S "PREVIEWING WITHOUT RUNNING";
           `P
-            "With -n/--dry-run, oi solves and checks the layer cache but does \
-             not build or run anything. The output shows each package as \
-             $(b,source) (needs building), $(b,binary) (cached), $(b,remote) \
-             (available from registry), or $(b,virtual) (no-op).";
+            "$(b,-n) or $(b,--dry-run) resolves dependencies and checks \
+             the cache, but skips the actual build and execution. Each \
+             package is tagged so you can see what work $(b,oi) would do:";
+          `I
+            ( "$(b,binary)",
+              "The package is already cached locally, so a real run \
+               would be instant." );
+          `I
+            ( "$(b,remote)",
+              "The package is available from the configured registry \
+               and would be downloaded rather than built." );
+          `I
+            ( "$(b,source)",
+              "The package is neither cached nor in the registry, so \
+               $(b,oi) would build it from source." );
+          `I
+            ( "$(b,virtual)",
+              "The package is a stub (such as $(b,conf-pkg-config)) and \
+               needs no work." );
         ]
   in
   Cmd.v info
@@ -997,7 +1036,37 @@ let plan_cmd =
       & info ~docv:"PKG" ~doc:"Package(s) to plan" [])
   in
   let info =
-    Cmd.info "plan" ~doc:"Show the resolved build plan for package(s)"
+    Cmd.info "plan" ~doc:"Show what would happen if you ran these packages"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Answers the question 'what does $(b,oi) need to do if I run \
+             $(b,PKG)?'. It resolves the dependency tree (including any \
+             project pins, extra repositories, and $(b,--with) or \
+             $(b,--with-repo) additions) and prints every package it \
+             would touch, without downloading or building anything.";
+          `P "Each node is tagged:";
+          `I
+            ( "$(b,source)",
+              "The package would be built from source on a real run." );
+          `I
+            ( "$(b,binary)",
+              "The package is already cached locally and needs no work." );
+          `I
+            ( "$(b,remote)",
+              "The package is available in the configured registry and \
+               would be downloaded rather than built." );
+          `I
+            ( "$(b,virtual)",
+              "The package is a stub (such as $(b,conf-pkg-config)) and \
+               needs no work." );
+          `P
+            "Reach for this when an $(b,oi run) is slower than you \
+             expected (to see which packages are being built vs. \
+             downloaded), or when deciding whether to prime a remote \
+             registry with $(b,oi registry build).";
+        ]
   in
   Cmd.v info
     Term.(
@@ -1060,7 +1129,28 @@ let env_cmd =
       vars
   in
   let info =
-    Cmd.info "env" ~doc:"Print shell environment for the current project"
+    Cmd.info "env"
+      ~doc:"Print shell exports that point OCaml tools at the project prefix"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Prints $(b,export PATH=...), $(b,export OCAMLLIB=...), and the \
+             other variables OCaml tools look at, so that running \
+             $(b,ocaml), $(b,dune), or anything else picks up the \
+             dependency set installed under $(b,_oi/prefix/). The typical \
+             usage is:";
+          `Pre "  eval \"\\$(oi env)\"";
+          `P
+            "This is the same environment $(b,oi sync) writes into \
+             $(b,.envrc) for $(b,direnv), but without the $(b,direnv) \
+             wrapper. Use it when direnv isn't available, for a \
+             throw-away shell, or inside a Makefile target.";
+          `P
+            "If $(b,_oi/prefix/) is missing or out-of-date, a sync runs \
+             implicitly before the variables are printed, so the \
+             resulting environment is always consistent.";
+        ]
   in
   Cmd.v info
     Term.(
@@ -1114,7 +1204,29 @@ let which_cmd =
              *format*)."
           [])
   in
-  let info = Cmd.info "which" ~doc:"Search for binaries in the layer index" in
+  let info =
+    Cmd.info "which"
+      ~doc:"Find which opam package ships a given binary"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Answers the question 'which package do I need to install to \
+             get this binary?'. Searches both the local cache and the \
+             configured remote registry, so you get hits even for \
+             packages you've never built yourself.";
+          `P
+            "$(b,PATTERN) accepts $(b,*) as a wildcard. Output has one row \
+             per hit: the binary name, the package and version that \
+             provides it, and a short hash of the cached build (for \
+             feeding into other $(b,oi registry) commands if you want).";
+          `P
+            "Results are sorted alphabetically by binary name, with newer \
+             versions of the same package listed first.";
+          `Pre
+            "  oi which dune\n  oi which 'ocaml*'\n  oi which '*fmt*'";
+        ]
+  in
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ registry_term $ pattern)
 
@@ -1213,8 +1325,39 @@ let sync_cmd =
   in
   let info =
     Cmd.info "sync"
-      ~doc:
-        "Scan *.opam files, solve dependencies, build, and assemble _oi/prefix/"
+      ~doc:"Install the current project's dependencies into _oi/prefix/"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Reads every $(b,*.opam) file in the current directory, works \
+             out the complete list of dependencies (including pins and \
+             any extra repositories the project declares), and installs \
+             them into a local $(b,_oi/prefix/) directory. From then on, \
+             running $(b,ocaml), $(b,dune), $(b,utop) and friends in this \
+             project uses that dependency set.";
+          `P
+            "After a successful sync two things exist alongside the \
+             project. $(b,_oi/prefix/) contains the assembled toolchain \
+             ($(b,bin/), $(b,lib/), $(b,share/), and so on), built from \
+             hardlinks into the cache so it's cheap to recreate. \
+             $(b,.envrc) is a shell script that points $(b,PATH) and the \
+             OCaml-related variables at that prefix. You can source it \
+             manually, or install $(b,direnv) and run $(b,direnv allow) \
+             to have it activated automatically when you enter the \
+             directory.";
+          `P
+            "Rerun this when you edit $(b,*.opam) files, pull new pins, \
+             or want to pick up packages that appeared on the remote \
+             registry since last time. $(b,oi exec) does an implicit \
+             sync when the prefix is older than the opam files, so most \
+             people only reach for $(b,oi sync) directly after a \
+             deliberate change.";
+          `P
+            "$(b,--refresh) forces re-pulls of opam repositories and git \
+             pins even if their timestamp says they're fresh, which is \
+             how you pick up a commit that just landed upstream.";
+        ]
   in
   Cmd.v info
     Term.(
@@ -1327,26 +1470,31 @@ let add_cmd =
   in
   let info =
     Cmd.info "add"
-      ~doc:"Add an opam package dependency to the local project's dune-project"
+      ~doc:"Add a new dependency to the current project"
       ~man:
         [
           `S "DESCRIPTION";
           `P
-            "$(b,oi add PKG) solves the current project with $(b,PKG) as an \
-             extra dependency, and — if the solve succeeds — edits \
-             $(b,dune-project) to add $(b,PKG) to a $(b,\\(package ...\\)) \
-             stanza's $(b,\\(depends ...\\)) list, then runs $(b,dune build) \
-             so dune regenerates the $(b,*.opam) files to match. Finally \
-             re-runs $(b,oi sync) so $(b,_oi/prefix) reflects the committed \
-             source of truth.";
+            "$(b,oi add PKG) pulls a new opam package into your project. \
+             First it checks that $(b,PKG) can actually be resolved \
+             alongside everything else (and does a sync, so the new \
+             package is installed too). Then it edits $(b,dune-project) \
+             to record $(b,PKG) as a dependency, runs $(b,dune build) to \
+             regenerate the $(b,*.opam) files, and finally re-syncs so \
+             the installed toolchain matches the committed source.";
           `P
-            "Requires $(b,\\(generate_opam_files\\)) to be enabled in \
-             $(b,dune-project) — the whole point of the command is to let dune \
-             remain the canonical source of the dependency list.";
+            "If the pre-flight resolve fails, nothing is written to disk. \
+             You can use this to probe whether a dependency would be \
+             compatible without committing to the change.";
           `P
-            "Nothing is written to disk if the pre-flight solve fails, so you \
-             can safely use this to probe whether a dependency would be \
-             compatible.";
+            "Your project's $(b,dune-project) needs $(b,\\(generate_opam_files\\)) \
+             enabled for this to work, since the command treats the \
+             $(b,dune-project) as the source of truth and lets dune \
+             regenerate the opam files.";
+          `P
+            "When the $(b,dune-project) declares multiple packages, use \
+             $(b,-p NAME) to pick which one the new dependency is added \
+             to.";
         ]
   in
   Cmd.v info
@@ -1392,19 +1540,22 @@ let exec_cmd =
   in
   let info =
     Cmd.info "exec"
-      ~doc:"Run a command in the project's _oi/prefix/ environment"
+      ~doc:"Run a command against the current project's dependencies"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Runs $(b,CMD) with PATH, OCAMLLIB, and related variables set so \
-             that the toolchain assembled under $(b,_oi/prefix/) is picked up \
-             — identical to sourcing the $(b,.envrc) written by $(b,oi sync).";
+            "Runs $(b,CMD) with the project's toolchain active (that is, \
+             with the environment that $(b,oi sync) writes into \
+             $(b,.envrc)). Use this for one-off invocations of \
+             $(b,dune), $(b,ocamlformat), $(b,utop), or any other tool \
+             supplied by the project's dependencies, without installing \
+             anything globally or sourcing $(b,.envrc) by hand.";
           `P
-            "Auto-syncs when $(b,_oi/prefix/) is missing or when any \
-             $(b,*.opam) in the current directory is newer than the prefix, so \
-             $(b,oi exec) works without a separate $(b,oi sync) step.";
-          `P "Examples:";
+            "$(b,oi exec) auto-syncs when $(b,_oi/prefix/) is missing or \
+             when any $(b,*.opam) in the current directory is newer than \
+             the prefix, so you can run it immediately after editing \
+             your dependencies without a separate $(b,oi sync) step.";
           `Pre
             "  oi exec dune build\n\
             \  oi exec -- ocamlformat --check .\n\
@@ -1483,7 +1634,36 @@ let config_cmd =
         end
   in
   let info =
-    Cmd.info "config" ~doc:"Show platform, directories, and repository status"
+    Cmd.info "config"
+      ~doc:"Show what oi has detected about this machine and its caches"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P "Prints a human-readable summary of $(b,oi)'s view of the world.";
+          `I
+            ( "$(b,Platform)",
+              "Operating system, architecture, and distribution that \
+               $(b,oi) detected. Package availability can differ between \
+               distros, so this is the first thing to check if a solve \
+               gives unexpected results." );
+          `I
+            ( "$(b,Directories)",
+              "The cache and data directories $(b,oi) is using, which \
+               honour $(b,OI_CACHE_DIR) and $(b,OI_DATA_DIR) if set and \
+               otherwise follow the XDG conventions. Each line shows \
+               current disk usage." );
+          `I
+            ( "$(b,Repositories)",
+              "The local clone paths of the opam package index and any \
+               extra repositories, with their last-updated timestamps \
+               so you can tell whether a $(b,--refresh) would pull new \
+               data." );
+          `P
+            "Start here when a command 'solved something weird'. The \
+             platform line shows which package candidates $(b,oi) \
+             considered, and the repository timestamps show whether you \
+             were looking at a stale index.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term $ data_dir_term)
 
@@ -1580,7 +1760,45 @@ let clean_cmd =
           [ "dry-run"; "n" ])
   in
   let info =
-    Cmd.info "clean" ~doc:"Remove cached data and workspace artifacts"
+    Cmd.info "clean" ~doc:"Free up disk space by deleting cached data"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "With no flags, this command only $(i,lists) what it could \
+             clean up, along with how much disk each category is using. \
+             It doesn't remove anything unless you ask. Flags are \
+             additive; combine as many as you like.";
+          `I
+            ( "$(b,--toolchains)",
+              "Remove the OCaml compilers $(b,oi) downloaded. A later \
+               $(b,oi run) will re-download them." );
+          `I
+            ( "$(b,--sources)",
+              "Remove cached source tarballs and pinned source clones. \
+               A later build will refetch sources from upstream." );
+          `I
+            ( "$(b,--binaries)",
+              "Remove the pre-built packages that make subsequent runs \
+               fast. Everything will be rebuilt from source on the next \
+               $(b,oi run)." );
+          `I
+            ( "$(b,--dune-cache)",
+              "Remove the shared build cache that $(b,dune) uses across \
+               projects. Purely a performance hit on the next build." );
+          `I
+            ( "$(b,--repos)",
+              "Remove the clones of the opam package index and any \
+               extra repositories. The next solve will refetch them." );
+          `I
+            ( "$(b,--all)",
+              "Delete every category above, plus the assembled prefix \
+               caches and script build dirs. Effectively a 'reset' that \
+               undoes everything $(b,oi) has ever cached." );
+          `P
+            "Use $(b,-n) or $(b,--dry-run) to see what would be deleted \
+             before committing. Recommended before $(b,--all).";
+        ]
   in
   Cmd.v info
     Term.(
@@ -1728,7 +1946,21 @@ let registry_show_cmd =
           [])
   in
   let info =
-    Cmd.info "show" ~doc:"Show layer cache stats and package details"
+    Cmd.info "show" ~doc:"Summarise what's in the local cache of pre-built packages"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "With no argument, prints how many packages are cached \
+             locally, how much disk they take, and which ones failed to \
+             build (if any). Useful as a quick sanity check on the state \
+             of the cache.";
+          `P
+            "Pass a $(b,PACKAGE) name to drill into that specific entry. \
+             You'll see its exact cached version, the build hash, the \
+             list of direct dependencies that went into it, and the \
+             files it installed.";
+        ]
   in
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ data_dir_term $ target)
@@ -1774,7 +2006,21 @@ let registry_index_cmd =
       !total_files
   in
   let info =
-    Cmd.info "index" ~doc:"Build a SQLite index of the binary layer cache"
+    Cmd.info "index" ~doc:"Rebuild the fast-lookup index over the local cache"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "$(b,oi) keeps a small SQLite database alongside the cache \
+             that maps binaries to the packages that ship them. It's \
+             what powers $(b,oi which) and the binary-mode fallback in \
+             $(b,oi run). This command rebuilds that database from \
+             scratch by walking every cached package.";
+          `P
+            "You normally don't need to run this. Reach for it if \
+             $(b,oi which) starts missing a binary you know is cached, \
+             or after a manual edit of the cache directory.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
@@ -1870,7 +2116,28 @@ let registry_export_cmd =
   in
   let info =
     Cmd.info "export"
-      ~doc:"Export cached layers as tar.zst archives for HTTP serving"
+      ~doc:"Publish the local cache to a directory for HTTP serving or rsync"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Copies every locally-cached package into $(b,DIR) in the \
+             layout an $(b,oi) client expects when it points at a \
+             remote registry. The result is a tree of compressed \
+             archives and an index file, ready to be served over HTTP \
+             (static file hosting is fine) or $(b,rsync)'d to another \
+             machine.";
+          `P
+            "If $(b,--registry URL) is given, $(b,oi) first downloads \
+             the registry's existing index and merges those rows into \
+             the one being published. This matters when you $(b,rsync) \
+             back to a shared registry: without the merge, your export \
+             would overwrite entries contributed by other machines.";
+          `P
+            "Source tarballs are published once at the top of $(b,DIR) \
+             (under $(b,sources/)), not per OS, because source code is \
+             the same regardless of which distro will consume it.";
+        ]
   in
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ registry_term $ output)
@@ -2151,7 +2418,25 @@ let registry_build_cmd =
   in
   let info =
     Cmd.info "build"
-      ~doc:"Solve and build layers for multiple packages into the local cache"
+      ~doc:"Build a list of packages so later users don't have to"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Solves for and builds every $(b,PKG) into the local cache \
+             (and the source-tarball mirror alongside it). Intended for \
+             priming a machine that will later publish the cache via \
+             $(b,oi registry export), so that other $(b,oi) clients \
+             pointed at the registry get an instant binary download \
+             instead of building from source.";
+          `P
+            "Pass many packages on one invocation. $(b,oi) groups \
+             compatible solutions together, which is much cheaper than \
+             running $(b,oi run PKG) over each package in a loop.";
+          `P
+            "$(b,-n) / $(b,--dry-run) prints what would be built without \
+             actually building, useful when you're lining up a batch.";
+        ]
   in
   Cmd.v info
     Term.(
@@ -2243,7 +2528,31 @@ let depexts_cmd =
   in
   let info =
     Cmd.info "depexts"
-      ~doc:"Print system packages required by the project's dependencies"
+      ~doc:"List the system packages your project's dependencies need"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Some opam packages need C libraries or development tools that \
+             have to come from your operating system's package manager \
+             ($(b,apt), $(b,dnf), $(b,brew), and so on). This command \
+             solves the project's dependency tree and prints every \
+             such system package, tagged for the distribution you're \
+             running on.";
+          `P
+            "Typical use is piping into your package manager before a \
+             build, for example:";
+          `Pre "  sudo apt install \\$(oi depexts)";
+          `P
+            "$(b,--by-package) groups the output by the opam package that \
+             requires each system dependency, so you can tell which \
+             package wants which library. Useful when diagnosing a \
+             $(b,./configure) error inside a single package.";
+          `P
+            "$(b,--os=NAME) pretends you're on a different distro and \
+             prints what you'd need there. Use this when scripting for \
+             multiple targets from one machine.";
+        ]
   in
   Cmd.v info
     Term.(
@@ -2389,7 +2698,18 @@ let registry_mirror_stats_cmd =
     Fmt.pr "  blobs:      %d@." s.count;
     Fmt.pr "  total size: %s@." (human_bytes s.total_size)
   in
-  let info = Cmd.info "stats" ~doc:"Show source mirror statistics" in
+  let info =
+    Cmd.info "stats" ~doc:"Show how many source tarballs are mirrored and their total size"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "One-line summary: how many distinct source tarballs are \
+             currently mirrored and how much disk they take. Reach for \
+             this before an $(b,oi registry export) to gauge how much \
+             will ship, or just to track mirror growth over time.";
+        ]
+  in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
 let registry_mirror_gc_cmd =
@@ -2404,9 +2724,18 @@ let registry_mirror_gc_cmd =
   in
   let info =
     Cmd.info "gc"
-      ~doc:
-        "Remove source blobs no longer referenced by any package in the mirror \
-         index"
+      ~doc:"Delete mirrored tarballs that no package still references"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Removes source tarballs from the mirror when no package in \
+             the index still references them. This happens after you've \
+             built a newer version of a package but kept the mirror \
+             around: the old tarball lingers on disk even though nothing \
+             points at it any more. Safe to run at any time; the cache \
+             will refetch if a later rebuild needs an older source.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
@@ -2429,7 +2758,17 @@ let registry_mirror_verify_cmd =
   in
   let info =
     Cmd.info "verify"
-      ~doc:"Re-hash every mirrored blob and report any mismatches"
+      ~doc:"Detect corrupted tarballs in the mirror by re-hashing them"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Walks every tarball in the mirror, recomputes its checksum, \
+             and complains loudly if the bytes on disk don't match what \
+             the index says they should. Run this before a big \
+             $(b,oi registry export) if the mirror has been sitting \
+             around for a while, or after disk-level problems.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
@@ -2474,16 +2813,47 @@ let registry_mirror_list_cmd =
   in
   let info =
     Cmd.info "list"
-      ~doc:"List every source tarball currently stored in the mirror"
+      ~doc:"Show every source tarball in the mirror, one row per package that uses it"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Prints one row for each tarball reference in the mirror, \
+             with the package and version that pulled it in, the kind \
+             of source (main or an extra patch), a short hash of the \
+             tarball, its on-disk size, and the upstream URL it came \
+             from. The same tarball can show up twice if two packages \
+             share a source, in which case both rows point at the same \
+             short hash.";
+          `P
+            "$(b,-p NAME) restricts the listing to a single package, \
+             handy when tracking down which sources a specific package \
+             contributed to the mirror.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term $ package)
 
 let registry_mirror_cmd =
   let info =
     Cmd.info "mirror"
-      ~doc:
-        "Manage the source tarball mirror (content-addressed, opam cache \
-         format)"
+      ~doc:"Manage the local copy of upstream source tarballs"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Whenever $(b,oi) builds a package, it keeps a copy of the \
+             source tarball it fetched from upstream. Taken together, \
+             those copies form a mirror of the opam ecosystem's sources \
+             for the packages you actually use. The mirror is shipped \
+             alongside the binary cache when you $(b,oi registry \
+             export), so downstream clients and offline rebuilds don't \
+             have to hit the upstream servers.";
+          `P
+            "These subcommands let you inspect and maintain that \
+             mirror: show totals, list individual entries, verify the \
+             tarballs still hash correctly, and garbage-collect blobs \
+             that are no longer referenced.";
+        ]
   in
   Cmd.group info
     [
@@ -2495,7 +2865,23 @@ let registry_mirror_cmd =
 
 let registry_cmd =
   let info =
-    Cmd.info "registry" ~doc:"Manage the layer cache and remote registry"
+    Cmd.info "registry"
+      ~doc:"Manage the cache of pre-built packages and the remote registry"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "$(b,oi) keeps a local cache of pre-built OCaml packages so \
+             repeated work is avoided, and it can pull those pre-built \
+             packages from a remote registry rather than building them \
+             itself. This group of commands inspects and manages both.";
+          `P
+            "Most users only need $(b,oi registry show) to peek at the \
+             cache, and $(b,oi registry build) / $(b,oi registry export) \
+             if they're running their own registry. The $(b,mirror) \
+             subgroup handles the companion mirror of upstream source \
+             tarballs.";
+        ]
   in
   Cmd.group info
     [
@@ -2511,51 +2897,146 @@ let registry_cmd =
 
 let () =
   let info =
-    Cmd.info "oi" ~version:"0.1.4" ~doc:"Stateless OCaml package builder"
+    Cmd.info "oi" ~version:"0.1.4"
+      ~doc:"A fast, stateless OCaml package manager"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "oi is a stateless OCaml package builder. It solves dependencies \
-             with opam-0install, builds packages in parallel stages using a \
-             relocatable OCaml compiler, and caches each package as a binary \
-             layer. Assembled prefixes are created on demand via hardlinks. No \
-             global state, no switches, no ~/.opam.";
+            "$(b,oi) is a fast, stateless OCaml package manager. It reads \
+             $(b,*.opam) files (the dependency manifests OCaml projects \
+             ship) and opam repositories (the public package collections \
+             the OCaml community maintains), resolves what's needed, and \
+             builds, installs, or runs the result on demand. It caches \
+             every build so repeated invocations reuse what's already \
+             there.";
           `S "QUICK START";
-          `P "Run any binary from the opam repository:";
+          `P
+            "The shortest path to seeing $(b,oi) do something useful is \
+             to run a well-known tool from the opam ecosystem. The first \
+             call builds whatever it needs; later calls reuse the cache.";
           `Pre "  oi run utop\n  oi run ocamlformat -- --help";
-          `P "Run an OCaml script with dependencies:";
+          `P
+            "You can also run a short OCaml script directly. Declare the \
+             packages it uses on the first line:";
+          `Pre
+            "  [@@@opam fmt cmdliner lwt>=5.0 ppx_deriving.show]\n\
+            \  let () = ...";
           `Pre "  oi run my_script.ml";
-          `P "The first line of the script declares opam packages:";
-          `Pre "  [@@@opam fmt cmdliner lwt>=5.0]";
-          `P "Show what would be built without building:";
-          `Pre "  oi run -n utop";
-          `P "Show the fully resolved build plan:";
-          `Pre "  oi plan utop";
+          `P "Scripts can live on the web too. $(b,oi) fetches them for you.";
+          `Pre "  oi run https://example.com/hello.ml";
+          `P
+            "Inside an existing OCaml project (one with $(b,*.opam) files \
+             or a $(b,dune-project) that generates them), $(b,oi sync) \
+             installs the project's dependencies into a local \
+             $(b,_oi/prefix/) and writes an $(b,.envrc) so your shell \
+             picks them up.";
+          `Pre
+            "  oi sync\n\
+            \  direnv allow      # or: eval \"\\$(oi env)\"\n\
+            \  oi exec dune build";
+          `P
+            "Use $(b,oi add PKG) to add a new dependency to the project \
+             (it edits $(b,dune-project) and re-syncs for you).";
+          `Pre "  oi add logs\n  oi add \"fmt>=0.9\"";
+          `P "Preview what $(b,oi) would do without actually doing it.";
+          `Pre "  oi plan utop\n  oi run -n utop";
+          `S "COMMAND CATEGORIES";
+          `P "Commands are listed alphabetically below. By purpose:";
+          `I
+            ( "$(b,Getting started)",
+              "$(b,run) is the one command most people need. It executes \
+               an OCaml script (local file or http(s) URL) or any binary \
+               provided by an opam package, fetching what's missing and \
+               caching it for next time." );
+          `I
+            ( "$(b,Working in a project)",
+              "$(b,sync) installs everything your $(b,*.opam) files need \
+               into a local $(b,_oi/prefix/) directory and writes an \
+               $(b,.envrc) so your shell picks it up. $(b,exec) runs \
+               commands (such as $(b,dune build)) against that directory. \
+               $(b,env) prints the same environment for piping into \
+               $(b,eval). $(b,add) adds a new dependency to \
+               $(b,dune-project) and re-syncs. $(b,depexts) tells you \
+               which system packages (from $(b,apt), $(b,brew), and so on) \
+               the dependency tree also wants." );
+          `I
+            ( "$(b,Checking what's going on)",
+              "$(b,plan) shows which packages will be downloaded from the \
+               registry, which will be built from source, and which are \
+               already cached. $(b,which) finds which package provides a \
+               given binary. $(b,config) dumps the detected platform and \
+               cache paths, which is useful when something solved \
+               unexpectedly." );
+          `I
+            ( "$(b,Sharing builds and managing disk)",
+              "$(b,registry) manages the cache of pre-built packages. You \
+               can fetch from a remote registry, publish back to one, and \
+               mirror the source tarballs too. $(b,clean) deletes cached \
+               data when you need the disk space back." );
           `S "HOW IT WORKS";
           `P
-            "On first use, oi fetches a relocatable OCaml compiler and the \
-             opam package repository. For each $(b,oi run), it:";
-          `P "1. Solves dependencies (opam-0install solver)";
-          `P "2. Checks the binary layer cache for each package";
-          `P "3. Builds uncached packages in parallel stages";
-          `P "4. Captures each build as a content-addressed layer";
-          `P "5. Assembles a prefix from all layers via hardlinks";
-          `P "6. Runs the target binary or script";
-          `P "Subsequent runs with the same dependencies skip steps 2-5.";
+            "The first time you run $(b,oi), it downloads a compiler and \
+             the opam package index. For each $(b,oi run) after that, it \
+             follows four steps.";
+          `P
+            "First, it resolves the exact version of every dependency \
+             (including transitive ones).";
+          `P
+            "Second, for each one, it reuses a pre-built copy if one is \
+             cached locally or available from the configured remote \
+             registry.";
+          `P "Third, it builds anything that's missing, in parallel where possible.";
+          `P
+            "Fourth, it stitches the pieces together into a working \
+             toolchain and runs your code.";
+          `P
+            "The next invocation with the same dependencies skips straight \
+             to step four.";
           `S "SCRIPT FORMAT";
           `P
-            "OCaml scripts (.ml files) declare opam dependencies on the first \
-             line using an attribute:";
+            "A script is any $(b,.ml) file whose first line declares the \
+             opam packages it uses.";
           `Pre "  [@@@opam fmt cmdliner>=1.2.0 lwt]";
           `P
-            "Each token is parsed as an opam package atom. Version constraints \
-             use opam syntax: $(b,>=), $(b,>), $(b,<=), $(b,<), $(b,=). The \
-             packages are installed as dune libraries, so use the findlib/dune \
-             library name in your code (e.g. $(b,open Fmt) for the fmt \
-             package).";
-          `S "ENVIRONMENT";
-          `P (Xdge.Cmd.env_docs app_name);
+            "Each token is one dependency. Add a version constraint with \
+             $(b,>=), $(b,>), $(b,<=), $(b,<), or $(b,=) if you need a \
+             specific version.";
+          `P
+            "A $(b,.sub) suffix selects a specific findlib library \
+             inside an opam package. $(b,oi) installs the package and \
+             hands the full name to the build system. For example, \
+             $(b,ppx_deriving.show) installs the $(b,ppx_deriving) \
+             package and makes $(b,ppx_deriving.show) available.";
+          `P
+            "Packages whose name starts with $(b,ppx_) are automatically \
+             wired in as PPX preprocessors rather than plain libraries, \
+             so $(b,@@deriving show) and similar annotations just work. \
+             Everything else goes in as a normal library, so use the \
+             opam name in $(b,open) and module paths (for example \
+             $(b,open Fmt) for the $(b,fmt) package).";
+          `P
+            "If the build doesn't pick up your packages the way you \
+             expected, run $(b,oi run -vv SCRIPT.ml). It logs the exact \
+             build file $(b,oi) generated from your dependency list.";
+          `S Manpage.s_environment;
+          `P
+            "$(b,oi) uses two directories: a $(i,data) directory for \
+             long-lived state (opam repositories, the relocatable \
+             compiler) and a $(i,cache) directory for rebuildable data \
+             (pre-built packages, assembled prefixes, the source \
+             mirror). Each can be pointed elsewhere by setting one \
+             environment variable, or by passing a command-line flag \
+             that takes precedence.";
+          `I
+            ( "$(b,OI_DATA_DIR)",
+              "Override the data directory for $(b,oi) alone. Falls \
+               back to $(b,XDG_DATA_HOME/oi), then \
+               $(b,~/.local/share/oi)." );
+          `I
+            ( "$(b,OI_CACHE_DIR)",
+              "Override the cache directory for $(b,oi) alone. Falls \
+               back to $(b,XDG_CACHE_HOME/oi), then $(b,~/.cache/oi)." );
         ]
   in
   let cmd =
