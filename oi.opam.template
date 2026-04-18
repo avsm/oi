@@ -1,6 +1,4 @@
 x-ai-disclosure: "ai-assisted"
 x-ai-model: "claude-opus-4-6"
 x-ai-provider: "Anthropic"
-pin-depends: [
-  [ "tomlt.dev" "git+https://tangled.org/anil.recoil.org/ocaml-tomlt.git"]
-]
+x-reporepo: "avsm"

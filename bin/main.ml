@@ -849,12 +849,17 @@ let run_cmd =
     (* Load project extras (if any *.opam in cwd). A missing/unreadable
        directory degrades to "no extras"; malformed metadata still raises
        [Error.E] so the user sees the problem. *)
-    let project_extras, project_pins =
+    let project_extras, project_pins, project_overlays =
       match Oi.Project.load ~fs cwd_s with
-      | exception Sys_error _ -> ([], [])
-      | exception Eio.Exn.Io _ -> ([], [])
-      | p -> (p.extra_repos, p.pins)
+      | exception Sys_error _ -> ([], [], [])
+      | exception Eio.Exn.Io _ -> ([], [], [])
+      | p -> (p.extra_repos, p.pins, p.overlays)
     in
+    (* Treat [x-reporepo:] handles as if they had been passed via
+       [--with-repo]. Project-declared overlays go earlier in the
+       list so CLI-supplied ones take priority (first-wins at repos
+       level; later arguments stack atop). *)
+    let with_repos = project_overlays @ with_repos in
     let cli_extras = cli_extra_repos with_repos in
     let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
     (* Pin each [handle:pkg] (from TARGET or [--with]) to whatever
@@ -1141,6 +1146,26 @@ let run_cmd =
             "  oi run utop\n\
             \  oi run ocamlformat -- --help\n\
             \  oi run --with=crockford roguedoi";
+          `S "PULLING FROM A SOMEONE ELSE'S OVERLAY";
+          `P
+            "If someone publishes their own collection of opam packages \
+             (an $(i,overlay)) and you've registered it in the reporepo \
+             (see $(b,oi repo add)), prefix the target or a $(b,--with) \
+             value with their handle and a colon to opt in to their \
+             version rather than the default one.";
+          `Pre
+            "  oi run avsm:owntracks\n\
+            \  oi run samoht:irmin\n\
+            \  oi run --with=avsm:crockford roguedoi";
+          `P
+            "When a handle is used, $(b,oi) pins the named package to \
+             whatever version that overlay ships, even if a different \
+             overlay advertises a higher version. Stack handles to \
+             compose overlays on one command; later handles take \
+             priority when they disagree on a package. Inside a \
+             project, $(b,x-reporepo: [\"avsm\"]) in an opam file has \
+             the same effect as $(b,--with-repo=avsm) for every \
+             invocation in that directory.";
           `S "RUNNING A SCRIPT";
           `P
             "Scripts are plain $(b,.ml) files with dependencies declared \
@@ -1216,12 +1241,13 @@ let plan_cmd =
     ignore (get_packages_dirs ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
-    let project_extras, project_pins =
+    let project_extras, project_pins, project_overlays =
       match Oi.Project.load ~fs cwd_s with
-      | exception Sys_error _ -> ([], [])
-      | exception Eio.Exn.Io _ -> ([], [])
-      | p -> (p.extra_repos, p.pins)
+      | exception Sys_error _ -> ([], [], [])
+      | exception Eio.Exn.Io _ -> ([], [], [])
+      | p -> (p.extra_repos, p.pins, p.overlays)
     in
+    let with_repos = project_overlays @ with_repos in
     let all_extras =
       merge_extras ~cli:(cli_extra_repos with_repos) ~project:project_extras
     in
@@ -1484,6 +1510,10 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   if deps = [] && with_deps = [] then
     Oi.Error.config_error "No .opam files found in %s." cwd;
   say "Dependencies from opam files: %s" (String.concat ", " deps);
+  if project.overlays <> [] then
+    say "Project overlays (from x-reporepo): %s"
+      (String.concat ", " project.overlays);
+  let with_repos = project.overlays @ with_repos in
   let all_extras =
     merge_extras ~cli:(cli_extra_repos with_repos) ~project:project.extra_repos
   in
@@ -1586,6 +1616,12 @@ let sync_cmd =
              sync when the prefix is older than the opam files, so most \
              people only reach for $(b,oi sync) directly after a \
              deliberate change.";
+          `P
+            "Opt into someone's package overlay by adding \
+             $(b,x-reporepo: [\"handle\"]) to any of the project's \
+             opam files. $(b,oi sync) will then behave as if you had \
+             passed $(b,--with-repo=handle) on every invocation. \
+             Multiple handles stack; later ones win on conflicts.";
           `P
             "$(b,--refresh) forces re-pulls of opam repositories and git \
              pins even if their timestamp says they're fresh, which is \
@@ -1872,6 +1908,10 @@ let config_cmd =
                 (OpamPackage.to_string pin.pkg)
                 (OpamUrl.to_string pin.url))
             p.pins
+        end;
+        if p.overlays <> [] then begin
+          Fmt.pr "@.Project overlays (x-reporepo):@.";
+          List.iter (fun h -> Fmt.pr "  %s@." h) p.overlays
         end
   in
   let info =
@@ -2703,6 +2743,7 @@ let depexts_cmd =
         "No dependencies declared in %s (need at least one *.opam with \
          non-local depends, or use --with)"
         cwd_s;
+    let with_repos = proj.overlays @ with_repos in
     let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh proj.pins in
     let all_extras =
       merge_extras ~cli:(cli_extra_repos with_repos) ~project:proj.extra_repos
@@ -3146,9 +3187,9 @@ let reporepo_term =
     value & opt string default
     & info ~docv:"DIR"
         ~doc:
-          "Path to the overlay reporepo. Falls back to \
-           $(b,\\$OI_REPOREPO), then the built-in default \
-           ($(b,~/scratch/reporepo))."
+          "Directory containing the reporepo to operate on. Falls back \
+           to $(b,\\$OI_REPOREPO), then to the built-in default at \
+           $(b,~/scratch/reporepo)."
         [ "reporepo" ])
 
 let depend_term =
@@ -3157,8 +3198,12 @@ let depend_term =
     & opt_all string []
     & info ~docv:"HANDLE[=VERSION]"
         ~doc:
-          "Add an overlay dependency. $(b,HANDLE=VERSION) pins an exact \
-           version; $(b,HANDLE) alone depends on any version. Repeatable."
+          "Make this overlay depend on another one. Use \
+           $(b,HANDLE=VERSION) to pin a specific recorded version, or \
+           just $(b,HANDLE) to accept any. Repeatable. When omitted on \
+           a non-base overlay, $(b,oi) auto-fills \
+           $(b,default)/$(b,relocatable) at their current latest \
+           versions."
         [ "depend"; "d" ])
 
 let parse_depend_spec s =
@@ -3205,7 +3250,16 @@ let repo_list_cmd =
   in
   let info =
     Cmd.info "list"
-      ~doc:"List every handle in the reporepo with its current pinned commit"
+      ~doc:"Show which overlays are registered in the reporepo"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "One line per handle, showing the current pinned commit and \
+             upstream URL. Start here if you want to know what package \
+             collections $(b,oi) will look at when you run $(b,oi run) \
+             or $(b,oi sync) without explicit overrides.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ reporepo_term)
 
@@ -3230,6 +3284,9 @@ let repo_show_cmd =
         Fmt.pr "%s.%s@." e.handle e.version;
         Fmt.pr "  url:    %s@." e.url;
         Fmt.pr "  commit: %s@." e.commit;
+        (match e.ref_ with
+        | Some r -> Fmt.pr "  ref:    %s@." r
+        | None -> ());
         (match e.depends with
         | [] -> ()
         | ds ->
@@ -3252,7 +3309,20 @@ let repo_show_cmd =
   in
   let info =
     Cmd.info "show"
-      ~doc:"Print every pinned version of an overlay with its commit and deps"
+      ~doc:"Show every version of one overlay, with commits and dependencies"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Prints the full history for $(b,HANDLE): every version of \
+             the overlay that's been recorded, each with the git URL \
+             and commit it pins, the branch (if one is tracked with \
+             $(b,--ref)), and any other overlays it depends on.";
+          `P
+            "Useful for auditing what a particular user's overlay \
+             pulls in, and for telling at a glance whether bumping it \
+             would drag other overlays along.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle)
 
@@ -3262,10 +3332,13 @@ let ref_term =
     & opt (some string) None
     & info ~docv:"REF"
         ~doc:
-          "Target a specific git branch or tag rather than $(b,HEAD). \
-           Useful for overlay repos where the payload lives on a named \
-           branch (e.g. $(b,--ref=relocatable) for \
-           $(b,dra27/opam-repository))."
+          "Track a specific branch or tag instead of the repository's \
+           default branch. The branch name is remembered, so later \
+           $(b,oi repo bump) and $(b,oi repo refresh) invocations keep \
+           following the same branch rather than silently falling back \
+           to the default. Example: $(b,--ref=relocatable) for \
+           $(b,dra27/opam-repository), whose payload lives on the \
+           $(b,relocatable) branch."
         [ "ref"; "r" ])
 
 let repo_add_cmd =
@@ -3310,17 +3383,35 @@ let repo_add_cmd =
   in
   let info =
     Cmd.info "add"
-      ~doc:"Register a new overlay in the reporepo, pinning HEAD at creation time"
+      ~doc:"Register a new overlay in the reporepo"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Creates the first entry for $(b,HANDLE) in the reporepo. \
-             $(b,URL) is a git URL pointing at someone's opam-repository \
-             clone; $(b,oi) runs $(b,git ls-remote) to record the current \
-             $(b,HEAD) commit, then writes an opam file pinning that \
-             revision. The version string is today's date in \
-             $(b,YYYYMMDD.N) form.";
+            "Creates a new overlay named $(b,HANDLE) in the reporepo, \
+             pointed at $(b,URL) (a git repository containing someone's \
+             collection of opam packages). $(b,oi) records the current \
+             commit on the default branch, or the branch you pick with \
+             $(b,--ref), so the overlay stays frozen at a known-good \
+             snapshot until you explicitly run $(b,oi repo bump).";
+          `P
+            "When you register an overlay $(i,other than) the base \
+             pair ($(b,default), $(b,relocatable)), $(b,oi) \
+             automatically records a dependency on whatever versions \
+             of those two are currently in the reporepo. That way the \
+             new overlay and the base it was built against stay \
+             together: picking the overlay later also picks up exactly \
+             the $(b,default) / $(b,relocatable) commits it was \
+             registered with.";
+          `P "Examples:";
+          `Pre
+            "  oi repo add default \
+             https://github.com/ocaml/opam-repository.git\n\
+            \  oi repo add relocatable \
+             https://github.com/dra27/opam-repository.git --ref \
+             relocatable --depend default\n\
+            \  oi repo add avsm \
+             https://tangled.org/anil.recoil.org/aoah-opam-repo.git";
         ]
   in
   Cmd.v info
@@ -3364,20 +3455,30 @@ let repo_bump_cmd =
   in
   let info =
     Cmd.info "bump"
-      ~doc:"Create a new overlay version pinned to the latest upstream commit"
+      ~doc:"Pin an overlay to its latest upstream commit"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Runs $(b,git ls-remote) against the handle's upstream URL \
-             (or the overriding $(b,--url)) and writes a new opam file \
-             pinning the returned commit. The version is \
-             $(b,YYYYMMDD.N), where $(b,N) is the next free sequence \
-             for today's date.";
+            "Fetches the current commit on the overlay's tracked \
+             branch and records it as a new entry in the reporepo. \
+             Use this when you want $(b,oi) to start seeing new \
+             packages or fixes that have landed upstream since the \
+             last time you bumped.";
           `P
-            "Old versions are kept so the reporepo's git history is a \
-             traceable timeline of which upstream commits each overlay \
-             has been pinned at.";
+            "Old versions aren't deleted, so the reporepo keeps a \
+             timeline of which commits you've pinned over time. If \
+             something breaks after a bump, you can point $(b,oi) \
+             back at an earlier version without consulting the \
+             upstream repo's history.";
+          `P
+            "When $(b,oi) bumps an overlay $(i,other than) \
+             $(b,default) or $(b,relocatable), it also refreshes that \
+             overlay's dependency on the bases to whatever their \
+             current latest versions are. Bumping therefore re-locks \
+             the overlay against the newest base set, which is \
+             normally what you want. Pass $(b,--depend) entries \
+             explicitly to override.";
         ]
   in
   Cmd.v info
@@ -3407,7 +3508,22 @@ let repo_remove_cmd =
   in
   let info =
     Cmd.info "remove"
-      ~doc:"Delete one or all versions of an overlay from the reporepo"
+      ~doc:"Delete an overlay from the reporepo"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Removes an overlay entry from the reporepo. With \
+             $(b,HANDLE=VERSION) only that specific version is \
+             deleted. With just $(b,HANDLE) every recorded version of \
+             that handle is removed.";
+          `P
+            "This only edits the reporepo; the upstream repositories \
+             themselves are never touched. Any already-cloned overlay \
+             bundles under the data directory stick around until you \
+             run $(b,oi clean), so re-adding the handle doesn't force \
+             another full clone.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle_spec)
 
@@ -3431,23 +3547,17 @@ let repo_refresh_cmd =
         | None -> ()
         | Some e ->
             let head =
-              try
-                D10.Sysops.Cmd.run_out sys
-                  [ "git"; "ls-remote"; e.url; "HEAD" ]
-                |> String.split_on_char '\n'
-                |> List.hd
-                |> String.split_on_char '\t'
-                |> List.hd
-                |> String.trim
+              try Oi.Reporepo.ls_remote_sha ~sys ?ref_:e.ref_ e.url
               with _ -> ""
             in
             if head <> "" && head <> e.commit then begin
               incr behind;
-              let short a =
-                String.sub a 0 (min 7 (String.length a))
+              let short a = String.sub a 0 (min 7 (String.length a)) in
+              let ref_label =
+                match e.ref_ with None -> "HEAD" | Some r -> r
               in
-              Fmt.pr "%-24s  %s  ->  %s  (new commit available)@."
-                e.handle (short e.commit) (short head)
+              Fmt.pr "%-24s  %s  ->  %s  (%s: new commit available)@."
+                e.handle (short e.commit) (short head) ref_label
             end)
       handles;
     if !behind = 0 then Fmt.pr "All %d overlays up to date.@." (List.length handles)
@@ -3458,30 +3568,55 @@ let repo_refresh_cmd =
   in
   let info =
     Cmd.info "refresh"
-      ~doc:"Check each overlay's upstream for newer commits without changing anything"
+      ~doc:"Check each overlay for new upstream commits without changing anything"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "For every handle in the reporepo, looks up the current \
+             commit on its tracked branch and compares that to what's \
+             currently pinned. Prints a line per overlay that's fallen \
+             behind, so you can decide which ones to bring forward \
+             with $(b,oi repo bump).";
+          `P
+            "Nothing on disk is modified. Safe to run at any time, \
+             and fast enough to use as a cron/CI check for upstream \
+             drift.";
+        ]
   in
   Cmd.v info Term.(const run $ log_term $ reporepo_term)
 
 let repo_cmd =
   let info =
     Cmd.info "repo"
-      ~doc:"Manage the reporepo of overlay pins"
+      ~doc:"Manage a directory of package-source bundles you want to pull from"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "The $(i,reporepo) is a small opam-layout directory where \
-             each package represents someone's opam-repository overlay, \
-             pinned to a specific git commit. It's a lockfile for \
-             'which opam repositories do I pull in, at which commit, to \
-             compose a full world of packages'.";
+            "A $(i,reporepo) is a small directory that acts as a \
+             lock-file for $(b,oi)'s base set of package sources. Each \
+             entry in it (called a $(i,handle)) names somebody's \
+             collection of opam packages and pins it to a specific git \
+             commit. When $(b,oi) builds anything, it reads the \
+             reporepo to figure out exactly which commits to fetch for \
+             the base OCaml repository, the relocatable compiler fork, \
+             and any personal overlays you've opted in to.";
           `P
-            "$(b,oi) uses the reporepo at solve time to expand shortcut \
-             handles like $(b,avsm) or $(b,avsm:irmin) into the set of \
-             opam repositories that handle depends on. The reporepo \
-             itself is never used as a normal opam remote; it's a \
-             registry of URLs and commits for the real opam \
-             repositories.";
+            "On the command line, handles can be used as shortcuts: \
+             $(b,oi run avsm:irmin) uses the version of $(b,irmin) \
+             from avsm's overlay; $(b,oi run --with-repo=avsm ...) \
+             pulls the overlay in without naming a specific package. \
+             Inside an opam file, $(b,x-reporepo: [\"avsm\"]) has the \
+             same effect as $(b,--with-repo=avsm) on every oi command \
+             run in the project.";
+          `P
+            "These subcommands let you inspect and edit the reporepo. \
+             You'd typically bootstrap it once with $(b,oi repo add) \
+             for the base ($(b,default), $(b,relocatable)) and for \
+             each person whose overlay you want to consume, then run \
+             $(b,oi repo bump) occasionally to pull in their new \
+             commits.";
         ]
   in
   Cmd.group info
@@ -3540,6 +3675,12 @@ let () =
             "Use $(b,oi add PKG) to add a new dependency to the project \
              (it edits $(b,dune-project) and re-syncs for you).";
           `Pre "  oi add logs\n  oi add \"fmt>=0.9\"";
+          `P
+            "Pull a package from someone's personal collection by \
+             prefixing its $(i,handle):";
+          `Pre
+            "  oi run avsm:owntracks\n\
+            \  oi run --with=avsm:crockford roguedoi";
           `P "Preview what $(b,oi) would do without actually doing it.";
           `Pre "  oi plan utop\n  oi run -n utop";
           `S "COMMAND CATEGORIES";
@@ -3575,6 +3716,13 @@ let () =
                can fetch from a remote registry, publish back to one, and \
                mirror the source tarballs too. $(b,clean) deletes cached \
                data when you need the disk space back." );
+          `I
+            ( "$(b,Picking package sources)",
+              "$(b,repo) edits the small directory that tells $(b,oi) \
+               which git commits of which opam-package collections to \
+               draw from. Use it to bootstrap the base sources, to \
+               opt in to someone else's overlay by their handle, or \
+               to pull their new commits over time." );
           `S "HOW IT WORKS";
           `P
             "The first time you run $(b,oi), it downloads a compiler and \

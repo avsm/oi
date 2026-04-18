@@ -25,6 +25,7 @@ type entry = {
   version : string;
   url : string;
   commit : string;
+  ref_ : string option;
   depends : (string * string option) list;
   opam_path : string;
 }
@@ -61,6 +62,16 @@ let is_overlay_extension extensions =
       match v.OpamParserTypes.FullPos.pelem with
       | OpamParserTypes.FullPos.Bool true -> true
       | _ -> false)
+
+(* Read an [x-oi-*] string-valued extension from an opam file. Returns
+   [None] when the field is absent or of the wrong shape. *)
+let read_string_extension extensions name =
+  match OpamStd.String.Map.find_opt name extensions with
+  | None -> None
+  | Some v -> (
+      match v.OpamParserTypes.FullPos.pelem with
+      | OpamParserTypes.FullPos.String s -> Some s
+      | _ -> None)
 
 (* Extract an exact [= "version"] pin from an opam [condition], if
    present. Anything more involved (filters, ranges) renders as [None]. *)
@@ -108,12 +119,16 @@ let parse_entry_file path : entry option =
       in
       let url_bare, commit = split_url_commit url in
       let depends = parse_depends_formula (OpamFile.OPAM.depends opam) in
+      let ref_ =
+        read_string_extension (OpamFile.OPAM.extensions opam) "x-oi-ref"
+      in
       Some
         {
           handle;
           version;
           url = url_bare;
           commit;
+          ref_;
           depends;
           opam_path = path;
         }
@@ -427,7 +442,8 @@ let escape_string s =
   Buffer.add_char buf '"';
   Buffer.contents buf
 
-let render_opam ~synopsis ~url ~commit ~depends ~display_name ~origin_url =
+let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name
+    ~origin_url =
   let buf = Buffer.create 512 in
   Printf.bprintf buf "opam-version: \"2.0\"\n";
   Printf.bprintf buf "synopsis: %s\n" (escape_string synopsis);
@@ -447,6 +463,9 @@ let render_opam ~synopsis ~url ~commit ~depends ~display_name ~origin_url =
         ds;
       Buffer.add_string buf "]\n");
   Printf.bprintf buf "x-oi-overlay: true\n";
+  (match ref_ with
+  | Some s -> Printf.bprintf buf "x-oi-ref: %s\n" (escape_string s)
+  | None -> ());
   (match display_name with
   | Some s -> Printf.bprintf buf "x-oi-display-name: %s\n" (escape_string s)
   | None -> ());
@@ -504,11 +523,11 @@ let add ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
   let version = today_yyyymmdd () ^ ".0" in
   let synopsis = Stdlib.Option.value synopsis ~default:(default_synopsis handle) in
   let content =
-    render_opam ~synopsis ~url ~commit ~depends ~display_name ~origin_url
+    render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
   in
   ensure_repo_marker ~path;
   let opam_path = write_entry ~path ~handle ~version content in
-  { handle; version; url; commit; depends; opam_path }
+  { handle; version; url; commit; ref_; depends; opam_path }
 
 let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
   let entries = load ~path in
@@ -520,6 +539,10 @@ let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
           "overlay %s not in reporepo; use 'oi repo add' to create it" handle
   in
   let url = Stdlib.Option.value url ~default:prev.url in
+  (* When [--ref] isn't passed, reuse whatever the previous version
+     tracked. This keeps a branch like [relocatable] pinned across
+     bumps rather than silently reverting to HEAD. *)
+  let ref_ = match ref_ with Some _ -> ref_ | None -> prev.ref_ in
   let commit = ls_remote_sha ~sys ?ref_ url in
   (* When [--depend] wasn't passed, refresh the auto-injected base
      pins against whatever the reporepo currently has. That way
@@ -537,11 +560,11 @@ let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
   in
   let version = next_version entries ~handle in
   let content =
-    render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~depends
-      ~display_name:None ~origin_url:None
+    render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
+      ~depends ~display_name:None ~origin_url:None
   in
   let opam_path = write_entry ~path ~handle ~version content in
-  { handle; version; url; commit; depends; opam_path }
+  { handle; version; url; commit; ref_; depends; opam_path }
 
 let rec rmtree_path p =
   if Sys.file_exists p && Sys.is_directory p then begin

@@ -18,6 +18,7 @@ type t = {
   local_packages : string list;
   extra_repos : extra_repo list;
   pins : pin list;
+  overlays : string list;
 }
 
 (* -- x-opam-repositories parsing ----------------------------------------- *)
@@ -47,12 +48,32 @@ let parse_extra_repos_value (v : OpamParserTypes.FullPos.value) :
       loop [] items
   | _ -> None
 
+(* Parse the value of [x-reporepo:] into a list of handle strings.
+   Accepts either a single string ([x-reporepo: "avsm"]) or a list of
+   strings ([x-reporepo: ["avsm" "samoht"]]). Returns [None] on any
+   deviation. *)
+let parse_reporepo_value (v : OpamParserTypes.FullPos.value) :
+    string list option =
+  match v.pelem with
+  | OpamParserTypes.FullPos.String s -> Some [ s ]
+  | OpamParserTypes.FullPos.List { pelem = items; _ } ->
+      let rec loop acc = function
+        | [] -> Some (List.rev acc)
+        | v :: rest -> (
+            match string_of_value v with
+            | Some s -> loop (s :: acc) rest
+            | None -> None)
+      in
+      loop [] items
+  | _ -> None
+
 (* -- Per-file loading ---------------------------------------------------- *)
 
 type raw = {
   raw_deps : string list;
   raw_extra_repos : (string * string) list;
   raw_pins : pin list;
+  raw_overlays : string list;
 }
 
 let read_opam_file ~filename path : OpamFile.OPAM.t option =
@@ -92,7 +113,24 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
     OpamFile.OPAM.pin_depends opam
     |> List.map (fun (pkg, url) -> { pkg; url; declared_in = filename })
   in
-  { raw_deps; raw_extra_repos; raw_pins }
+  (* [x-reporepo:] — reporepo overlay handles this project wants pulled
+     into the solver set at sync/build time. *)
+  let raw_overlays =
+    match
+      OpamStd.String.Map.find_opt "x-reporepo"
+        (OpamFile.OPAM.extensions opam)
+    with
+    | None -> []
+    | Some v -> (
+        match parse_reporepo_value v with
+        | Some hs -> hs
+        | None ->
+            Error.config_error
+              "%s: x-reporepo must be a handle string or a list of handle \
+               strings"
+              filename)
+  in
+  { raw_deps; raw_extra_repos; raw_pins; raw_overlays }
 
 (* -- Merging across *.opam files ----------------------------------------- *)
 
@@ -194,4 +232,15 @@ let load ~fs dir =
     List.concat_map (fun (_, raw) -> raw.raw_pins) per_file_raws
   in
   let pins = merge_pins pin_entries in
-  { deps; local_packages; extra_repos; pins }
+  (* Overlays: union across *.opam, preserving first-occurrence order. *)
+  let overlays =
+    let seen = Hashtbl.create 4 in
+    List.concat_map (fun (_, raw) -> raw.raw_overlays) per_file_raws
+    |> List.filter (fun h ->
+           if Hashtbl.mem seen h then false
+           else begin
+             Hashtbl.add seen h ();
+             true
+           end)
+  in
+  { deps; local_packages; extra_repos; pins; overlays }

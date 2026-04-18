@@ -20,6 +20,10 @@ type entry = {
   url : string;
       (** Upstream git URL (without commit fragment). *)
   commit : string;  (** 40-char commit sha that [url] is pinned to. *)
+  ref_ : string option;
+      (** Upstream git ref this entry tracks (typically a branch like
+          [refs/heads/relocatable]). Used by [refresh] and [bump] to
+          pick up new commits on the same branch rather than HEAD. *)
   depends : (string * string option) list;
       (** Other overlay handles this one depends on, optionally with
           an exact version. *)
@@ -141,3 +145,11 @@ val remove :
   path:string -> handle:string -> ?version:string -> unit -> unit
 (** Delete a specific overlay version, or every version of a handle
     when [version] is omitted. *)
+
+val ls_remote_sha :
+  sys:D10.Sysops.t -> ?ref_:string -> string -> string
+(** [ls_remote_sha ~sys ?ref_ url] runs [git ls-remote] to resolve a
+    URL plus optional git ref to a 40-char commit sha. When [ref_] is
+    omitted it tries [HEAD] and falls back to [refs/heads/main],
+    [refs/heads/master], or any advertised ref in that order. Raises
+    [Error.config_error] on failures. *)
