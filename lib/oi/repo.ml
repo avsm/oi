@@ -13,19 +13,6 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let ( / ) = Filename.concat
 
-type remote = { name : string; url : string }
-type config = { remotes : remote list; default : string }
-
-let remotes =
-  [
-    {
-      name = "relocatable";
-      url = "https://github.com/dra27/opam-repository.git#relocatable";
-    };
-    { name = "default"; url = "https://github.com/ocaml/opam-repository.git" };
-  ]
-
-let config = { remotes; default = "relocatable" }
 let refresh_max_age = 86_400.0
 
 (* -- Repo pull using opam libraries -------------------------------------- *)
@@ -70,18 +57,6 @@ let touch_dir dir =
 
 let repo_dir ~data_dir name = data_dir / "repos" / name
 
-let ordered_remotes c =
-  let default_remote = List.filter (fun r -> r.name = c.default) c.remotes in
-  let rest = List.filter (fun r -> r.name <> c.default) c.remotes in
-  default_remote @ rest
-
-let packages_dirs ~data_dir =
-  List.filter_map
-    (fun r ->
-      let dir = repo_dir ~data_dir r.name / "packages" in
-      if Sys.file_exists dir then Some dir else None)
-    (ordered_remotes config)
-
 (* -- Freshness check ----------------------------------------------------- *)
 
 (* [true] when the directory is older than [refresh_max_age], or cannot be
@@ -94,10 +69,31 @@ let dir_needs_refresh dir =
 
 (* -- Ensure repos are cloned and fresh ----------------------------------- *)
 
+(* Recursive rmdir that doesn't care whether anything is actually
+   there; used to clear stale clones before re-pulling. *)
+let rec rmtree path =
+  try
+    if Sys.is_directory path then begin
+      Sys.readdir path |> Array.iter (fun n -> rmtree (path / n));
+      try Unix.rmdir path with Unix.Unix_error _ -> ()
+    end
+    else try Unix.unlink path with Unix.Unix_error _ -> ()
+  with Sys_error _ -> ()
+
 (* Common clone/pull logic shared by [ensure] and [ensure_extra]. *)
 let ensure_one ~refresh ~label ~url ~dir =
   let pkg_dir = dir / "packages" in
   if not (Sys.file_exists pkg_dir) then begin
+    (* Nothing useful in [dir] even if it exists — a previous clone
+       that either crashed mid-fetch or targeted a different URL.
+       Nuke it so the subsequent pull runs against a clean target;
+       opam's git backend otherwise tries an incremental update over
+       an unrelated tree and silently keeps the stale content. *)
+    if Sys.file_exists dir then begin
+      Log.info (fun m ->
+          m "Re-cloning %s (existing clone at %s has no packages/)" label dir);
+      rmtree dir
+    end;
     Log.info (fun m -> m "Cloning %s from %s..." label url);
     pull_repo ~label ~url_s:url ~dst:dir;
     touch_dir dir
@@ -112,13 +108,6 @@ let ensure_one ~refresh ~label ~url ~dir =
           m "Failed to update %s: %s" label (Printexc.to_string exn))
   end
 
-let ensure ~data_dir ?(refresh = false) () =
-  List.iter
-    (fun r ->
-      let dir = repo_dir ~data_dir r.name in
-      ensure_one ~refresh ~label:r.name ~url:r.url ~dir)
-    config.remotes
-
 let ensure_extra ~data_dir ?(refresh = false) extras =
   List.map
     (fun (e : Project.extra_repo) ->
@@ -127,13 +116,3 @@ let ensure_extra ~data_dir ?(refresh = false) extras =
       dir / "packages")
     extras
 
-(* -- Pretty-printing ----------------------------------------------------- *)
-
-let pp_config fmt c =
-  Fmt.pf fmt "@[<v>";
-  List.iter
-    (fun r ->
-      let marker = if r.name = c.default then "* " else "  " in
-      Fmt.pf fmt "%s%a %s@," marker Fmt.(styled `Bold string) r.name r.url)
-    c.remotes;
-  Fmt.pf fmt "@]"

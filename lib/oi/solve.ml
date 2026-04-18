@@ -117,6 +117,41 @@ let solve_with_state st ~packages_dirs ~constraints ~ocaml_version names =
       Log.debug (fun m -> m "No solution: %s" msg);
       Error msg
 
+(* For each selected package, log the packages_dir that provides it.
+   Summarise by dir too, so a reader can confirm at a glance that the
+   reporepo-cloned overlays are actually contributing to the solution. *)
+let log_package_sources ~packages_dirs pkgs =
+  let by_dir = Hashtbl.create 8 in
+  List.iter
+    (fun pkg ->
+      let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
+      let full = OpamPackage.to_string pkg in
+      let src =
+        List.find_opt
+          (fun d -> Sys.file_exists (d / name / full / "opam"))
+          packages_dirs
+      in
+      let src_s = Stdlib.Option.value src ~default:"<not found>" in
+      Log.debug (fun m -> m "  %s <- %s" full src_s);
+      let n = Stdlib.Option.value (Hashtbl.find_opt by_dir src_s) ~default:0 in
+      Hashtbl.replace by_dir src_s (n + 1))
+    pkgs;
+  Log.debug (fun m ->
+      m "packages_dirs contribution to solution:");
+  (* Iterate packages_dirs in order but print each dir once, even if
+     the same dir appears more than once in the list (which happens
+     when a user handle's closure overlaps with the base overlays). *)
+  let seen = Hashtbl.create 8 in
+  List.iter
+    (fun d ->
+      if not (Hashtbl.mem seen d) then begin
+        Hashtbl.add seen d ();
+        match Hashtbl.find_opt by_dir d with
+        | Some n -> Log.debug (fun m -> m "  %d <- %s" n d)
+        | None -> ()
+      end)
+    packages_dirs
+
 let solve ctx ~packages_dirs ~constraints names =
   let conf = Opam_ctx.conf ctx in
   let ocaml_version =
@@ -130,5 +165,6 @@ let solve ctx ~packages_dirs ~constraints names =
   with
   | Ok (pkgs, _) ->
       let pkgs = topo_sort ~packages_dirs ctx pkgs in
+      log_package_sources ~packages_dirs pkgs;
       Ok pkgs
   | Error _ as e -> e

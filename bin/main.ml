@@ -99,7 +99,144 @@ let cli_extra_repo_of_url url_s : Oi.Project.extra_repo =
   let name = "extra-" ^ String.sub hash 0 10 in
   { name; url = url_s }
 
-let cli_extra_repos urls = List.map cli_extra_repo_of_url urls
+(* Reporepo path: honour [OI_REPOREPO] and otherwise fall back to
+   [Oi.Reporepo.default_path]. Looked up fresh per call so tests can
+   set the env per invocation. *)
+let reporepo_path () =
+  match Sys.getenv_opt "OI_REPOREPO" with
+  | Some v when v <> "" -> v
+  | _ -> Oi.Reporepo.default_path
+
+(* Format-style debug logger for overlay / reporepo plumbing. *)
+let log_overlay fmt =
+  Fmt.kstr (fun s -> Logs.debug (fun m -> m "%s" s)) fmt
+
+(* A [--with-repo] token is a URL if it contains a scheme-like prefix
+   or a path separator; otherwise it's treated as an overlay handle
+   and looked up in the reporepo. *)
+let is_url_like s =
+  List.exists
+    (fun p -> String.starts_with ~prefix:p s)
+    [ "http://"; "https://"; "git+"; "git://"; "git@"; "file://"; "./"; "/" ]
+  || String.contains s '/'
+
+(* Resolve a list of overlay handles to a flat list of extra-repo
+   entries, including their transitive overlay deps. Later handles in
+   the input list are given highest priority: they come first in the
+   output so the solver's first-wins fold favours them. *)
+let overlay_extras_of_handles handles =
+  if handles = [] then []
+  else begin
+    let path = reporepo_path () in
+    log_overlay "resolving handles %s against reporepo %s"
+      (String.concat ", " handles) path;
+    let entries = Oi.Reporepo.load ~path in
+    let roots =
+      List.rev handles
+      |> List.map (fun h : Oi.Reporepo.root ->
+             { handle = h; version = None })
+    in
+    let resolved =
+      Oi.Reporepo.resolve entries ~roots
+      (* Resolve returns deps-first (topological). The opam solver's
+         packages_dirs fold is first-wins on name collisions, so we
+         reverse to get dependents-first: [samoht, relocatable, default]
+         means samoht wins over relocatable wins over default. *)
+      |> List.rev
+    in
+    log_overlay "overlay closure (highest priority first): %s"
+      (String.concat ", "
+         (List.map
+            (fun (e : Oi.Reporepo.entry) ->
+              Fmt.str "%s.%s@%s" e.handle e.version
+                (String.sub e.commit 0 (min 7 (String.length e.commit))))
+            resolved));
+    List.map
+      (fun (e : Oi.Reporepo.entry) ->
+        let url =
+          if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
+        in
+        let name = "overlay-" ^ e.handle ^ "-" ^ e.version in
+        { Oi.Project.name; url })
+      resolved
+  end
+
+let cli_extra_repos tokens =
+  let urls, handles = List.partition is_url_like tokens in
+  overlay_extras_of_handles handles @ List.map cli_extra_repo_of_url urls
+
+(* A ([handle:pkg...]) shortcut parsed out of a TARGET or [--with] token,
+   once the handle has been routed into [with_repos] and the package
+   spec is ready for the solver. Carries the handle alongside the
+   package name and any user-supplied constraint so we can later pin
+   the package to whatever version the named overlay ships. *)
+type handle_pin = {
+  handle : string;
+  pkg : OpamPackage.Name.t;
+  user_constr : OpamFormula.version_constraint option;
+}
+
+(* Highest version of [pkg] found across [dirs] (each expected to be
+   a [packages/] tree). [None] when the package is absent from all of
+   them. The directory layout is standard opam: [packages/<pkg>/<pkg.ver>/opam]. *)
+let latest_version_in_dirs ~pkg dirs =
+  let prefix = pkg ^ "." in
+  let versions =
+    List.concat_map
+      (fun d ->
+        let subdir = d / pkg in
+        if not (Sys.file_exists subdir) then []
+        else
+          Sys.readdir subdir |> Array.to_list
+          |> List.filter_map (fun entry ->
+                 if String.starts_with ~prefix entry then
+                   Some
+                     (String.sub entry (String.length prefix)
+                        (String.length entry - String.length prefix))
+                 else None))
+      dirs
+    |> List.sort_uniq String.compare
+  in
+  match versions with
+  | [] -> None
+  | _ ->
+      Some
+        (List.fold_left
+           (fun a v ->
+             if
+               OpamPackage.Version.compare
+                 (OpamPackage.Version.of_string v)
+                 (OpamPackage.Version.of_string a)
+               > 0
+             then v
+             else a)
+           (List.hd versions) (List.tl versions))
+
+(* Detect a "handle:pkg[constr]" prefix on a run [TARGET] or a
+   [--with] token. Returns [(handle, stripped_spec)] or [None] if
+   no prefix. Raises [Error.config_error] when the handle is present
+   but the package part is empty. Distinguishes handle prefixes from
+   URL schemes by rejecting anything followed by [//]. *)
+let split_handle_prefix s =
+  let is_handle_char = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
+    | _ -> false
+  in
+  match String.index_opt s ':' with
+  | None | Some 0 -> None
+  | Some i ->
+      let prefix = String.sub s 0 i in
+      let rest = String.sub s (i + 1) (String.length s - i - 1) in
+      if not (String.for_all is_handle_char prefix) then None
+      else if String.length rest >= 2 && String.sub rest 0 2 = "//" then None
+      else if rest = "" then
+        Oi.Error.config_error
+          "overlay handle %S given without a package (use '%s:PKG')" prefix
+          prefix
+      else begin
+        log_overlay "detected handle shortcut: %s -> target=%s" prefix rest;
+        Some (prefix, rest)
+      end
 
 (* Merge CLI [--with-repo] URLs and project-declared extras. Project
    extras win on a name collision (CLI URLs are synthesised names and
@@ -307,11 +444,8 @@ let with_eio_root f =
   Oi.Signals.install ~sw;
   f env sw
 
-let get_packages_dirs ~data_dir =
-  let dirs = Oi.Repo.packages_dirs ~data_dir in
-  if dirs = [] then
-    Oi.Error.config_error "No repositories configured. Run 'oi config' first.";
-  dirs
+let get_packages_dirs ?(refresh = false) ~data_dir () =
+  Oi.Reporepo.ensure_base ~data_dir ~refresh ()
 
 (* True when the cwd is a dev-mode project: at least one *.opam file
    is present AND none of them declare a numeric [version:]. opam
@@ -355,7 +489,7 @@ let warn_suspicious_versions ?(dev_mode = false) ~data_dir ~pin_dir
     ~packages_dirs solved =
   if dev_mode then ()
   else
-    let builtins = Oi.Repo.packages_dirs ~data_dir in
+    let builtins = get_packages_dirs ~data_dir () in
     let trusted d =
       List.mem d builtins
       || match pin_dir with Some p -> d = p | None -> false
@@ -504,8 +638,12 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
-    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~data_dir
+    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~data_dir ()
   in
+  log_overlay "solver packages_dirs (first-wins, %d entries):%s"
+    (List.length packages_dirs)
+    (String.concat ""
+       (List.map (fun d -> Fmt.str "\n  %s" d) packages_dirs));
   let cache_root = Oi.Cache.root_s cache in
   let build_prefix = cache_root / "build" / "prefix" in
   let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -591,7 +729,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
               ~dune_cache_root:(Oi.Cache.dune_root cache))
          (cached_bin :: args))
   else begin
-    let packages_dirs = Oi.Repo.packages_dirs ~data_dir in
+    let packages_dirs = get_packages_dirs ~data_dir () in
     let ocaml_name = OpamPackage.Name.of_string "ocaml" in
     let dep_names =
       List.filter_map
@@ -655,10 +793,54 @@ let run_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir ~refresh ();
+    ignore (get_packages_dirs ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
+    (* [TARGET] accepts a "handle:pkg[constraint]" shortcut that pulls
+       the corresponding overlay (and its transitive overlays) into
+       the solver set. The prefix is stripped; the remainder is
+       treated as a package (not a binary), so [samoht:irmin] solves
+       and installs the [irmin] package from samoht's overlay rather
+       than going through the binary-name index. The bare package
+       name becomes the [TARGET] used for the final [bin/<name>]
+       lookup; any version constraint is passed to the solver via
+       [--with]. *)
+    (* Pull [handle:pkg] out of a spec string and collect it as a
+       pin. Shared between the TARGET and the [--with] fold below so
+       both inputs accept the same shortcut syntax. *)
+    let extract_handle_pin spec =
+      match split_handle_prefix spec with
+      | None -> (None, spec)
+      | Some (h, pkg_spec) ->
+          let pkg, user_constr = OpamFormula.atom_of_string pkg_spec in
+          (Some { handle = h; pkg; user_constr }, pkg_spec)
+    in
+    (* TARGET shortcut: the stripped package name becomes the bare
+       TARGET used for the final [bin/<name>] lookup, the full spec
+       is passed through [--with], and the handle is appended to
+       [with_repos]. *)
+    let target, with_repos, with_deps, target_pin =
+      match extract_handle_pin target with
+      | None, _ -> (target, with_repos, with_deps, None)
+      | Some pin, pkg_spec ->
+          ( OpamPackage.Name.to_string pin.pkg,
+            with_repos @ [ pin.handle ],
+            with_deps @ [ pkg_spec ],
+            Some pin )
+    in
+    (* [--with] tokens accept the same shortcut syntax. The opam atom
+       parser rejects "avsm:owntracks-cli" directly because colons
+       aren't valid in package names, so we split before handing off. *)
+    let with_repos, with_deps, with_pins =
+      List.fold_left
+        (fun (repos, deps, pins) w ->
+          match extract_handle_pin w with
+          | None, _ -> (repos, deps @ [ w ], pins)
+          | Some pin, pkg_spec ->
+              (repos @ [ pin.handle ], deps @ [ pkg_spec ], pins @ [ pin ]))
+        (with_repos, [], []) with_deps
+    in
     let extra_deps = List.map Oi.Script.parse_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
     (* Resolve the cwd once; reused for project-extras loading and the
@@ -675,6 +857,45 @@ let run_cmd =
     in
     let cli_extras = cli_extra_repos with_repos in
     let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
+    (* Pin each [handle:pkg] (from TARGET or [--with]) to whatever
+       version the overlay ships, so a dev-tagged version (e.g.
+       [2.0.0~dev]) that would otherwise sort below a stable repo's
+       version still wins when the user explicitly asked for it. The
+       overlay is cloned upfront so we can scan its [packages/] tree;
+       the subsequent solve reuses the same clone. *)
+    let handle_pins = Stdlib.Option.to_list target_pin @ with_pins in
+    let handle_constraints =
+      if handle_pins = [] then OpamPackage.Name.Map.empty
+      else
+        let overlay_pkg_dirs =
+          Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras
+        in
+        List.fold_left
+          (fun acc { handle; pkg; user_constr } ->
+            match user_constr with
+            | Some c -> OpamPackage.Name.Map.add pkg c acc
+            | None -> (
+                let pkg_s = OpamPackage.Name.to_string pkg in
+                match
+                  latest_version_in_dirs ~pkg:pkg_s overlay_pkg_dirs
+                with
+                | None ->
+                    Oi.Error.config_error
+                      "overlay %s does not provide a package named %s"
+                      handle pkg_s
+                | Some v ->
+                    log_overlay "pinning %s = %s from overlay %s" pkg_s v
+                      handle;
+                    OpamPackage.Name.Map.add pkg
+                      (`Eq, OpamPackage.Version.of_string v)
+                      acc))
+          OpamPackage.Name.Map.empty handle_pins
+    in
+    let extra_constraints =
+      OpamPackage.Name.Map.union
+        (fun a _ -> a)
+        handle_constraints extra_constraints
+    in
     let solve_assemble_run pkg_names =
       Logs.info (fun m ->
           m "Solving for packages: %s" (String.concat ", " pkg_names));
@@ -781,6 +1002,18 @@ let run_cmd =
       let from_with =
         if extra_names <> [] then solve_assemble_run extra_names else false
       in
+      (* When a handle shortcut was used (e.g. [samoht:irmin]), the user
+         has explicitly named the source of truth for the target
+         package. Never silently fall through to the layer-index
+         lookup — that would quietly substitute a different package
+         (irmin-cli, in the motivating case) for the one actually
+         requested. If [solve_assemble_run] didn't produce a working
+         [bin/target], surface a helpful error. *)
+      if Stdlib.Option.is_some target_pin && not from_with then
+        Oi.Error.not_found target
+          "overlay-pinned package does not provide bin/%s. Check \
+           'oi config' or the overlay's opam file."
+          target;
       if not from_with then begin
         (* Dash-split prefixes: "a-b-c" → ["a-b-c"; "a-b"; "a"] *)
         let dash_prefixes name =
@@ -834,7 +1067,7 @@ let run_cmd =
           let packages_dirs =
             Stdlib.Option.to_list pin_dir
             @ Oi.Repo.ensure_extra ~data_dir ~refresh all_extras
-            @ Oi.Repo.packages_dirs ~data_dir
+            @ get_packages_dirs ~data_dir ~refresh ()
           in
           let package_exists name =
             List.exists (fun dir -> Sys.file_exists (dir / name)) packages_dirs
@@ -980,7 +1213,7 @@ let plan_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir ~refresh ();
+    ignore (get_packages_dirs ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
     let project_extras, project_pins =
@@ -997,7 +1230,7 @@ let plan_cmd =
     let packages_dirs =
       Stdlib.Option.to_list pin_dir
       @ extra_pkg_dirs
-      @ get_packages_dirs ~data_dir
+      @ get_packages_dirs ~data_dir ()
     in
     let extra_deps = List.map Oi.Script.parse_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
@@ -1095,7 +1328,7 @@ let env_cmd =
         (* Fall back to a minimal compiler-only prefix, optionally
            extended with CLI extras + with-deps. *)
         init_opam_root ~fs ~data_dir;
-        Oi.Repo.ensure ~data_dir ~refresh ();
+        ignore (get_packages_dirs ~data_dir ~refresh ());
         let conf = make_conf ~platform in
         let extras = cli_extra_repos with_repos in
         let extra_cli = List.map Oi.Script.parse_dep with_deps in
@@ -1245,7 +1478,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
     else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
   in
   init_opam_root ~fs ~data_dir;
-  Oi.Repo.ensure ~data_dir ~refresh ();
+  ignore (get_packages_dirs ~data_dir ~refresh ());
   let project = Oi.Project.load ~fs cwd in
   let deps = project.deps in
   if deps = [] && with_deps = [] then
@@ -1585,26 +1818,34 @@ let config_cmd =
     Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Registry";
     Fmt.pr "  url:        %s@," default_registry;
     Fmt.pr "  index TTL:  %gs@," remote_index_max_age;
-    Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Repositories";
-    let config = Oi.Repo.config in
-    List.iter
-      (fun (r : Oi.Repo.remote) ->
-        let dir = Oi.Repo.repo_dir ~data_dir r.name in
-        let is_default = r.name = config.default in
-        let marker = if is_default then "* " else "  " in
-        let status =
-          if Sys.file_exists (dir / ".git") then
-            let hash =
-              try D10.Sysops.Git.head_short sys ~dir:Eio.Path.(fs / dir)
-              with _ -> "?"
-            in
-            Fmt.str "%a (%s)" Fmt.(styled `Green string) "cloned" hash
-          else Fmt.str "%a" Fmt.(styled `Yellow string) "not cloned"
-        in
-        Fmt.pr "%s%a  %s  %s@," marker
-          Fmt.(styled `Bold string)
-          r.name status r.url)
-      config.remotes;
+    Fmt.pr "@,%a@," Fmt.(styled `Bold string) "Base overlays (from reporepo)";
+    let base = Oi.Reporepo.base_entries () in
+    if base = [] then
+      Fmt.pr
+        "  %a no 'relocatable' overlay in reporepo %s — run 'oi repo add'@,"
+        Fmt.(styled `Yellow string)
+        "(none)"
+        (match Sys.getenv_opt "OI_REPOREPO" with
+        | Some v when v <> "" -> v
+        | _ -> Oi.Reporepo.default_path)
+    else
+      List.iter
+        (fun (e : Oi.Reporepo.entry) ->
+          let name = "overlay-" ^ e.handle ^ "-" ^ e.version in
+          let dir = Oi.Repo.repo_dir ~data_dir name in
+          let status =
+            if Sys.file_exists (dir / ".git") then
+              let hash =
+                try D10.Sysops.Git.head_short sys ~dir:Eio.Path.(fs / dir)
+                with _ -> "?"
+              in
+              Fmt.str "%a (%s)" Fmt.(styled `Green string) "cloned" hash
+            else Fmt.str "%a" Fmt.(styled `Yellow string) "not cloned"
+          in
+          Fmt.pr "  %a.%s  %s  %s@,"
+            Fmt.(styled `Bold string)
+            e.handle e.version status e.url)
+        base;
     Fmt.pr "@]@.";
     let cwd_s, _ = resolved_cwd fs in
     let proj =
@@ -2200,13 +2441,13 @@ let registry_build_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir ~refresh ();
+    ignore (get_packages_dirs ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let extra_pkg_dirs =
       Oi.Repo.ensure_extra ~data_dir ~refresh (cli_extra_repos with_repos)
     in
-    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir in
+    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir () in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -2455,7 +2696,7 @@ let depexts_cmd =
     in
     let cwd_s, _ = resolved_cwd fs in
     init_opam_root ~fs ~data_dir;
-    Oi.Repo.ensure ~data_dir ~refresh ();
+    ignore (get_packages_dirs ~data_dir ~refresh ());
     let proj = Oi.Project.load ~fs cwd_s in
     if proj.deps = [] && with_deps = [] then
       Oi.Error.config_error
@@ -2468,7 +2709,7 @@ let depexts_cmd =
     in
     let extras = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
     let packages_dirs =
-      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~data_dir
+      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~data_dir ()
     in
     let conf =
       let c = make_conf ~platform in
@@ -2893,6 +3134,366 @@ let registry_cmd =
       registry_mirror_cmd;
     ]
 
+(* -- repo (reporepo of overlay pins) ------------------------------------ *)
+
+let reporepo_term =
+  let default =
+    match Sys.getenv_opt "OI_REPOREPO" with
+    | Some v when v <> "" -> v
+    | _ -> Oi.Reporepo.default_path
+  in
+  Arg.(
+    value & opt string default
+    & info ~docv:"DIR"
+        ~doc:
+          "Path to the overlay reporepo. Falls back to \
+           $(b,\\$OI_REPOREPO), then the built-in default \
+           ($(b,~/scratch/reporepo))."
+        [ "reporepo" ])
+
+let depend_term =
+  Arg.(
+    value
+    & opt_all string []
+    & info ~docv:"HANDLE[=VERSION]"
+        ~doc:
+          "Add an overlay dependency. $(b,HANDLE=VERSION) pins an exact \
+           version; $(b,HANDLE) alone depends on any version. Repeatable."
+        [ "depend"; "d" ])
+
+let parse_depend_spec s =
+  match String.index_opt s '=' with
+  | None -> (s, None)
+  | Some i ->
+      let h = String.sub s 0 i in
+      let v = String.sub s (i + 1) (String.length s - i - 1) in
+      (h, Some v)
+
+let parse_handle_version s =
+  match String.index_opt s '=' with
+  | None -> (s, None)
+  | Some i ->
+      ( String.sub s 0 i,
+        Some (String.sub s (i + 1) (String.length s - i - 1)) )
+
+let print_entry_oneline (e : Oi.Reporepo.entry) =
+  let short = String.sub e.commit 0 (min 7 (String.length e.commit)) in
+  Fmt.pr "%-24s  %-16s  %-8s  %s@." e.handle e.version short e.url
+
+let repo_list_cmd =
+  let run () reporepo =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun _env _sw ->
+    let entries = Oi.Reporepo.load ~path:reporepo in
+    if entries = [] then
+      Fmt.pr "Reporepo %s is empty.@." reporepo
+    else begin
+      Fmt.pr "Reporepo: %s@.@." reporepo;
+      (* Show the highest version per handle. *)
+      let handles =
+        entries
+        |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
+        |> List.sort_uniq String.compare
+      in
+      List.iter
+        (fun h ->
+          match Oi.Reporepo.latest entries ~handle:h with
+          | Some e -> print_entry_oneline e
+          | None -> ())
+        handles
+    end
+  in
+  let info =
+    Cmd.info "list"
+      ~doc:"List every handle in the reporepo with its current pinned commit"
+  in
+  Cmd.v info Term.(const run $ log_term $ reporepo_term)
+
+let repo_show_cmd =
+  let run () reporepo handle =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun _env _sw ->
+    let entries = Oi.Reporepo.load ~path:reporepo in
+    let matches =
+      List.filter
+        (fun (e : Oi.Reporepo.entry) -> e.handle = handle)
+        entries
+      |> List.sort (fun (a : Oi.Reporepo.entry) (b : Oi.Reporepo.entry) ->
+             OpamPackage.Version.compare
+               (OpamPackage.Version.of_string b.version)
+               (OpamPackage.Version.of_string a.version))
+    in
+    if matches = [] then
+      Oi.Error.not_found handle "no overlay %s in reporepo %s" handle reporepo;
+    List.iter
+      (fun (e : Oi.Reporepo.entry) ->
+        Fmt.pr "%s.%s@." e.handle e.version;
+        Fmt.pr "  url:    %s@." e.url;
+        Fmt.pr "  commit: %s@." e.commit;
+        (match e.depends with
+        | [] -> ()
+        | ds ->
+            Fmt.pr "  depends:@.";
+            List.iter
+              (fun (h, v) ->
+                match v with
+                | None -> Fmt.pr "    %s@." h
+                | Some ver -> Fmt.pr "    %s = %s@." h ver)
+              ds);
+        Fmt.pr "@.")
+      matches
+  in
+  let handle =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"HANDLE"
+          ~doc:"Overlay handle to inspect" [])
+  in
+  let info =
+    Cmd.info "show"
+      ~doc:"Print every pinned version of an overlay with its commit and deps"
+  in
+  Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle)
+
+let ref_term =
+  Arg.(
+    value
+    & opt (some string) None
+    & info ~docv:"REF"
+        ~doc:
+          "Target a specific git branch or tag rather than $(b,HEAD). \
+           Useful for overlay repos where the payload lives on a named \
+           branch (e.g. $(b,--ref=relocatable) for \
+           $(b,dra27/opam-repository))."
+        [ "ref"; "r" ])
+
+let repo_add_cmd =
+  let run () reporepo handle url ref_ depend_specs =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    let depends =
+      match depend_specs with
+      | [] -> None
+      | _ -> Some (List.map parse_depend_spec depend_specs)
+    in
+    let e =
+      Oi.Reporepo.add ~sys ~path:reporepo ~handle ~url ?ref_ ?depends ()
+    in
+    Fmt.pr "Added %s.%s@ url=%s@ commit=%s@ at %s@." e.handle e.version
+      e.url e.commit e.opam_path;
+    if e.depends <> [] then begin
+      Fmt.pr "Depends:@.";
+      List.iter
+        (fun (h, v) ->
+          match v with
+          | Some ver -> Fmt.pr "  %s = %s@." h ver
+          | None -> Fmt.pr "  %s@." h)
+        e.depends
+    end
+  in
+  let handle =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"HANDLE"
+          ~doc:"Opam-valid overlay name (e.g. $(b,avsm), $(b,samoht))" [])
+  in
+  let url =
+    Arg.(
+      required
+      & pos 1 (some string) None
+      & info ~docv:"URL" ~doc:"Upstream opam-repository git URL" [])
+  in
+  let info =
+    Cmd.info "add"
+      ~doc:"Register a new overlay in the reporepo, pinning HEAD at creation time"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Creates the first entry for $(b,HANDLE) in the reporepo. \
+             $(b,URL) is a git URL pointing at someone's opam-repository \
+             clone; $(b,oi) runs $(b,git ls-remote) to record the current \
+             $(b,HEAD) commit, then writes an opam file pinning that \
+             revision. The version string is today's date in \
+             $(b,YYYYMMDD.N) form.";
+        ]
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ reporepo_term $ handle $ url $ ref_term
+      $ depend_term)
+
+let repo_bump_cmd =
+  let run () reporepo handle url ref_ depend_specs =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    let depends =
+      match depend_specs with
+      | [] -> None
+      | _ -> Some (List.map parse_depend_spec depend_specs)
+    in
+    let e =
+      Oi.Reporepo.bump ~sys ~path:reporepo ~handle ?url ?ref_ ?depends ()
+    in
+    Fmt.pr "Bumped %s to %s@ commit=%s@ at %s@." e.handle e.version
+      e.commit e.opam_path
+  in
+  let handle =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"HANDLE" ~doc:"Overlay handle to bump" [])
+  in
+  let url =
+    Arg.(
+      value
+      & opt (some string) None
+      & info ~docv:"URL"
+          ~doc:
+            "Override the upstream URL. Defaults to whatever the latest \
+             version pinned."
+          [ "url" ])
+  in
+  let info =
+    Cmd.info "bump"
+      ~doc:"Create a new overlay version pinned to the latest upstream commit"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Runs $(b,git ls-remote) against the handle's upstream URL \
+             (or the overriding $(b,--url)) and writes a new opam file \
+             pinning the returned commit. The version is \
+             $(b,YYYYMMDD.N), where $(b,N) is the next free sequence \
+             for today's date.";
+          `P
+            "Old versions are kept so the reporepo's git history is a \
+             traceable timeline of which upstream commits each overlay \
+             has been pinned at.";
+        ]
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ reporepo_term $ handle $ url $ ref_term
+      $ depend_term)
+
+let repo_remove_cmd =
+  let run () reporepo handle_spec =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun _env _sw ->
+    let handle, version = parse_handle_version handle_spec in
+    Oi.Reporepo.remove ~path:reporepo ~handle ?version ();
+    Fmt.pr "Removed %s%s from %s@." handle
+      (match version with None -> " (all versions)" | Some v -> "." ^ v)
+      reporepo
+  in
+  let handle_spec =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"HANDLE[=VERSION]"
+          ~doc:
+            "Overlay to remove. Without $(b,=VERSION) every version of \
+             the handle is deleted."
+          [])
+  in
+  let info =
+    Cmd.info "remove"
+      ~doc:"Delete one or all versions of an overlay from the reporepo"
+  in
+  Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle_spec)
+
+let repo_refresh_cmd =
+  let run () reporepo =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    let entries = Oi.Reporepo.load ~path:reporepo in
+    let handles =
+      entries
+      |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
+      |> List.sort_uniq String.compare
+    in
+    let behind = ref 0 in
+    List.iter
+      (fun h ->
+        match Oi.Reporepo.latest entries ~handle:h with
+        | None -> ()
+        | Some e ->
+            let head =
+              try
+                D10.Sysops.Cmd.run_out sys
+                  [ "git"; "ls-remote"; e.url; "HEAD" ]
+                |> String.split_on_char '\n'
+                |> List.hd
+                |> String.split_on_char '\t'
+                |> List.hd
+                |> String.trim
+              with _ -> ""
+            in
+            if head <> "" && head <> e.commit then begin
+              incr behind;
+              let short a =
+                String.sub a 0 (min 7 (String.length a))
+              in
+              Fmt.pr "%-24s  %s  ->  %s  (new commit available)@."
+                e.handle (short e.commit) (short head)
+            end)
+      handles;
+    if !behind = 0 then Fmt.pr "All %d overlays up to date.@." (List.length handles)
+    else
+      Fmt.pr "@.%d overlay(s) behind upstream. Run 'oi repo bump HANDLE' \
+              for each to pin the new commit.@."
+        !behind
+  in
+  let info =
+    Cmd.info "refresh"
+      ~doc:"Check each overlay's upstream for newer commits without changing anything"
+  in
+  Cmd.v info Term.(const run $ log_term $ reporepo_term)
+
+let repo_cmd =
+  let info =
+    Cmd.info "repo"
+      ~doc:"Manage the reporepo of overlay pins"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "The $(i,reporepo) is a small opam-layout directory where \
+             each package represents someone's opam-repository overlay, \
+             pinned to a specific git commit. It's a lockfile for \
+             'which opam repositories do I pull in, at which commit, to \
+             compose a full world of packages'.";
+          `P
+            "$(b,oi) uses the reporepo at solve time to expand shortcut \
+             handles like $(b,avsm) or $(b,avsm:irmin) into the set of \
+             opam repositories that handle depends on. The reporepo \
+             itself is never used as a normal opam remote; it's a \
+             registry of URLs and commits for the real opam \
+             repositories.";
+        ]
+  in
+  Cmd.group info
+    [
+      repo_list_cmd;
+      repo_show_cmd;
+      repo_add_cmd;
+      repo_bump_cmd;
+      repo_remove_cmd;
+      repo_refresh_cmd;
+    ]
+
 (* -- main ---------------------------------------------------------------- *)
 
 let () =
@@ -3052,6 +3653,7 @@ let () =
         config_cmd;
         depexts_cmd;
         registry_cmd;
+        repo_cmd;
         clean_cmd;
       ]
   in
