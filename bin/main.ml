@@ -712,6 +712,24 @@ let run_cmd =
         false
       end
     in
+    (* HTTP(S) script URLs: fetch to a fresh tmp file keeping the [.ml]
+       suffix, then treat the local copy as the script path for the
+       rest of the run. Run caching keys on the script's content hash,
+       so the nondeterministic path doesn't defeat the build cache. *)
+    let target =
+      let is_url s =
+        String.starts_with ~prefix:"http://" s
+        || String.starts_with ~prefix:"https://" s
+      in
+      if is_url target then begin
+        let local = Filename.temp_file "oi-script-" ".ml" in
+        Logs.info (fun m -> m "Fetching %s to %s" target local);
+        if not (D10.Sysops.Curl.fetch sys ~url:target ~dst:Eio.Path.(fs / local))
+        then Oi.Error.not_found target "failed to fetch %s" target;
+        local
+      end
+      else target
+    in
     (* Only .ml files are treated as scripts *)
     if Filename.check_suffix target ".ml" then begin
       if not (path_exists cwd target) then

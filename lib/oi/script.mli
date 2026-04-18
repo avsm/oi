@@ -8,11 +8,20 @@
     generates a temporary dune project, installs dependencies, builds, and runs
     the script. Built binaries are cached by script hash under {!Cache.runs}.
 
-    Dependency strings are parsed using {!OpamFormula.atom_of_string}, so any
-    format opam accepts (e.g. ["pkg>=1.0"]) works here. *)
+    Dependency strings accept an opam package name plus an optional
+    version constraint ([pkg>=1.0]) and an optional findlib sub-library
+    ([pkg.sub] or [pkg.sub>=1.0]). The opam solver sees the stem before
+    the first dot — e.g. [ppx_deriving.show>=1.0] resolves against the
+    [ppx_deriving] opam package at [>= 1.0] — while the generated dune
+    stanza uses the full findlib name. *)
 
 type dep = {
   name : OpamPackage.Name.t;
+      (** Opam package name — the stem before the first [.]. *)
+  findlib_name : string;
+      (** Findlib library reference, including any [.sub] suffix. Equal
+          to [OpamPackage.Name.to_string name] when no sub-library was
+          specified. *)
   constraint_ : OpamFormula.version_constraint option;
 }
 (** A dependency parsed from the opam attribute or --with flag. *)
