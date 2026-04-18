@@ -72,13 +72,19 @@ val materialize :
     hard-codes upstream URLs. *)
 
 val ensure_base :
-  data_dir:string -> ?refresh:bool -> unit -> string list
+  sys:D10.Sysops.t ->
+  data_dir:string ->
+  ?refresh:bool ->
+  unit ->
+  string list
 (** Resolves the [relocatable] overlay (and its transitive deps) from
     the reporepo under [$OI_REPOREPO] / the default path, clones each
     at its pinned commit under [data_dir], and returns the list of
     [packages/] directories in solver priority order (dependents
     before deps so the solver's first-wins fold favours
-    $(b,relocatable) over $(b,default)). Raises
+    $(b,relocatable) over $(b,default)). Auto-clones the reporepo
+    itself from {!default_url} (overridable via [$OI_REPOREPO_URL])
+    if it doesn't already exist on disk. Raises
     {!Oi.Error.config_error} if the reporepo doesn't contain a
     [relocatable] entry. *)
 
@@ -91,7 +97,20 @@ val base_entries : unit -> entry list
 (** {1 Writing} *)
 
 val default_path : string
-(** [~/scratch/reporepo]. *)
+(** The default location for the reporepo clone under the XDG data
+    hierarchy ([$OI_DATA_DIR/reporepo], falling back to
+    [$XDG_DATA_HOME/oi/reporepo] and then [~/.local/share/oi/reporepo]).
+    Overridable with [$OI_REPOREPO] or a per-command [--reporepo] flag. *)
+
+val default_url : string
+(** The upstream git URL the reporepo is cloned from when none is set
+    via [$OI_REPOREPO_URL] or a per-command [--reporepo-url] flag. *)
+
+val ensure_clone : sys:D10.Sysops.t -> path:string -> url:string -> unit
+(** Ensure a git working copy of [url] exists at [path]. A no-op when
+    a [.git] directory is already present; an error when [path]
+    exists but isn't empty and isn't a git clone. Never pulls once
+    the clone exists — the user owns the working copy. *)
 
 val add :
   sys:D10.Sysops.t ->

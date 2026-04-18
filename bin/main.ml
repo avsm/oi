@@ -124,10 +124,16 @@ let is_url_like s =
    entries, including their transitive overlay deps. Later handles in
    the input list are given highest priority: they come first in the
    output so the solver's first-wins fold favours them. *)
-let overlay_extras_of_handles handles =
+let overlay_extras_of_handles ~sys handles =
   if handles = [] then []
   else begin
     let path = reporepo_path () in
+    let url =
+      match Sys.getenv_opt "OI_REPOREPO_URL" with
+      | Some v when v <> "" -> v
+      | _ -> Oi.Reporepo.default_url
+    in
+    Oi.Reporepo.ensure_clone ~sys ~path ~url;
     log_overlay "resolving handles %s against reporepo %s"
       (String.concat ", " handles) path;
     let entries = Oi.Reporepo.load ~path in
@@ -161,9 +167,10 @@ let overlay_extras_of_handles handles =
       resolved
   end
 
-let cli_extra_repos tokens =
+let cli_extra_repos ~sys tokens =
   let urls, handles = List.partition is_url_like tokens in
-  overlay_extras_of_handles handles @ List.map cli_extra_repo_of_url urls
+  overlay_extras_of_handles ~sys handles
+  @ List.map cli_extra_repo_of_url urls
 
 (* A ([handle:pkg...]) shortcut parsed out of a TARGET or [--with] token,
    once the handle has been routed into [with_repos] and the package
@@ -312,13 +319,21 @@ let url_join registry rel =
 
 (* Ensure the remote registry's index.db is cached locally. Downloads it if
    missing or older than [remote_index_max_age]. Returns the local path on
-   success. *)
+   success.
+
+   The download is atomic: we curl to a [.tmp] sibling and only rename
+   into place once the download finished cleanly. A Ctrl-C mid-transfer
+   leaves only the half-written [.tmp] behind, which the next invocation
+   overwrites. That protects us from the sqlite [CORRUPT] error you
+   otherwise get when the previous run wrote a half-database at the
+   live path. *)
 let ensure_remote_index ~sys ~fs ~cache ~os_key ~registry =
   if registry = "" then None
   else
     let cache_root = Oi.Cache.root_s cache in
     let os_dir = cache_root / "layers" / os_key in
     let local_path = os_dir / "remote-index.db" in
+    let tmp_path = local_path ^ ".tmp" in
     let fresh =
       try
         let st = Unix.stat local_path in
@@ -326,28 +341,47 @@ let ensure_remote_index ~sys ~fs ~cache ~os_key ~registry =
       with Unix.Unix_error _ -> false
     in
     if fresh then Some local_path
-    else
+    else begin
       let url = url_join registry (os_key / "index.db") in
-      let dst = Eio.Path.(fs / local_path) in
+      let dst = Eio.Path.(fs / tmp_path) in
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
-      if D10.Sysops.Curl.fetch sys ~url ~dst then Some local_path
-      else if Sys.file_exists local_path then begin
-        Logs.warn (fun m ->
-            m "Failed to fetch registry index, using stale cache");
+      (try Unix.unlink tmp_path with Unix.Unix_error _ -> ());
+      Logs.app (fun m -> m "Fetching registry index from %s (this may take a moment)..." url);
+      if D10.Sysops.Curl.fetch sys ~url ~dst then begin
+        (try Unix.rename tmp_path local_path
+         with Unix.Unix_error _ ->
+           (try Unix.unlink tmp_path with Unix.Unix_error _ -> ()));
         Some local_path
       end
       else begin
-        Logs.warn (fun m -> m "Failed to fetch registry index from %s" registry);
-        None
+        (try Unix.unlink tmp_path with Unix.Unix_error _ -> ());
+        if Sys.file_exists local_path then begin
+          Logs.warn (fun m ->
+              m "Failed to fetch registry index, using stale cache");
+          Some local_path
+        end
+        else begin
+          Logs.warn (fun m ->
+              m "Failed to fetch registry index from %s" registry);
+          None
+        end
       end
+    end
 
 (* Merge the remote index into the local index, creating the local index
-   if it doesn't exist. *)
+   if it doesn't exist. If the remote sqlite file is corrupt — typically
+   the aftermath of a Ctrl-C during the previous run's download — we
+   unlink it so the next invocation re-fetches a clean copy instead of
+   failing forever. *)
 let merge_remote_into_local ~index_path ~remote_path =
   let db = D10.Index.open_ ~path:index_path in
   (try D10.Index.merge_remote db ~remote_path
    with Failure msg ->
-     Logs.warn (fun m -> m "Failed to merge remote index: %s" msg));
+     Logs.warn (fun m ->
+         m "Remote index merge failed (%s); removing %s so the next run \
+            re-downloads it"
+           msg remote_path);
+     (try Sys.remove remote_path with Sys_error _ -> ()));
   D10.Index.close db
 
 (* Ensure the local index exists, rebuilding it from the layer cache if
@@ -469,8 +503,8 @@ let with_eio_root f =
   Oi.Signals.install ~sw;
   f env sw
 
-let get_packages_dirs ?(refresh = false) ~data_dir () =
-  Oi.Reporepo.ensure_base ~data_dir ~refresh ()
+let get_packages_dirs ?(refresh = false) ~sys ~data_dir () =
+  Oi.Reporepo.ensure_base ~sys ~data_dir ~refresh ()
 
 
 
@@ -588,7 +622,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
-    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~data_dir ()
+    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~sys ~data_dir ()
   in
   log_overlay "solver packages_dirs (first-wins, %d entries):%s"
     (List.length packages_dirs)
@@ -678,7 +712,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
               ~dune_cache_root:(Oi.Cache.dune_root cache))
          (cached_bin :: args))
   else begin
-    let packages_dirs = get_packages_dirs ~data_dir () in
+    let packages_dirs = get_packages_dirs ~sys ~data_dir () in
     let ocaml_name = OpamPackage.Name.of_string "ocaml" in
     let dep_names =
       List.filter_map
@@ -736,7 +770,7 @@ let run_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
@@ -803,7 +837,7 @@ let run_cmd =
        list so CLI-supplied ones take priority (first-wins at repos
        level; later arguments stack atop). *)
     let with_repos = project_overlays @ with_repos in
-    let cli_extras = cli_extra_repos with_repos in
+    let cli_extras = cli_extra_repos ~sys with_repos in
     let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
     (* Pin each [handle:pkg] (from TARGET or [--with]) to whatever
        version the overlay ships, so a dev-tagged version (e.g.
@@ -1015,7 +1049,7 @@ let run_cmd =
           let packages_dirs =
             Stdlib.Option.to_list pin_dir
             @ Oi.Repo.ensure_extra ~data_dir ~refresh all_extras
-            @ get_packages_dirs ~data_dir ~refresh ()
+            @ get_packages_dirs ~sys ~data_dir ~refresh ()
           in
           let package_exists name =
             List.exists (fun dir -> Sys.file_exists (dir / name)) packages_dirs
@@ -1181,7 +1215,7 @@ let plan_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
     let project_extras, project_pins, project_overlays =
@@ -1192,14 +1226,14 @@ let plan_cmd =
     in
     let with_repos = project_overlays @ with_repos in
     let all_extras =
-      merge_extras ~cli:(cli_extra_repos with_repos) ~project:project_extras
+      merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:project_extras
     in
     let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
     let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh project_pins in
     let packages_dirs =
       Stdlib.Option.to_list pin_dir
       @ extra_pkg_dirs
-      @ get_packages_dirs ~data_dir ()
+      @ get_packages_dirs ~sys ~data_dir ()
     in
     let extra_deps = List.map Oi.Script.parse_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
@@ -1295,9 +1329,9 @@ let env_cmd =
         (* Fall back to a minimal compiler-only prefix, optionally
            extended with CLI extras + with-deps. *)
         init_opam_root ~fs ~data_dir;
-        ignore (get_packages_dirs ~data_dir ~refresh ());
+        ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
         let conf = make_conf ~platform in
-        let extras = cli_extra_repos with_repos in
+        let extras = cli_extra_repos ~sys with_repos in
         let extra_cli = List.map Oi.Script.parse_dep with_deps in
         let extra_constraints = Oi.Script.constraints extra_cli in
         let extra_names =
@@ -1445,7 +1479,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
     else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
   in
   init_opam_root ~fs ~data_dir;
-  ignore (get_packages_dirs ~data_dir ~refresh ());
+  ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
   let project = Oi.Project.load ~fs cwd in
   let deps = project.deps in
   if deps = [] && with_deps = [] then
@@ -1456,7 +1490,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
       (String.concat ", " project.overlays);
   let with_repos = project.overlays @ with_repos in
   let all_extras =
-    merge_extras ~cli:(cli_extra_repos with_repos) ~project:project.extra_repos
+    merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:project.extra_repos
   in
   if all_extras <> [] then
     say "Extra repositories: %s"
@@ -2422,7 +2456,7 @@ let registry_build_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     (* Classify each input into a plain target or an overlay form.
@@ -2442,7 +2476,7 @@ let registry_build_cmd =
       in
       with_repos @ handles
     in
-    let cli_extras_records = cli_extra_repos with_repos in
+    let cli_extras_records = cli_extra_repos ~sys with_repos in
     let extra_pkg_dirs =
       Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras_records
     in
@@ -2482,7 +2516,7 @@ let registry_build_cmd =
     in
     if targets = [] then
       Oi.Error.config_error "no targets to build";
-    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir () in
+    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~sys ~data_dir () in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -2742,7 +2776,7 @@ let depexts_cmd =
     in
     let cwd_s, _ = resolved_cwd fs in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let proj = Oi.Project.load ~fs cwd_s in
     if proj.deps = [] && with_deps = [] then
       Oi.Error.config_error
@@ -2752,11 +2786,11 @@ let depexts_cmd =
     let with_repos = proj.overlays @ with_repos in
     let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh proj.pins in
     let all_extras =
-      merge_extras ~cli:(cli_extra_repos with_repos) ~project:proj.extra_repos
+      merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:proj.extra_repos
     in
     let extras = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
     let packages_dirs =
-      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~data_dir ()
+      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~sys ~data_dir ()
     in
     let conf =
       let c = make_conf ~platform in
@@ -3191,10 +3225,27 @@ let reporepo_term =
     value & opt string default
     & info ~docv:"DIR"
         ~doc:
-          "Directory containing the reporepo to operate on. Falls back \
-           to $(b,\\$OI_REPOREPO), then to the built-in default at \
-           $(b,~/scratch/reporepo)."
+          "Local directory containing the reporepo clone to operate \
+           on. Falls back to $(b,\\$OI_REPOREPO), then to \
+           $(b,\\$OI_DATA_DIR/reporepo) under the XDG data hierarchy."
         [ "reporepo" ])
+
+let reporepo_url_term =
+  let default =
+    match Sys.getenv_opt "OI_REPOREPO_URL" with
+    | Some v when v <> "" -> v
+    | _ -> Oi.Reporepo.default_url
+  in
+  Arg.(
+    value & opt string default
+    & info ~docv:"URL"
+        ~doc:
+          "Git URL to clone the reporepo from when the local clone \
+           doesn't exist yet. Falls back to $(b,\\$OI_REPOREPO_URL) \
+           and then to the built-in upstream. Once the local clone \
+           exists, $(b,oi) never pulls from this URL again — the \
+           working copy is yours to edit, commit, and push."
+        [ "reporepo-url" ])
 
 let depend_term =
   Arg.(
@@ -3230,9 +3281,13 @@ let print_entry_oneline (e : Oi.Reporepo.entry) =
   Fmt.pr "%-24s  %-16s  %-8s  %s@." e.handle e.version short e.url
 
 let repo_list_cmd =
-  let run () reporepo =
+  let run () reporepo reporepo_url =
     with_error_handling @@ fun () ->
-    with_eio_root @@ fun _env _sw ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
     let entries = Oi.Reporepo.load ~path:reporepo in
     if entries = [] then
       Fmt.pr "Reporepo %s is empty.@." reporepo
@@ -3265,12 +3320,17 @@ let repo_list_cmd =
              or $(b,oi sync) without explicit overrides.";
         ]
   in
-  Cmd.v info Term.(const run $ log_term $ reporepo_term)
+  Cmd.v info
+    Term.(const run $ log_term $ reporepo_term $ reporepo_url_term)
 
 let repo_show_cmd =
-  let run () reporepo handle =
+  let run () reporepo reporepo_url handle =
     with_error_handling @@ fun () ->
-    with_eio_root @@ fun _env _sw ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
     let entries = Oi.Reporepo.load ~path:reporepo in
     let matches =
       List.filter
@@ -3328,7 +3388,9 @@ let repo_show_cmd =
              would drag other overlays along.";
         ]
   in
-  Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle)
+  Cmd.v info
+    Term.(
+      const run $ log_term $ reporepo_term $ reporepo_url_term $ handle)
 
 let ref_term =
   Arg.(
@@ -3346,12 +3408,13 @@ let ref_term =
         [ "ref"; "r" ])
 
 let repo_add_cmd =
-  let run () reporepo handle url ref_ depend_specs =
+  let run () reporepo reporepo_url handle url ref_ depend_specs =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
     let fs = Eio.Stdenv.fs env in
     let sys = D10.Sysops.create ~proc_mgr ~fs in
+    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
@@ -3420,16 +3483,17 @@ let repo_add_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ reporepo_term $ handle $ url $ ref_term
-      $ depend_term)
+      const run $ log_term $ reporepo_term $ reporepo_url_term $ handle
+      $ url $ ref_term $ depend_term)
 
 let repo_bump_cmd =
-  let run () reporepo handle url ref_ depend_specs =
+  let run () reporepo reporepo_url handle url ref_ depend_specs =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
     let fs = Eio.Stdenv.fs env in
     let sys = D10.Sysops.create ~proc_mgr ~fs in
+    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
@@ -3500,13 +3564,17 @@ let repo_bump_cmd =
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ reporepo_term $ handle $ url $ ref_term
-      $ depend_term)
+      const run $ log_term $ reporepo_term $ reporepo_url_term $ handle
+      $ url $ ref_term $ depend_term)
 
 let repo_remove_cmd =
-  let run () reporepo handle_spec =
+  let run () reporepo reporepo_url handle_spec =
     with_error_handling @@ fun () ->
-    with_eio_root @@ fun _env _sw ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys = D10.Sysops.create ~proc_mgr ~fs in
+    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
     let handle, version = parse_handle_version handle_spec in
     Oi.Reporepo.remove ~path:reporepo ~handle ?version ();
     Fmt.pr "Removed %s%s from %s@." handle
@@ -3542,7 +3610,10 @@ let repo_remove_cmd =
              another full clone.";
         ]
   in
-  Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle_spec)
+  Cmd.v info
+    Term.(
+      const run $ log_term $ reporepo_term $ reporepo_url_term
+      $ handle_spec)
 
 let repo_cmd =
   let info =
@@ -3570,14 +3641,43 @@ let repo_cmd =
              run in the project.";
           `P
             "These subcommands let you inspect and edit the reporepo. \
-             You'd typically bootstrap it once with $(b,oi repo add) \
-             for the base ($(b,default), $(b,relocatable)) and for \
-             each person whose overlay you want to consume, then run \
-             $(b,oi repo bump HANDLE) whenever you want to pull in \
-             their new commits. Bump is idempotent — it prints \
-             $(b,No change) and does nothing when the upstream commit \
-             already matches — so it doubles as the \"am I behind \
-             upstream?\" check and is safe to run on a schedule.";
+             The first one you run on a new machine auto-clones the \
+             upstream reporepo into a stable location under your \
+             data directory (see $(b,FILES) below), so you don't need \
+             a manual bootstrap step. After that, $(b,oi) never \
+             auto-pulls: the clone is yours to edit, commit, and push \
+             like any other git working copy. A typical workflow is \
+             $(b,oi repo bump HANDLE) whenever you want to pick up \
+             upstream commits, then $(b,git push) or $(b,git \
+             request-pull) from the reporepo directory to share those \
+             pins with other users.";
+          `P
+            "$(b,oi repo bump) is idempotent: when the upstream commit \
+             already matches, it prints $(b,No change) and leaves the \
+             reporepo alone. That makes it safe to run from cron or a \
+             pre-commit hook as an \"am I behind upstream?\" check.";
+          `S "FILES";
+          `I
+            ( "$(b,\\$OI_REPOREPO) (default: \
+               $(b,\\$OI_DATA_DIR/reporepo))",
+              "The local git working copy of the reporepo. On first \
+               use of any $(b,oi repo) subcommand, $(b,oi) runs \
+               $(b,git clone \\$OI_REPOREPO_URL \\$OI_REPOREPO). \
+               $(b,cd) into it to make edits by hand, add commits, \
+               and push them back upstream." );
+          `S "EXAMPLE WORKFLOW";
+          `Pre
+            "  # First oi repo command on a new machine auto-clones\n\
+            \  # the upstream reporepo into ~/.local/share/oi/reporepo/.\n\
+            \  oi repo list\n\n\
+            \  # Pin someone's overlay, compose it into the solver\n\
+            \  oi repo add handle https://example.com/pkgs.git\n\
+            \  oi run handle:some-tool\n\n\
+            \  # Pull upstream changes into the overlay we track\n\
+            \  oi repo bump handle\n\n\
+            \  # Publish our edits back to the reporepo upstream\n\
+            \  cd ~/.local/share/oi/reporepo\n\
+            \  git add -A && git commit -m 'bump handle' && git push";
         ]
   in
   Cmd.group info
@@ -3746,6 +3846,16 @@ let () =
             ( "$(b,OI_CACHE_DIR)",
               "Override the cache directory for $(b,oi) alone. Falls \
                back to $(b,XDG_CACHE_HOME/oi), then $(b,~/.cache/oi)." );
+          `I
+            ( "$(b,OI_REPOREPO)",
+              "Override the location of the reporepo clone. Defaults \
+               to $(b,\\$OI_DATA_DIR/reporepo)." );
+          `I
+            ( "$(b,OI_REPOREPO_URL)",
+              "Override the upstream URL used to clone the reporepo \
+               on first use. Defaults to the built-in upstream. Has \
+               no effect once the clone exists — $(b,oi) never \
+               auto-pulls." );
         ]
   in
   let cmd =

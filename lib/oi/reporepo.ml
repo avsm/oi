@@ -10,15 +10,34 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let ( / ) = Filename.concat
 
+(* The reporepo lives under the XDG data hierarchy so it survives
+   [oi clean --all] and sits in a predictable spot for the user to
+   cd into, commit, and push from. *)
 let default_path =
-  match Sys.getenv_opt "HOME" with
-  | Some h -> h / "scratch" / "reporepo"
-  | None -> "/tmp/reporepo"
+  let data_base =
+    match Sys.getenv_opt "OI_DATA_DIR" with
+    | Some v when v <> "" -> v
+    | _ -> (
+        match Sys.getenv_opt "XDG_DATA_HOME" with
+        | Some v when v <> "" -> v / "oi"
+        | _ -> (
+            match Sys.getenv_opt "HOME" with
+            | Some h -> h / ".local" / "share" / "oi"
+            | None -> "/tmp/oi"))
+  in
+  data_base / "reporepo"
 
 let env_path () =
   match Sys.getenv_opt "OI_REPOREPO" with
   | Some v when v <> "" -> v
   | _ -> default_path
+
+let default_url = "https://tangled.org/anil.recoil.org/reporepo.git"
+
+let env_url () =
+  match Sys.getenv_opt "OI_REPOREPO_URL" with
+  | Some v when v <> "" -> v
+  | _ -> default_url
 
 type entry = {
   handle : string;
@@ -46,6 +65,31 @@ let write_file path content =
   let oc = open_out path in
   Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
       output_string oc content)
+
+(* Clone the reporepo from [url] into [path] when [path] isn't already
+   a git working copy. Never pulls once the clone exists: the user is
+   expected to [cd] in, edit, commit, and push — any auto-pull would
+   risk stomping on local commits or unstaged edits. *)
+let ensure_clone ~sys ~path ~url =
+  let dot_git = path / ".git" in
+  if Sys.file_exists dot_git then ()
+  else if
+    Sys.file_exists path
+    && Sys.is_directory path
+    && Array.length (Sys.readdir path) > 0
+  then
+    Error.config_error
+      "reporepo path %s exists but is not a git clone; move or remove \
+       it and retry"
+      path
+  else begin
+    mkdir_p (Filename.dirname path);
+    Log.info (fun m -> m "Cloning reporepo from %s to %s" url path);
+    try D10.Sysops.Cmd.run sys [ "git"; "clone"; url; path ]
+    with _ ->
+      Error.config_error "failed to clone reporepo from %s into %s" url
+        path
+  end
 
 (* -- Loading ------------------------------------------------------------- *)
 
@@ -310,8 +354,9 @@ let base_entries () =
         resolve entries ~roots:[ { handle = "relocatable"; version = None } ]
         |> List.rev
 
-let ensure_base ~data_dir ?(refresh = false) () =
+let ensure_base ~sys ~data_dir ?(refresh = false) () =
   let path = env_path () in
+  ensure_clone ~sys ~path ~url:(env_url ());
   Log.debug (fun m -> m "ensure_base: reading reporepo %s" path);
   let entries = try load ~path with Error.E _ -> [] in
   match latest entries ~handle:"relocatable" with
