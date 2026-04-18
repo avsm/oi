@@ -51,9 +51,17 @@ let refresh_term =
     & info
         ~doc:
           "Force refresh of all timestamp-driven caches (opam repos, extra \
-           repos, and any other aged caches). Without this flag, caches \
-           older than 24 hours are refreshed automatically; newer ones are \
-           reused."
+           repos, pin-depends sources, and any other aged caches). Without \
+           this flag, caches older than 24 hours are refreshed \
+           automatically; newer ones are reused. For $(b,pin-depends) \
+           entries on git URLs this is how new upstream commits become \
+           visible: the pinned source is re-pulled, HEAD is re-resolved, \
+           and the resolved commit is baked into the synthesized opam \
+           file's $(b,url:) fragment. That fragment participates in the \
+           layer hash, so a new upstream commit invalidates the binary \
+           cache for the pin (and its reverse deps) and triggers a \
+           rebuild. Between refreshes, upstream changes on a git pin are \
+           not observed."
         [ "refresh" ])
 
 (* Common CLI flag: [--with-repo URL], repeatable. Available on every
