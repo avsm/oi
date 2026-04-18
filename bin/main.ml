@@ -285,8 +285,14 @@ let with_error_handling f =
 
    The returned closure is still expected to be called inside
    [with_error_handling]. *)
+(* Forced to the POSIX backend rather than [Eio_main.run] so that
+   builds under Linux don't pick up [eio_linux] / io_uring — we want
+   the same syscall surface everywhere, and io_uring interacts poorly
+   with some of the subprocess / signal paths we rely on. If you need
+   a different backend, swap this for [Eio_main.run] and thread
+   [eio_main] back into [bin/dune]. *)
 let with_eio_root f =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   Oi.Signals.install ~sw;
   f env sw

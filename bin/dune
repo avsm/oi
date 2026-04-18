@@ -6,7 +6,7 @@
   oi
   d10
   osrel
-  eio_main
+  eio_posix
   cmdliner
   xdge
   fmt
@@ -22,4 +22,4 @@
  (name d10_main)
  (public_name d10)
  (package d10)
- (libraries d10 osrel eio_main cmdliner fmt fmt.tty logs logs.fmt))
+ (libraries d10 osrel eio_posix cmdliner fmt fmt.tty logs logs.fmt))

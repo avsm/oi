@@ -47,7 +47,7 @@ let short_hash h = if String.length h > 12 then String.sub h 0 12 else h
 
 let list_cmd =
   let run () cache_dir =
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     with_d10 cache_dir env @@ fun d10 ->
     let layers_dir = Eio.Path.native_exn d10.root / "layers" / d10.os_key in
     Fmt.pr "@[<v>%a %s@,@," Fmt.(styled `Bold string) "Layers" d10.os_key;
@@ -92,7 +92,7 @@ let list_cmd =
 
 let show_cmd =
   let run () cache_dir package =
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     with_d10 cache_dir env @@ fun d10 ->
     let layers_dir = Eio.Path.native_exn d10.root / "layers" / d10.os_key in
     if not (Sys.file_exists layers_dir) then Fmt.pr "No layers found.@."
@@ -156,7 +156,7 @@ let show_cmd =
 
 let binaries_cmd =
   let run () cache_dir =
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     with_d10 cache_dir env @@ fun d10 ->
     let index_path = Eio.Path.native_exn d10.root / "layers" / "index.db" in
     if not (Sys.file_exists index_path) then
@@ -182,7 +182,7 @@ let binaries_cmd =
 
 let index_cmd =
   let run () cache_dir =
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     with_d10 cache_dir env @@ fun d10 ->
     let layers_root = Eio.Path.native_exn d10.root / "layers" in
     let index_path = layers_root / "index.db" in
@@ -230,7 +230,7 @@ let index_cmd =
 
 let stats_cmd =
   let run () cache_dir =
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     with_d10 cache_dir env @@ fun d10 ->
     let index_path = Eio.Path.native_exn d10.root / "layers" / "index.db" in
     if not (Sys.file_exists index_path) then
