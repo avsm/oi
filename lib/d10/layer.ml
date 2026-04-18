@@ -281,7 +281,14 @@ let export (c : Config.t) ~hash ~dst =
     if Sysops.file_exists dst_file then false
     else begin
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_dir;
-      Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:dst_file;
+      (* Atomic publication: stage into .tar.zst.tmp, then rename on
+         success. If the process is interrupted mid-tar, the next
+         export sees no [dst_file] and retries rather than treating a
+         truncated archive as authoritative. *)
+      let tmp_file = Eio.Path.(os_dir / (hash ^ ".tar.zst.tmp")) in
+      (try Eio.Path.unlink tmp_file with _ -> ());
+      Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:tmp_file;
+      Eio.Path.rename tmp_file dst_file;
       (* Write compressed file listing relative to fs/ *)
       let fs_dir = fs_path c ~hash in
       if Sysops.file_exists fs_dir then begin

@@ -55,6 +55,20 @@ type stats = { count : int; total_size : int64 }
 val stats : cache:Cache.t -> stats
 (** Count and total size of mirrored blobs. *)
 
+type entry = {
+  sha256 : string;
+  size : int64;
+  package_name : string;
+  package_version : string;
+  kind : [ `Main | `Extra of string ];
+  url : string;
+}
+
+val list : cache:Cache.t -> ?package:string -> unit -> entry list
+(** [list ~cache ?package ()] returns one entry per [(source, package)]
+    reference in the index, ordered by package name + version. If
+    [package] is given, restrict to that package name. *)
+
 val gc : cache:Cache.t -> int
 (** Remove blobs whose [source_refs] is empty (orphaned from any
     package we've ever built). Returns the number of blobs removed. *)

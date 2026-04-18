@@ -274,6 +274,59 @@ let stats ~cache =
     ignore (Sqlite3.finalize stmt);
     r
 
+(* -- Public: list -------------------------------------------------------- *)
+
+type entry = {
+  sha256 : string;
+  size : int64;
+  package_name : string;
+  package_version : string;
+  kind : [ `Main | `Extra of string ];
+  url : string;
+}
+
+let list ~cache ?package () =
+  if not (Sys.file_exists (db_path ~cache)) then []
+  else
+    with_db ~cache @@ fun db ->
+    let out = ref [] in
+    let cb row =
+      match row with
+      | [| sha256; size; name; version; url; kind_s; extra_name |] ->
+          let kind =
+            match kind_s with
+            | "main" -> `Main
+            | "extra" -> `Extra extra_name
+            | other -> `Extra other
+          in
+          let size = try Int64.of_string size with _ -> 0L in
+          out :=
+            {
+              sha256;
+              size;
+              package_name = name;
+              package_version = version;
+              kind;
+              url;
+            }
+            :: !out
+      | _ -> ()
+    in
+    let where =
+      match package with
+      | None -> ""
+      | Some p -> Fmt.str " WHERE r.package_name = %s" (quote p)
+    in
+    ignore
+      (Sqlite3.exec_not_null_no_headers db ~cb
+         (Fmt.str
+            "SELECT s.sha256, s.size, r.package_name, r.package_version, \
+             r.url, r.kind, r.extra_name FROM source_refs r JOIN sources s ON \
+             s.sha256 = r.sha256%s ORDER BY r.package_name, r.package_version, \
+             r.kind, r.extra_name"
+            where));
+    List.rev !out
+
 (* -- Public: gc ---------------------------------------------------------- *)
 
 (* Collect all (algo, value) rows referencing a given sha256; we need

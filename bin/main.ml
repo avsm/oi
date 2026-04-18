@@ -250,14 +250,46 @@ let pp_one_exn fmt = function
         Fmt.(styled `Red string)
         "error:" (Printexc.to_string e)
 
+(* Test whether an exception (possibly wrapped) is rooted in our
+   signal-handler cancel path or opam's [Sys.Break]. Either should
+   render as a clean "Interrupted." exit, not a scary traceback. *)
+let rec is_interrupt = function
+  | Oi.Signals.Interrupted | Sys.Break -> true
+  | Eio.Cancel.Cancelled e -> is_interrupt e
+  | Eio.Exn.Io _ -> false
+  | _ -> false
+
 let with_error_handling f =
   try f () with
+  | exn when is_interrupt exn ->
+      Fmt.epr "Interrupted.@.";
+      exit 130
+  | Eio.Exn.Multiple exns when List.exists (fun (e, _) -> is_interrupt e) exns
+    ->
+      Fmt.epr "Interrupted.@.";
+      exit 130
   | (Oi.Error.E _ | Failure _) as exn ->
       Fmt.epr "%a@." pp_one_exn exn;
       exit 1
   | Eio.Exn.Multiple exns ->
       List.iter (fun (e, _bt) -> Fmt.epr "%a@." pp_one_exn e) exns;
       exit 1
+
+(* Boilerplate wrapper: every top-level command body should be run
+   inside a root [Eio.Switch] so that [Signals.install] has something
+   concrete to cancel, and so that resources registered with the
+   switch (subprocesses, daemons) unwind cleanly on Ctrl-C.
+
+   Use as:
+     [with_eio_root @@ fun env sw -> ...body using sw...]
+
+   The returned closure is still expected to be called inside
+   [with_error_handling]. *)
+let with_eio_root f =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Oi.Signals.install ~sw;
+  f env sw
 
 let get_packages_dirs ~data_dir =
   let dirs = Oi.Repo.packages_dirs ~data_dir in
@@ -613,7 +645,7 @@ let run_cmd =
   let run () data_dir cache_dir refresh dry_run registry target with_deps
       with_repos args =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -881,7 +913,7 @@ let run_cmd =
 let plan_cmd =
   let run () data_dir cache_dir refresh targets with_repos with_deps =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -955,7 +987,7 @@ let plan_cmd =
 let env_cmd =
   let run () data_dir cache_dir refresh with_repos with_deps =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1020,7 +1052,7 @@ let env_cmd =
 let which_cmd =
   let run () cache_dir registry pattern =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1150,7 +1182,7 @@ let needs_sync ~cwd ~prefix =
 let sync_cmd =
   let run () data_dir cache_dir refresh registry with_repos with_deps =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1175,7 +1207,7 @@ let exec_cmd =
   let run () data_dir cache_dir refresh registry with_repos with_deps cmd args
       =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1237,7 +1269,8 @@ let exec_cmd =
 
 let config_cmd =
   let run () cache_dir data_dir =
-    Eio_main.run @@ fun env ->
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, _clock, sys, _platform, os_key, _cache =
       bootstrap env cache_dir
     in
@@ -1310,7 +1343,8 @@ let config_cmd =
 let clean_cmd =
   let run () cache_dir data_dir all toolchains sources binaries dune_cache repos
       dry_run =
-    Eio_main.run @@ fun env ->
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, _clock, sys, _platform, _os_key, cache =
       bootstrap env cache_dir
     in
@@ -1406,7 +1440,8 @@ let clean_cmd =
 
 let registry_show_cmd =
   let run () cache_dir _data_dir target =
-    Eio_main.run @@ fun env ->
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, _clock, sys, _platform, os_key, _cache =
       bootstrap env cache_dir
     in
@@ -1551,7 +1586,8 @@ let registry_show_cmd =
 
 let registry_index_cmd =
   let run () cache_dir =
-    Eio_main.run @@ fun env ->
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, _os_key, _cache =
       bootstrap env cache_dir
     in
@@ -1596,7 +1632,7 @@ let registry_index_cmd =
 let registry_export_cmd =
   let run () cache_dir output =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1693,7 +1729,7 @@ let registry_build_cmd =
   let run () data_dir cache_dir refresh dry_run registry with_repos with_deps
       targets =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
@@ -1930,7 +1966,7 @@ let depexts_cmd =
   let run () data_dir cache_dir refresh with_repos with_deps by_package
       os_override =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, _clock, sys, platform, _os_key, cache =
       bootstrap env cache_dir
     in
@@ -2151,7 +2187,7 @@ let human_bytes b =
 let registry_mirror_stats_cmd =
   let run () cache_dir =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, _fs, _clock, _sys, _platform, _os_key, cache =
       bootstrap env cache_dir
     in
@@ -2166,7 +2202,7 @@ let registry_mirror_stats_cmd =
 let registry_mirror_gc_cmd =
   let run () cache_dir =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, _fs, _clock, _sys, _platform, _os_key, cache =
       bootstrap env cache_dir
     in
@@ -2184,7 +2220,7 @@ let registry_mirror_gc_cmd =
 let registry_mirror_verify_cmd =
   let run () cache_dir =
     with_error_handling @@ fun () ->
-    Eio_main.run @@ fun env ->
+    with_eio_root @@ fun env _sw ->
     let _proc_mgr, _fs, _clock, sys, _platform, _os_key, cache =
       bootstrap env cache_dir
     in
@@ -2204,6 +2240,51 @@ let registry_mirror_verify_cmd =
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
+let registry_mirror_list_cmd =
+  let run () cache_dir package =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let _proc_mgr, _fs, _clock, _sys, _platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
+    let entries = Oi.Source_mirror.list ~cache ?package () in
+    (* One line per (source, package) reference. Columns:
+         <pkg.version>  <kind>  <size>  <sha256 (first 12)>  <url>
+       sha256 is shortened for readability; pipe the raw column to
+       sqlite3 if you need full hashes. *)
+    List.iter
+      (fun (e : Oi.Source_mirror.entry) ->
+        let pkg = e.package_name ^ "." ^ e.package_version in
+        let kind =
+          match e.kind with `Main -> "main" | `Extra n -> "extra:" ^ n
+        in
+        let short_sha =
+          if String.length e.sha256 >= 12 then String.sub e.sha256 0 12
+          else e.sha256
+        in
+        Fmt.pr "%-40s  %-16s  %-12s  %10s  %s@." pkg kind short_sha
+          (Fmt.str "%a" Oi.Cache.pp_size e.size)
+          e.url)
+      entries;
+    if entries = [] then
+      match package with
+      | Some p -> Fmt.pr "No sources in mirror for package %s@." p
+      | None -> Fmt.pr "Mirror is empty@."
+  in
+  let package =
+    Arg.(
+      value
+      & opt (some string) None
+      & info ~docv:"PKG"
+          ~doc:"Restrict the listing to sources referenced by this package"
+          [ "p"; "package" ])
+  in
+  let info =
+    Cmd.info "list"
+      ~doc:"List every source tarball currently stored in the mirror"
+  in
+  Cmd.v info Term.(const run $ log_term $ cache_dir_term $ package)
+
 let registry_mirror_cmd =
   let info =
     Cmd.info "mirror"
@@ -2214,6 +2295,7 @@ let registry_mirror_cmd =
   Cmd.group info
     [
       registry_mirror_stats_cmd;
+      registry_mirror_list_cmd;
       registry_mirror_gc_cmd;
       registry_mirror_verify_cmd;
     ]
