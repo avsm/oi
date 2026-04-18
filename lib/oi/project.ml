@@ -69,12 +69,14 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
   let raw_deps =
     OpamFormula.fold_left
       (fun acc (name, _) -> OpamPackage.Name.to_string name :: acc)
-      [] (OpamFile.OPAM.depends opam)
+      []
+      (OpamFile.OPAM.depends opam)
   in
   (* [x-opam-repositories:] from the extensions map. *)
   let raw_extra_repos =
-    match OpamStd.String.Map.find_opt "x-opam-repositories"
-            (OpamFile.OPAM.extensions opam)
+    match
+      OpamStd.String.Map.find_opt "x-opam-repositories"
+        (OpamFile.OPAM.extensions opam)
     with
     | None -> []
     | Some v -> (
@@ -108,8 +110,8 @@ let merge_extra_repos entries =
       | Some (_, prev_url) when prev_url = url -> ()
       | Some (prev_file, prev_url) ->
           Error.config_error
-            "package %s and %s disagree on x-opam-repositories entry %s: \
-             %s vs %s"
+            "package %s and %s disagree on x-opam-repositories entry %s: %s vs \
+             %s"
             prev_file declared_in name prev_url url)
     entries;
   List.rev !ordered
@@ -130,8 +132,8 @@ let merge_pins entries =
           ()
       | Some prev ->
           Error.config_error
-            "package %s and %s disagree on pin-depends entry %s: %s (%s) \
-             vs %s (%s)"
+            "package %s and %s disagree on pin-depends entry %s: %s (%s) vs %s \
+             (%s)"
             prev.declared_in pin.declared_in
             (OpamPackage.Name.to_string name)
             (OpamPackage.version_to_string prev.pkg)

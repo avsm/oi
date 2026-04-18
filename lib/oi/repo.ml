@@ -26,7 +26,6 @@ let remotes =
   ]
 
 let config = { remotes; default = "relocatable" }
-
 let refresh_max_age = 86_400.0
 
 (* -- Repo pull using opam libraries -------------------------------------- *)
@@ -105,12 +104,12 @@ let ensure_one ~refresh ~label ~url ~dir =
   end
   else if refresh || dir_needs_refresh dir then begin
     Log.info (fun m -> m "Updating %s..." label);
-    (try
-       pull_repo ~label ~url_s:url ~dst:dir;
-       touch_dir dir
-     with exn ->
-       Log.warn (fun m ->
-           m "Failed to update %s: %s" label (Printexc.to_string exn)))
+    try
+      pull_repo ~label ~url_s:url ~dst:dir;
+      touch_dir dir
+    with exn ->
+      Log.warn (fun m ->
+          m "Failed to update %s: %s" label (Printexc.to_string exn))
   end
 
 let ensure ~data_dir ?(refresh = false) () =

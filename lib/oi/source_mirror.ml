@@ -97,8 +97,7 @@ let quote s =
 (* -- File operations ----------------------------------------------------- *)
 
 let file_size path =
-  try Int64.of_int (Unix.stat path).Unix.st_size
-  with Unix.Unix_error _ -> 0L
+  try Int64.of_int (Unix.stat path).Unix.st_size with Unix.Unix_error _ -> 0L
 
 (* Hardlink [src] → [dst]; fall back to byte-copy across filesystems or
    when the filesystem refuses hardlinks. Idempotent: if [dst] already
@@ -141,8 +140,10 @@ let link_or_copy ~src ~dst =
         Unix.link src tmp;
         true
       with
-      | Unix.Unix_error ((Unix.EXDEV | Unix.EMLINK | Unix.EPERM | Unix.EOPNOTSUPP), _, _)
-        -> false
+      | Unix.Unix_error
+          ((Unix.EXDEV | Unix.EMLINK | Unix.EPERM | Unix.EOPNOTSUPP), _, _)
+      ->
+        false
     in
     if not linked then begin
       let ic = open_in_bin src in
@@ -160,9 +161,9 @@ let link_or_copy ~src ~dst =
       loop ()
     end;
     try Unix.rename tmp dst
-    with Unix.Unix_error _ ->
+    with Unix.Unix_error _ -> (
       (* Lost a race with another writer; trust the existing file. *)
-      (try Sys.remove tmp with Sys_error _ -> ())
+      try Sys.remove tmp with Sys_error _ -> ())
   end
 
 (* -- Locating the file in opam's download-cache ------------------------- *)
@@ -230,9 +231,7 @@ let record ~sys:_ ~cache ~package ~kind ~url ~checksums =
                  (quote sha256) (quote sha256))
           end;
           let extra_name, kind_s =
-            match kind with
-            | `Main -> ("", "main")
-            | `Extra n -> (n, "extra")
+            match kind with `Main -> ("", "main") | `Extra n -> (n, "extra")
           in
           exec db
             (Fmt.str
@@ -334,14 +333,11 @@ let list ~cache ?package () =
 let checksums_for_sha256 db sha256 =
   let out = ref [] in
   let cb row =
-    match row with
-    | [| algo; value |] -> out := (algo, value) :: !out
-    | _ -> ()
+    match row with [| algo; value |] -> out := (algo, value) :: !out | _ -> ()
   in
   ignore
     (Sqlite3.exec_not_null_no_headers db ~cb
-       (Fmt.str
-          "SELECT algo, value FROM source_checksums WHERE sha256 = %s"
+       (Fmt.str "SELECT algo, value FROM source_checksums WHERE sha256 = %s"
           (quote sha256)));
   !out
 
@@ -355,8 +351,8 @@ let gc ~cache =
     in
     ignore
       (Sqlite3.exec_not_null_no_headers db ~cb
-         "SELECT s.sha256 FROM sources s LEFT JOIN source_refs r ON r.sha256 \
-          = s.sha256 WHERE r.sha256 IS NULL");
+         "SELECT s.sha256 FROM sources s LEFT JOIN source_refs r ON r.sha256 = \
+          s.sha256 WHERE r.sha256 IS NULL");
     let removed = ref 0 in
     List.iter
       (fun sha ->
@@ -372,8 +368,7 @@ let gc ~cache =
               incr removed
             with Unix.Unix_error _ -> ())
           cks;
-        exec db
-          (Fmt.str "DELETE FROM sources WHERE sha256 = %s" (quote sha)))
+        exec db (Fmt.str "DELETE FROM sources WHERE sha256 = %s" (quote sha)))
       !orphans;
     !removed
 
@@ -414,6 +409,35 @@ let verify ~sys:_ ~cache =
       (Sqlite3.exec_not_null_no_headers db ~cb
          "SELECT sha256, algo, value FROM source_checksums");
     !bad
+
+(* -- Public: merge_remote ------------------------------------------------ *)
+
+(* Open [index_path] (create if missing — schema runs on open), ATTACH
+   [remote_path], and INSERT OR IGNORE every row from the three mirror
+   tables. Foreign keys between the three cascade on delete but not on
+   insert — we rely on sha256 PKs/UNIQUEs and ON CONFLICT IGNORE. *)
+let merge_remote ~index_path ~remote_path =
+  mkdir_p (Filename.dirname index_path);
+  let db = Sqlite3.db_open index_path in
+  Fun.protect ~finally:(fun () -> close_db db) @@ fun () ->
+  exec db schema;
+  exec db "PRAGMA journal_mode=WAL";
+  exec db "PRAGMA synchronous=NORMAL";
+  exec db "PRAGMA foreign_keys=ON";
+  exec db (Fmt.str "ATTACH DATABASE %s AS remote" (quote remote_path));
+  (try
+     exec db "BEGIN TRANSACTION";
+     exec db "INSERT OR IGNORE INTO sources SELECT * FROM remote.sources";
+     exec db
+       "INSERT OR IGNORE INTO source_checksums SELECT * FROM \
+        remote.source_checksums";
+     exec db
+       "INSERT OR IGNORE INTO source_refs SELECT * FROM remote.source_refs";
+     exec db "COMMIT"
+   with e ->
+     (try exec db "ROLLBACK" with _ -> ());
+     raise e);
+  exec db "DETACH DATABASE remote"
 
 (* -- Public: export ------------------------------------------------------ *)
 

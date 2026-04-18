@@ -47,8 +47,7 @@ let install ~sw =
        finishes (daemons don't block switch release). *)
     Eio.Fiber.fork_daemon ~sw (fun () ->
         Eio.Condition.await_no_mutex cond;
-        prerr_string
-          "\n[oi] interrupted; cleaning up (Ctrl-C again to force)\n";
+        prerr_string "\n[oi] interrupted; cleaning up (Ctrl-C again to force)\n";
         (try flush stderr with _ -> ());
         Eio.Switch.fail sw Interrupted;
         `Stop_daemon)

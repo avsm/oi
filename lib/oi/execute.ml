@@ -17,7 +17,8 @@ let ( / ) = Filename.concat
    [min (cpu_count) 8]. *)
 let build_parallelism =
   match Sys.getenv_opt "OI_BUILD_PARALLELISM" with
-  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 8)
+  | Some s -> (
+      match int_of_string_opt s with Some n when n > 0 -> n | _ -> 8)
   | None -> min (Domain.recommended_domain_count ()) 8
 
 (* -- Command execution --------------------------------------------------- *)
@@ -146,8 +147,8 @@ let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
         let result =
-          OpamRepository.pull_file name ~cache_dir ~cache_urls
-            ~silent_hits:true dst_file checksums [ url ]
+          OpamRepository.pull_file name ~cache_dir ~cache_urls ~silent_hits:true
+            dst_file checksums [ url ]
           |> OpamProcess.Job.run
         in
         match result with
@@ -282,8 +283,7 @@ let run ?(cache_urls = []) ~proc_mgr ~fs ~clock ~sys ~os_key plan =
                     Fmt.str "[%s] [%d active] %s (build)" stage_s !active p.pkg
                   );
                 (try
-                   Eio.Path.rmtree ~missing_ok:true
-                     Eio.Path.(fs / p.build_dir);
+                   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / p.build_dir);
                    build_package ~cache_urls ~proc_mgr ~fs p
                  with exn ->
                    build_failures := (p.pkg, exn) :: !build_failures;

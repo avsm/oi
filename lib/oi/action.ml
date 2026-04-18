@@ -177,4 +177,5 @@ let layer_hash_for t name =
   OpamPackage.Name.Map.find_opt name t.nodes_by_name
   |> Stdlib.Option.map (fun n -> n.layer_hash)
 
-let layer_hashes t = List.map (fun name -> (find t name).layer_hash) t.topo_order
+let layer_hashes t =
+  List.map (fun name -> (find t name).layer_hash) t.topo_order

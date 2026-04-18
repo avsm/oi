@@ -6,8 +6,8 @@
 
     Executes a {!Plan.t} by processing stages sequentially. Within each stage,
     fetch and build run in parallel via Eio fibers. Install is serialised at
-    stage boundaries. Uses {!Installer} to process [.install] files directly
-    via the opam libraries (no external [opam-installer] binary).
+    stage boundaries. Uses {!Installer} to process [.install] files directly via
+    the opam libraries (no external [opam-installer] binary).
 
     Layers are captured via {!D10.Prefix.diff} and stored in the d10 cache for
     future reuse. *)
@@ -25,7 +25,7 @@ val run :
     Reports per-package failures to stderr and exits with code 1 if any package
     fails.
 
-    [cache_urls] are passed through to [OpamRepository.pull_tree] /
-    [pull_file] for every fetch so that opam probes local and/or remote
-    source mirrors (e.g. {!Source_mirror.url}, {!Source_mirror.remote_url})
-    before falling back to the upstream URL. *)
+    [cache_urls] are passed through to [OpamRepository.pull_tree] / [pull_file]
+    for every fetch so that opam probes local and/or remote source mirrors (e.g.
+    {!Source_mirror.url}, {!Source_mirror.remote_url}) before falling back to
+    the upstream URL. *)

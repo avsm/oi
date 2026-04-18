@@ -31,9 +31,9 @@ let is_under ~base p =
   let p = canon p in
   let n = String.length base in
   String.length p = n
-  || (String.length p > n
+  || String.length p > n
      && String.sub p 0 n = base
-     && p.[n] = Filename.dir_sep.[0])
+     && p.[n] = Filename.dir_sep.[0]
 
 (* Stream-copy [src_s] to [dst_s] and set the exec bit via Unix.chmod
    (Eio's create perm applies only to newly-created files). Parent
@@ -89,19 +89,19 @@ let install ~fs ~prefix ~build_dir ~install_file =
   let global_dir sub = prefix / sub in
   let sections =
     [
-      (global_dir "bin",            S.bin inst,          true);
-      (global_dir "sbin",           S.sbin inst,         true);
-      (pkg_dir "lib",               S.lib inst,          false);
-      (pkg_dir "lib",               S.libexec inst,      true);
-      (global_dir "lib",            S.lib_root inst,     false);
-      (global_dir "lib",            S.libexec_root inst, true);
-      (prefix / "lib" / "toplevel", S.toplevel inst,     false);
-      (prefix / "lib" / "stublibs", S.stublibs inst,     true);
-      (global_dir "man",            S.man inst,          false);
-      (pkg_dir "share",             S.share inst,        false);
-      (global_dir "share",          S.share_root inst,   false);
-      (pkg_dir "etc",               S.etc inst,          false);
-      (pkg_dir "doc",               S.doc inst,          false);
+      (global_dir "bin", S.bin inst, true);
+      (global_dir "sbin", S.sbin inst, true);
+      (pkg_dir "lib", S.lib inst, false);
+      (pkg_dir "lib", S.libexec inst, true);
+      (global_dir "lib", S.lib_root inst, false);
+      (global_dir "lib", S.libexec_root inst, true);
+      (prefix / "lib" / "toplevel", S.toplevel inst, false);
+      (prefix / "lib" / "stublibs", S.stublibs inst, true);
+      (global_dir "man", S.man inst, false);
+      (pkg_dir "share", S.share inst, false);
+      (global_dir "share", S.share_root inst, false);
+      (pkg_dir "etc", S.etc inst, false);
+      (pkg_dir "doc", S.doc inst, false);
     ]
   in
   List.iter

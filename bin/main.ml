@@ -52,16 +52,15 @@ let refresh_term =
         ~doc:
           "Force refresh of all timestamp-driven caches (opam repos, extra \
            repos, pin-depends sources, and any other aged caches). Without \
-           this flag, caches older than 24 hours are refreshed \
-           automatically; newer ones are reused. For $(b,pin-depends) \
-           entries on git URLs this is how new upstream commits become \
-           visible: the pinned source is re-pulled, HEAD is re-resolved, \
-           and the resolved commit is baked into the synthesized opam \
-           file's $(b,url:) fragment. That fragment participates in the \
-           layer hash, so a new upstream commit invalidates the binary \
-           cache for the pin (and its reverse deps) and triggers a \
-           rebuild. Between refreshes, upstream changes on a git pin are \
-           not observed."
+           this flag, caches older than 24 hours are refreshed automatically; \
+           newer ones are reused. For $(b,pin-depends) entries on git URLs \
+           this is how new upstream commits become visible: the pinned source \
+           is re-pulled, HEAD is re-resolved, and the resolved commit is baked \
+           into the synthesized opam file's $(b,url:) fragment. That fragment \
+           participates in the layer hash, so a new upstream commit \
+           invalidates the binary cache for the pin (and its reverse deps) and \
+           triggers a rebuild. Between refreshes, upstream changes on a git \
+           pin are not observed."
         [ "refresh" ])
 
 (* Common CLI flag: [--with-repo URL], repeatable. Available on every
@@ -87,9 +86,9 @@ let with_deps_term =
     value & opt_all string []
     & info ~docv:"PKG"
         ~doc:
-          "Additional dependency to include in solving. Accepts a package \
-           name or an opam atom with a version constraint (e.g. \
-           --with=fmt>=0.9). Repeatable."
+          "Additional dependency to include in solving. Accepts a package name \
+           or an opam atom with a version constraint (e.g. --with=fmt>=0.9). \
+           Repeatable."
         [ "with" ])
 
 (* Convert a CLI [--with-repo URL] entry into a [Project.extra_repo] with a
@@ -135,7 +134,19 @@ let registry_term =
 let remote_of_registry = function
   | "" -> None
   | url -> Some (`Http_remote url : D10.Layer.remote)
+
 let remote_index_max_age = 3600.0 (* 1 hour *)
+
+(* Join a registry base URL and a relative path with a single [/], regardless
+   of whether the user supplied a trailing slash. [rel] is expected not to
+   start with one. *)
+let url_join registry rel =
+  let n = String.length registry in
+  let stripped =
+    if n > 0 && registry.[n - 1] = '/' then String.sub registry 0 (n - 1)
+    else registry
+  in
+  stripped ^ "/" ^ rel
 
 (* Ensure the remote registry's index.db is cached locally. Downloads it if
    missing or older than [remote_index_max_age]. Returns the local path on
@@ -143,29 +154,30 @@ let remote_index_max_age = 3600.0 (* 1 hour *)
 let ensure_remote_index ~sys ~fs ~cache ~os_key ~registry =
   if registry = "" then None
   else
-  let cache_root = Oi.Cache.root_s cache in
-  let os_dir = cache_root / "layers" / os_key in
-  let local_path = os_dir / "remote-index.db" in
-  let fresh =
-    try
-      let st = Unix.stat local_path in
-      Unix.gettimeofday () -. st.Unix.st_mtime < remote_index_max_age
-    with Unix.Unix_error _ -> false
-  in
-  if fresh then Some local_path
-  else
-    let url = registry ^ "/" ^ os_key ^ "/index.db" in
-    let dst = Eio.Path.(fs / local_path) in
-    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
-    if D10.Sysops.Curl.fetch sys ~url ~dst then Some local_path
-    else if Sys.file_exists local_path then begin
-      Logs.warn (fun m -> m "Failed to fetch registry index, using stale cache");
-      Some local_path
-    end
-    else begin
-      Logs.warn (fun m -> m "Failed to fetch registry index from %s" registry);
-      None
-    end
+    let cache_root = Oi.Cache.root_s cache in
+    let os_dir = cache_root / "layers" / os_key in
+    let local_path = os_dir / "remote-index.db" in
+    let fresh =
+      try
+        let st = Unix.stat local_path in
+        Unix.gettimeofday () -. st.Unix.st_mtime < remote_index_max_age
+      with Unix.Unix_error _ -> false
+    in
+    if fresh then Some local_path
+    else
+      let url = url_join registry (os_key / "index.db") in
+      let dst = Eio.Path.(fs / local_path) in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
+      if D10.Sysops.Curl.fetch sys ~url ~dst then Some local_path
+      else if Sys.file_exists local_path then begin
+        Logs.warn (fun m ->
+            m "Failed to fetch registry index, using stale cache");
+        Some local_path
+      end
+      else begin
+        Logs.warn (fun m -> m "Failed to fetch registry index from %s" registry);
+        None
+      end
 
 (* Merge the remote index into the local index, creating the local index
    if it doesn't exist. *)
@@ -233,9 +245,7 @@ let resolve_in_env ~env exe =
 (* Run a command and return its exit code (never raises on non-zero exit) *)
 let run_exec proc_mgr ~env cmd =
   let cmd =
-    match cmd with
-    | exe :: rest -> resolve_in_env ~env exe :: rest
-    | [] -> cmd
+    match cmd with exe :: rest -> resolve_in_env ~env exe :: rest | [] -> cmd
   in
   Eio.Switch.run @@ fun sw ->
   let child = Eio.Process.spawn ~sw proc_mgr ~env cmd in
@@ -320,9 +330,7 @@ let project_is_dev ~fs cwd =
   in
   let has_numeric_version file =
     let path = cwd / file in
-    match
-      OpamFile.OPAM.read_opt (OpamFile.make (OpamFilename.raw path))
-    with
+    match OpamFile.OPAM.read_opt (OpamFile.make (OpamFilename.raw path)) with
     | exception _ -> false
     | None -> false
     | Some opam -> (
@@ -347,42 +355,37 @@ let warn_suspicious_versions ?(dev_mode = false) ~data_dir ~pin_dir
     ~packages_dirs solved =
   if dev_mode then ()
   else
-  let builtins = Oi.Repo.packages_dirs ~data_dir in
-  let trusted d =
-    List.mem d builtins
-    ||
-    match pin_dir with Some p -> d = p | None -> false
-  in
-  let source_dir pkg =
-    List.find_opt
-      (fun d ->
-        let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-        Sys.file_exists (d / name / OpamPackage.to_string pkg / "opam"))
-      packages_dirs
-  in
-  List.iter
-    (fun pkg ->
-      let ver = OpamPackage.(Version.to_string (version pkg)) in
-      if
-        String.length ver > 0
-        && not (ver.[0] >= '0' && ver.[0] <= '9')
-      then
-        match source_dir pkg with
-        | Some d when not (trusted d) ->
-            Fmt.epr
-              "%a %s picked from non-default repo %s.@.  Its version \
-               %S is non-numeric; opam's version comparator ranks \
-               alphabetic segments above any numeric version, so the \
-               solver preferred it over every stable release \
-               satisfying the same constraint.@.  If this is \
-               unintended, cap the dependency in your *.opam or pin \
-               the specific version you want.@."
-              Fmt.(styled `Yellow string)
-              "warning:"
-              (OpamPackage.to_string pkg)
-              d ver
-        | _ -> ())
-    solved
+    let builtins = Oi.Repo.packages_dirs ~data_dir in
+    let trusted d =
+      List.mem d builtins
+      || match pin_dir with Some p -> d = p | None -> false
+    in
+    let source_dir pkg =
+      List.find_opt
+        (fun d ->
+          let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
+          Sys.file_exists (d / name / OpamPackage.to_string pkg / "opam"))
+        packages_dirs
+    in
+    List.iter
+      (fun pkg ->
+        let ver = OpamPackage.(Version.to_string (version pkg)) in
+        if String.length ver > 0 && not (ver.[0] >= '0' && ver.[0] <= '9') then
+          match source_dir pkg with
+          | Some d when not (trusted d) ->
+              Fmt.epr
+                "%a %s picked from non-default repo %s.@.  Its version %S is \
+                 non-numeric; opam's version comparator ranks alphabetic \
+                 segments above any numeric version, so the solver preferred \
+                 it over every stable release satisfying the same \
+                 constraint.@.  If this is unintended, cap the dependency in \
+                 your *.opam or pin the specific version you want.@."
+                Fmt.(styled `Yellow string)
+                "warning:"
+                (OpamPackage.to_string pkg)
+                d ver
+          | _ -> ())
+      solved
 
 let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
   { sys; fs; clock; root = Oi.Cache.root cache; os_key }
@@ -421,8 +424,7 @@ let resolved_cwd fs =
    version constraint for the solver. *)
 let parse_pkg_target s =
   match OpamPackage.of_string_opt s with
-  | Some pkg ->
-      (OpamPackage.name pkg, Some (`Eq, OpamPackage.version pkg))
+  | Some pkg -> (OpamPackage.name pkg, Some (`Eq, OpamPackage.version pkg))
   | None -> OpamFormula.atom_of_string s
 
 (* -- Remote registry helpers ---------------------------------------------- *)
@@ -497,15 +499,12 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     ?(refresh = false) ?project_dir ?remote
     ?(constraints = OpamPackage.Name.Map.empty) names =
   let dev_mode =
-    match project_dir with
-    | None -> false
-    | Some cwd -> project_is_dev ~fs cwd
+    match project_dir with None -> false | Some cwd -> project_is_dev ~fs cwd
   in
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
-    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs
-    @ get_packages_dirs ~data_dir
+    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~data_dir
   in
   let cache_root = Oi.Cache.root_s cache in
   let build_prefix = cache_root / "build" / "prefix" in
@@ -548,8 +547,8 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   end
   else begin
     let exec_plan =
-      Oi.Plan.create ctx ~cache_root ~os_key
-        ~ocaml_version:conf.ocaml_version build_plan
+      Oi.Plan.create ctx ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
+        build_plan
     in
     Oi.Execute.run ~proc_mgr ~fs
       ~clock:(clock :> D10.Config.clk)
@@ -616,13 +615,13 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
         let cwd_s, _ = resolved_cwd fs in
         project_is_dev ~fs cwd_s
       in
-      warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir:None
-        ~packages_dirs pkgs;
+      warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir:None ~packages_dirs
+        pkgs;
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
-        Oi.Plan.create ctx ~cache_root ~os_key
-          ~ocaml_version:conf.ocaml_version plan
+        Oi.Plan.create ctx ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
+          plan
       in
       Oi.Execute.run ~proc_mgr ~fs
         ~clock:(clock :> D10.Config.clk)
@@ -734,8 +733,8 @@ let run_cmd =
         if dep_opam_names = [] then []
         else
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~dry_run ~extra_repos:all_extras
-            ~pins:project_pins ~refresh ?remote ~constraints dep_opam_names
+            ~conf ~os_key ~dry_run ~extra_repos:all_extras ~pins:project_pins
+            ~refresh ?remote ~constraints dep_opam_names
       in
       if dry_run && dep_opam_names = [] then
         (* No deps to solve, but still in dry-run mode — just exit *)
@@ -939,7 +938,8 @@ let plan_cmd =
     let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
     let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh project_pins in
     let packages_dirs =
-      Stdlib.Option.to_list pin_dir @ extra_pkg_dirs
+      Stdlib.Option.to_list pin_dir
+      @ extra_pkg_dirs
       @ get_packages_dirs ~data_dir
     in
     let extra_deps = List.map Oi.Script.parse_dep with_deps in
@@ -951,9 +951,7 @@ let plan_cmd =
           else Some d.name)
         extra_deps
     in
-    let names =
-      List.map OpamPackage.Name.of_string targets @ extra_names
-    in
+    let names = List.map OpamPackage.Name.of_string targets @ extra_names in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let pkgs =
@@ -1130,8 +1128,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
     say "Extra repositories: %s"
       (String.concat ", "
          (List.map
-            (fun (e : Oi.Project.extra_repo) ->
-              Fmt.str "%s (%s)" e.name e.url)
+            (fun (e : Oi.Project.extra_repo) -> Fmt.str "%s (%s)" e.name e.url)
             all_extras));
   let conf = make_conf ~platform in
   let remote = remote_of_registry registry in
@@ -1162,8 +1159,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   (try Eio.Path.unlink envrc_path with Eio.Exn.Io _ -> ());
   Eio.Path.save ~create:(`Exclusive 0o644) envrc_path envrc;
   say "Wrote .envrc (run 'direnv allow' to activate)";
-  say "Prefix assembled at %s (%d packages)" prefix
-    (List.length layer_hashes);
+  say "Prefix assembled at %s (%d packages)" prefix (List.length layer_hashes);
   prefix
 
 (* True if [cwd]/_oi/prefix is missing, or any *.opam in [cwd] has been
@@ -1207,11 +1203,143 @@ let sync_cmd =
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
       $ registry_term $ with_repos_term $ with_deps_term)
 
+(* -- add ----------------------------------------------------------------- *)
+
+(* "op version" split from an opam [version_constraint], as two raw
+   strings suitable for {!Oi.Dune_project.add_dependency}. *)
+let constr_to_op_ver (op, ver) =
+  (OpamFormula.string_of_relop op, OpamPackage.Version.to_string ver)
+
+let add_cmd =
+  let run () data_dir cache_dir refresh registry with_repos package pkg_spec =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr, fs, clock, sys, platform, os_key, cache =
+      bootstrap env cache_dir
+    in
+    let cwd, _ = resolved_cwd fs in
+    (* Fail fast before the sync's 10-second repo refresh. *)
+    let dp = Oi.Dune_project.load ~fs ~cwd in
+    if not (Oi.Dune_project.generate_opam_files dp) then
+      Oi.Error.config_error
+        "dune-project does not have (generate_opam_files): oi add only \
+         supports projects where dune owns the *.opam files";
+    (match (package, Oi.Dune_project.package_names dp) with
+    | Some p, names when not (List.mem p names) ->
+        Oi.Error.config_error
+          "no (package (name %s) …) stanza in dune-project (declared: %s)" p
+          (if names = [] then "none" else String.concat ", " names)
+    | Some _, _ | _, [ _ ] | _, [] -> ()
+    | None, many ->
+        Oi.Error.config_error
+          "multiple packages in dune-project (%s); re-run with -p PKG to pick \
+           one"
+          (String.concat ", " many));
+    let dep = Oi.Script.parse_dep pkg_spec in
+    let dep_name = OpamPackage.Name.to_string dep.name in
+    let op_ver = Stdlib.Option.map constr_to_op_ver dep.constraint_ in
+    let render_constraint = function
+      | None -> ""
+      | Some (op, ver) -> Fmt.str " %s %s" op ver
+    in
+    (* Phase 1: prove the solve succeeds with the new dep included. If
+       solve fails, [do_sync] raises before we touch any project files. *)
+    Fmt.pr "Solving %s%s into the project...@." dep_name
+      (render_constraint op_ver);
+    ignore
+      (do_sync ~refresh ~with_repos ~with_deps:[ pkg_spec ] ~proc_mgr ~fs ~clock
+         ~sys ~platform ~os_key ~cache ~data_dir ~registry ~cwd ());
+    (* Phase 2: edit dune-project. Reload in case something touched it
+       during the sync (shouldn't, but cheap to be defensive). *)
+    let dp = Oi.Dune_project.load ~fs ~cwd in
+    let dp' =
+      Oi.Dune_project.add_dependency dp ?package ~name:dep_name
+        ~constraint_:op_ver ()
+    in
+    Oi.Dune_project.save ~fs dp';
+    Fmt.pr "Updated dune-project: added %s%s@." dep_name
+      (render_constraint op_ver);
+    (* Phase 3: regenerate *.opam via dune build inside the assembled
+       prefix — dune itself comes from [_oi/prefix/bin]. *)
+    let prefix = cwd / "_oi" / "prefix" in
+    let env =
+      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+    in
+    Fmt.pr "Running dune build to regenerate *.opam...@.";
+    ( Eio.Switch.run @@ fun sw ->
+      let child =
+        Eio.Process.spawn ~sw proc_mgr ~env
+          ~cwd:Eio.Path.(fs / cwd)
+          [ prefix / "bin" / "dune"; "build" ]
+      in
+      match Eio.Process.await child with
+      | `Exited 0 -> ()
+      | `Exited n ->
+          Oi.Error.msg
+            "dune build exited with code %d; dune-project was updated but \
+             *.opam regeneration failed"
+            n
+      | `Signaled n -> Oi.Error.msg "dune build killed by signal %d" n );
+    (* Phase 4: re-sync so the prefix reflects the committed *.opam. *)
+    Fmt.pr "Re-syncing to pick up regenerated *.opam...@.";
+    ignore
+      (do_sync ~quiet:true ~refresh:false ~with_repos ~with_deps:[] ~proc_mgr
+         ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir ~registry ~cwd ());
+    Fmt.pr "Done.@."
+  in
+  let pkg_spec =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"PKG"
+          ~doc:
+            "Opam package to add, optionally with a version constraint (e.g. \
+             $(b,fmt), $(b,fmt.0.9.5), or $(b,fmt>=0.9))."
+          [])
+  in
+  let package =
+    Arg.(
+      value
+      & opt (some string) None
+      & info ~docv:"NAME"
+          ~doc:
+            "Which (package …) stanza in dune-project to edit. Required when \
+             the file declares more than one package."
+          [ "p"; "package" ])
+  in
+  let info =
+    Cmd.info "add"
+      ~doc:"Add an opam package dependency to the local project's dune-project"
+      ~man:
+        [
+          `S "DESCRIPTION";
+          `P
+            "$(b,oi add PKG) solves the current project with $(b,PKG) as an \
+             extra dependency, and — if the solve succeeds — edits \
+             $(b,dune-project) to add $(b,PKG) to a $(b,\\(package ...\\)) \
+             stanza's $(b,\\(depends ...\\)) list, then runs $(b,dune build) \
+             so dune regenerates the $(b,*.opam) files to match. Finally \
+             re-runs $(b,oi sync) so $(b,_oi/prefix) reflects the committed \
+             source of truth.";
+          `P
+            "Requires $(b,\\(generate_opam_files\\)) to be enabled in \
+             $(b,dune-project) — the whole point of the command is to let dune \
+             remain the canonical source of the dependency list.";
+          `P
+            "Nothing is written to disk if the pre-flight solve fails, so you \
+             can safely use this to probe whether a dependency would be \
+             compatible.";
+        ]
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
+      $ registry_term $ with_repos_term $ package $ pkg_spec)
+
 (* -- exec ---------------------------------------------------------------- *)
 
 let exec_cmd =
-  let run () data_dir cache_dir refresh registry with_repos with_deps cmd args
-      =
+  let run () data_dir cache_dir refresh registry with_repos with_deps cmd args =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -1252,13 +1380,12 @@ let exec_cmd =
           `S Manpage.s_description;
           `P
             "Runs $(b,CMD) with PATH, OCAMLLIB, and related variables set so \
-             that the toolchain assembled under $(b,_oi/prefix/) is picked \
-             up — identical to sourcing the $(b,.envrc) written by $(b,oi \
-             sync).";
+             that the toolchain assembled under $(b,_oi/prefix/) is picked up \
+             — identical to sourcing the $(b,.envrc) written by $(b,oi sync).";
           `P
             "Auto-syncs when $(b,_oi/prefix/) is missing or when any \
-             $(b,*.opam) in the current directory is newer than the prefix, \
-             so $(b,oi exec) works without a separate $(b,oi sync) step.";
+             $(b,*.opam) in the current directory is newer than the prefix, so \
+             $(b,oi exec) works without a separate $(b,oi sync) step.";
           `P "Examples:";
           `Pre
             "  oi exec dune build\n\
@@ -1317,7 +1444,7 @@ let config_cmd =
       | exception Eio.Exn.Io _ -> None
       | p -> Some p
     in
-    (match proj with
+    match proj with
     | None -> ()
     | Some p ->
         if p.extra_repos <> [] then begin
@@ -1335,7 +1462,7 @@ let config_cmd =
                 (OpamPackage.to_string pin.pkg)
                 (OpamUrl.to_string pin.url))
             p.pins
-        end)
+        end
   in
   let info =
     Cmd.info "config" ~doc:"Show platform, directories, and repository status"
@@ -1635,8 +1762,20 @@ let registry_index_cmd =
 
 (* -- registry ------------------------------------------------------------ *)
 
+(* Fetch [registry]/<rel> to [dst] via curl. Returns true on success,
+   false otherwise (404, network error, empty response). The caller
+   decides how to react (typically: skip the remote merge). *)
+let fetch_remote_to ~sys ~fs ~registry ~rel ~dst =
+  if registry = "" then false
+  else begin
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+      Eio.Path.(fs / Filename.dirname dst);
+    D10.Sysops.Curl.fetch sys ~url:(url_join registry rel)
+      ~dst:Eio.Path.(fs / dst)
+  end
+
 let registry_export_cmd =
-  let run () cache_dir output =
+  let run () cache_dir registry output =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
@@ -1655,6 +1794,28 @@ let registry_export_cmd =
       (try Sys.remove index_path with Sys_error _ -> ());
       let db = D10.Index.open_ ~path:index_path in
       D10.Index.rebuild d10 db;
+      (* If a remote registry is configured, fetch its current
+         <os_key>/index.db into a scratch file and merge those rows
+         in. This keeps rows for layers that live on the remote but
+         haven't been rebuilt locally this run — important for rsync:
+         without it, the published index would shrink to just what the
+         caller happens to have cached. *)
+      if registry <> "" then begin
+        let scratch = output / os_key / ".remote-index.db" in
+        if
+          fetch_remote_to ~sys ~fs ~registry ~rel:(os_key / "index.db")
+            ~dst:scratch
+        then begin
+          (try D10.Index.merge_remote db ~remote_path:scratch
+           with Failure msg ->
+             Logs.warn (fun m -> m "Failed to merge remote layer index: %s" msg));
+          try Sys.remove scratch with Sys_error _ -> ()
+        end
+        else
+          Logs.info (fun m ->
+              m "No remote layer index at %s/%s/index.db (skipping merge)"
+                registry os_key)
+      end;
       let nl, nb, _ = D10.Index.stats db ~os_key in
       D10.Index.close db;
       Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
@@ -1663,10 +1824,23 @@ let registry_export_cmd =
        top level (sources/), not per os_key. A sibling [oi registry
        export] from a different arch/distro will merge into the same
        tree: blobs are content-addressed so collisions are correctness-
-       preserving, and the sqlite index.db is simply overwritten with
-       the union view (we hold both old and new rows because the mirror
-       never deletes a blob the builds actually needed). *)
+       preserving. *)
     let n_sources = Oi.Source_mirror.export ~cache ~dst in
+    if registry <> "" then begin
+      let scratch = output / "sources" / ".remote-index.db" in
+      if fetch_remote_to ~sys ~fs ~registry ~rel:"sources/index.db" ~dst:scratch
+      then begin
+        let index_path = output / "sources" / "index.db" in
+        (try Oi.Source_mirror.merge_remote ~index_path ~remote_path:scratch
+         with Failure msg ->
+           Logs.warn (fun m -> m "Failed to merge remote sources index: %s" msg));
+        try Sys.remove scratch with Sys_error _ -> ()
+      end
+      else
+        Logs.info (fun m ->
+            m "No remote sources index at %s/sources/index.db (skipping merge)"
+              registry)
+    end;
     if n_sources > 0 then
       Fmt.pr "  sources: %d blob(s) at %s/sources/@." n_sources output
   in
@@ -1680,7 +1854,8 @@ let registry_export_cmd =
     Cmd.info "export"
       ~doc:"Export cached layers as tar.zst archives for HTTP serving"
   in
-  Cmd.v info Term.(const run $ log_term $ cache_dir_term $ output)
+  Cmd.v info
+    Term.(const run $ log_term $ cache_dir_term $ registry_term $ output)
 
 let registry_build_cmd =
   (* Group solutions by layer-hash compatibility. Two solutions are compatible
@@ -1774,8 +1949,7 @@ let registry_build_cmd =
             | Some c -> OpamPackage.Name.Map.add name c base_constraints
           in
           match
-            Oi.Solve.solve ctx ~packages_dirs ~constraints
-              (name :: extra_names)
+            Oi.Solve.solve ctx ~packages_dirs ~constraints (name :: extra_names)
           with
           | Ok pkgs ->
               Fmt.pr "Solved %s: %d packages@." target (List.length pkgs);
@@ -1906,36 +2080,36 @@ let registry_build_cmd =
              on the plan and may still have their tarballs in opam's
              cache from an earlier run; [record] is a silent no-op for
              anything not in the cache. *)
-          (try
-             List.iter
-               (fun (group : Oi.Plan.group) ->
-                 List.iter
-                   (fun (p : Oi.Plan.package_plan) ->
-                     let package = OpamPackage.of_string p.pkg in
-                     Stdlib.Option.iter
-                       (fun (src : Oi.Plan.source_info) ->
-                         let checksums =
-                           List.map OpamHash.of_string src.checksums
-                         in
-                         let url = OpamUrl.parse ~handle_suffix:true src.url in
-                         Oi.Source_mirror.record ~sys ~cache ~package
-                           ~kind:`Main ~url ~checksums)
-                       p.source;
-                     List.iter
-                       (fun (name, (src : Oi.Plan.source_info)) ->
-                         let checksums =
-                           List.map OpamHash.of_string src.checksums
-                         in
-                         let url = OpamUrl.parse ~handle_suffix:true src.url in
-                         Oi.Source_mirror.record ~sys ~cache ~package
-                           ~kind:(`Extra name) ~url ~checksums)
-                       p.extra_sources)
-                   group.packages)
-               exec_plan.groups
-           with Failure msg ->
-             Fmt.epr "%a %s: %s@."
-               Fmt.(styled `Yellow string)
-               "WARN (mirror)" group_targets msg)
+          try
+            List.iter
+              (fun (group : Oi.Plan.group) ->
+                List.iter
+                  (fun (p : Oi.Plan.package_plan) ->
+                    let package = OpamPackage.of_string p.pkg in
+                    Stdlib.Option.iter
+                      (fun (src : Oi.Plan.source_info) ->
+                        let checksums =
+                          List.map OpamHash.of_string src.checksums
+                        in
+                        let url = OpamUrl.parse ~handle_suffix:true src.url in
+                        Oi.Source_mirror.record ~sys ~cache ~package ~kind:`Main
+                          ~url ~checksums)
+                      p.source;
+                    List.iter
+                      (fun (name, (src : Oi.Plan.source_info)) ->
+                        let checksums =
+                          List.map OpamHash.of_string src.checksums
+                        in
+                        let url = OpamUrl.parse ~handle_suffix:true src.url in
+                        Oi.Source_mirror.record ~sys ~cache ~package
+                          ~kind:(`Extra name) ~url ~checksums)
+                      p.extra_sources)
+                  group.packages)
+              exec_plan.groups
+          with Failure msg ->
+            Fmt.epr "%a %s: %s@."
+              Fmt.(styled `Yellow string)
+              "WARN (mirror)" group_targets msg
         end)
       groups;
     if not dry_run then begin
@@ -1995,9 +2169,7 @@ let depexts_cmd =
     in
     let conf =
       let c = make_conf ~platform in
-      match os_override with
-      | None -> c
-      | Some os -> { c with os }
+      match os_override with None -> c | Some os -> { c with os }
     in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
@@ -2010,12 +2182,10 @@ let depexts_cmd =
           else Some d.name)
         extra_cli
     in
-    let names =
-      List.map OpamPackage.Name.of_string proj.deps @ extra_names
-    in
+    let names = List.map OpamPackage.Name.of_string proj.deps @ extra_names in
     let solved =
-      match Oi.Solve.solve ctx ~packages_dirs ~constraints:extra_constraints
-              names
+      match
+        Oi.Solve.solve ctx ~packages_dirs ~constraints:extra_constraints names
       with
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
@@ -2039,9 +2209,7 @@ let depexts_cmd =
           (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
           OpamSysPkg.Set.empty entries
       in
-      OpamSysPkg.Set.iter
-        (fun s -> Fmt.pr "%s@." (OpamSysPkg.to_string s))
-        all
+      OpamSysPkg.Set.iter (fun s -> Fmt.pr "%s@." (OpamSysPkg.to_string s)) all
     end
   in
   let by_package =
@@ -2144,33 +2312,34 @@ let registry_docker_cmd =
       value & opt string "."
       & info ~docv:"PATH"
           ~doc:
-            "Path to the oi source tree, relative to the Docker build \
-             context. Defaults to the context root."
+            "Path to the oi source tree, relative to the Docker build context. \
+             Defaults to the context root."
           [ "src" ])
   in
   let info =
     Cmd.info "docker"
-      ~doc:"Generate per-distro Dockerfiles and a docker-compose.yml that \
-            run oi registry build + export"
+      ~doc:
+        "Generate per-distro Dockerfiles and a docker-compose.yml that run oi \
+         registry build + export"
       ~man:
         [
           `S Manpage.s_description;
           `P
             "Writes $(b,Dockerfile.oi) (standalone static musl build of \
-             $(b,oi)), one $(b,Dockerfile.<distro>) per distro (alpine \
-             latest, debian stable, ubuntu 22.04/24.04/25.10, fedora \
-             latest), and a $(b,docker-compose.yml) that bind-mounts \
-             $(b,./registry) onto $(b,/out) in every service.";
+             $(b,oi)), one $(b,Dockerfile.<distro>) per distro (alpine latest, \
+             debian stable, ubuntu 22.04/24.04/25.10, fedora latest), and a \
+             $(b,docker-compose.yml) that bind-mounts $(b,./registry) onto \
+             $(b,/out) in every service.";
           `P
             "Each per-distro image has a $(b,CMD) that runs $(b,oi registry \
              build --registry=) for the packages in $(b,packages.txt) then \
              $(b,oi registry export /out). Running the compose project \
-             executes all distros in parallel and leaves the exported \
-             layers on the host:";
+             executes all distros in parallel and leaves the exported layers \
+             on the host:";
           `Pre "  docker compose up --build";
           `P
-            "Each service exits when its build+export completes; \
-             $(b,compose up) returns when every service has finished.";
+            "Each service exits when its build+export completes; $(b,compose \
+             up) returns when every service has finished.";
         ]
   in
   Cmd.v info
@@ -2218,8 +2387,8 @@ let registry_mirror_gc_cmd =
   let info =
     Cmd.info "gc"
       ~doc:
-        "Remove source blobs no longer referenced by any package in the \
-         mirror index"
+        "Remove source blobs no longer referenced by any package in the mirror \
+         index"
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
 
@@ -2375,6 +2544,7 @@ let () =
     Cmd.group info
       [
         run_cmd;
+        add_cmd;
         exec_cmd;
         which_cmd;
         plan_cmd;

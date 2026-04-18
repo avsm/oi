@@ -16,4 +16,6 @@
   logs
   jsont
   jsont.bytesrw
-  sqlite3))
+  sqlite3
+  parsexp
+  sexplib0))

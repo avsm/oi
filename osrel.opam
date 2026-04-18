@@ -10,6 +10,7 @@ depends: [
   "ocaml" {>= "5.2.0"}
   "eio" {>= "1.0"}
   "fmt"
+  "tomlt" {> "1"}
   "odoc" {with-doc}
 ]
 build: [

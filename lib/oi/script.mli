@@ -31,9 +31,9 @@ val name_s : dep -> string
 
 val dedup : dep list -> dep list
 (** [dedup deps] drops duplicates by package name, preserving first-occurrence
-    order. Use this after merging script-declared deps with CLI [--with]
-    flags so the generated dune [libraries] stanza (and the solver input)
-    doesn't carry duplicates. *)
+    order. Use this after merging script-declared deps with CLI [--with] flags
+    so the generated dune [libraries] stanza (and the solver input) doesn't
+    carry duplicates. *)
 
 val script_hash : string -> dep list -> string
 (** [script_hash path deps] returns a short hash of the script contents and its

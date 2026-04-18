@@ -18,9 +18,9 @@ val run_dir : t -> hash:string -> Eio.Fs.dir_ty Eio.Path.t
 (** {1 Pin-depends cache} *)
 
 val pins_dir : t -> string
-(** [pins_dir cache] is the root directory for pin-depends caches.
-    Contains [sources/] (one dir per pin URL) and [sets/] (synthesized
-    packages/ trees keyed by resolved pin-set hash). *)
+(** [pins_dir cache] is the root directory for pin-depends caches. Contains
+    [sources/] (one dir per pin URL) and [sets/] (synthesized packages/ trees
+    keyed by resolved pin-set hash). *)
 
 (** {1 Cleanup} *)
 

@@ -67,8 +67,7 @@ let fetch_pin ~fs ~cache ~refresh (pin : Project.pin) =
     match result with
     | OpamTypes.Result _ | OpamTypes.Up_to_date _ ->
         (* Touch sentinel via Eio so we don't regress on Unix.*. *)
-        Eio.Path.save ~create:(`Or_truncate 0o644)
-          Eio.Path.(fs / sentinel) "";
+        Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / sentinel) "";
         src_dir
     | OpamTypes.Not_available (_, msg) ->
         Error.config_error "pin %s: fetch failed (%s): %s"
@@ -87,8 +86,7 @@ let resolved_revision ~sys (pin : Project.pin) ~src_dir =
   match pin.url.OpamUrl.backend with
   | `git -> (
       try
-        D10.Sysops.Cmd.run_out sys
-          [ "git"; "-C"; src_dir; "rev-parse"; "HEAD" ]
+        D10.Sysops.Cmd.run_out sys [ "git"; "-C"; src_dir; "rev-parse"; "HEAD" ]
       with Failure _ -> url_key pin.url)
   | _ -> url_key pin.url
 
@@ -100,14 +98,11 @@ let resolved_revision ~sys (pin : Project.pin) ~src_dir =
    .opam files in a monorepo. *)
 let locate_opam_file ~src_dir (pin : Project.pin) =
   let name = OpamPackage.Name.to_string (OpamPackage.name pin.pkg) in
-  let candidates =
-    [ src_dir / (name ^ ".opam"); src_dir / "opam" ]
-  in
+  let candidates = [ src_dir / (name ^ ".opam"); src_dir / "opam" ] in
   match List.find_opt Sys.file_exists candidates with
   | Some p -> p
   | None ->
-      Error.config_error
-        "pin %s: no %s.opam or opam file at the root of %s"
+      Error.config_error "pin %s: no %s.opam or opam file at the root of %s"
         (OpamPackage.to_string pin.pkg)
         name src_dir
 
@@ -125,9 +120,7 @@ let rewrite_opam ~src_dir ~opam_path ~revision (pin : Project.pin) =
      picked up by [OpamFile.OPAM.effective_part], which in turn feeds
      the D10 layer hash — so a new upstream commit on a git pin
      invalidates the layer cache for that pin (and its reverse deps). *)
-  let local_url =
-    OpamUrl.of_string (Fmt.str "file://%s#%s" src_dir revision)
-  in
+  let local_url = OpamUrl.of_string (Fmt.str "file://%s#%s" src_dir revision) in
   let new_url = OpamFile.URL.create local_url in
   opam
   |> OpamFile.OPAM.with_url new_url
@@ -154,11 +147,7 @@ let write_pin_opam ~packages_dir (pin : Project.pin) opam =
 
 (* -- Public entry point -------------------------------------------------- *)
 
-type resolved = {
-  pin : Project.pin;
-  opam : OpamFile.OPAM.t;
-  revision : string;
-}
+type resolved = { pin : Project.pin; opam : OpamFile.OPAM.t; revision : string }
 
 let materialize ~fs ~sys ~cache ?(refresh = false) pins =
   match pins with
@@ -202,12 +191,9 @@ let materialize ~fs ~sys ~cache ?(refresh = false) pins =
       let root = Cache.pins_dir cache in
       let set_root = root / "sets" / set_hash in
       let packages_dir = set_root / "packages" in
-      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-        Eio.Path.(fs / packages_dir);
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / packages_dir);
       write_repo_marker ~fs ~dir:set_root;
-      List.iter
-        (fun r -> write_pin_opam ~packages_dir r.pin r.opam)
-        resolved;
+      List.iter (fun r -> write_pin_opam ~packages_dir r.pin r.opam) resolved;
       Log.info (fun m ->
           m "Materialized %d pin(s) at %s" (List.length pins) packages_dir);
       Some packages_dir

@@ -7,8 +7,7 @@ let ( / ) = Filename.concat
 (* Canonicalise [p] to an absolute path. Relative paths in OCAMLFIND_CONF /
    OCAMLLIB break dune (Path.External.of_string rejects them). Falls back to
    the original string if the path does not yet exist on disk. *)
-let canonical p =
-  try Unix.realpath p with Unix.Unix_error _ -> p
+let canonical p = try Unix.realpath p with Unix.Unix_error _ -> p
 
 (* -- OCaml-specific environment ------------------------------------------ *)
 
@@ -64,7 +63,5 @@ let make_env ~prefix ~dune_cache_root =
     |> List.filter (fun s -> not (List.exists (has_prefix s) dominated))
   in
   let path_entry = "PATH=" ^ (prefix / "bin") ^ ":" ^ current_path in
-  let env_pairs =
-    path_entry :: List.map (fun (k, v) -> k ^ "=" ^ v) vars
-  in
+  let env_pairs = path_entry :: List.map (fun (k, v) -> k ^ "=" ^ v) vars in
   Array.of_list (env_pairs @ base)
