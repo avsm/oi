@@ -558,13 +558,27 @@ let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
           let auto = auto_base_depends entries ~handle in
           if auto = [] then prev.depends else auto
   in
-  let version = next_version entries ~handle in
-  let content =
-    render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
-      ~depends ~display_name:None ~origin_url:None
+  (* Skip the write when the resolved state matches [prev] exactly —
+     same URL, commit, branch, and deps. Otherwise we'd accumulate
+     identical [YYYYMMDD.N] entries on every scheduled bump. Compare
+     deps order-insensitively since [auto_base_depends] returns them
+     in lookup order, which may differ from the file order. *)
+  let same_depends a b =
+    let norm = List.sort compare in
+    norm a = norm b
   in
-  let opam_path = write_entry ~path ~handle ~version content in
-  { handle; version; url; commit; ref_; depends; opam_path }
+  if
+    url = prev.url && commit = prev.commit && ref_ = prev.ref_
+    && same_depends depends prev.depends
+  then `Unchanged prev
+  else
+    let version = next_version entries ~handle in
+    let content =
+      render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
+        ~depends ~display_name:None ~origin_url:None
+    in
+    let opam_path = write_entry ~path ~handle ~version content in
+    `Bumped { handle; version; url; commit; ref_; depends; opam_path }
 
 let rec rmtree_path p =
   if Sys.file_exists p && Sys.is_directory p then begin

@@ -212,6 +212,31 @@ let latest_version_in_dirs ~pkg dirs =
              else a)
            (List.hd versions) (List.tl versions))
 
+(* Kinds of "$(b,handle:)-prefixed target" a registry build accepts:
+   a plain target, an overlay-scoped package, or "everything the
+   overlay ships". [oi run] only accepts the first two; [oi registry
+   build] additionally understands [handle:] alone as "all of it". *)
+type build_target =
+  | Plain_target of string
+  | Overlay_pkg of string * string  (* (handle, pkg_spec) *)
+  | Overlay_all of string  (* handle alone, expand to every overlay pkg *)
+
+let parse_build_target s =
+  let is_handle_char = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
+    | _ -> false
+  in
+  match String.index_opt s ':' with
+  | None | Some 0 -> Plain_target s
+  | Some i ->
+      let prefix = String.sub s 0 i in
+      let rest = String.sub s (i + 1) (String.length s - i - 1) in
+      if not (String.for_all is_handle_char prefix) then Plain_target s
+      else if String.length rest >= 2 && String.sub rest 0 2 = "//" then
+        Plain_target s
+      else if rest = "" then Overlay_all prefix
+      else Overlay_pkg (prefix, rest)
+
 (* Detect a "handle:pkg[constr]" prefix on a run [TARGET] or a
    [--with] token. Returns [(handle, stripped_spec)] or [None] if
    no prefix. Raises [Error.config_error] when the handle is present
@@ -447,79 +472,7 @@ let with_eio_root f =
 let get_packages_dirs ?(refresh = false) ~data_dir () =
   Oi.Reporepo.ensure_base ~data_dir ~refresh ()
 
-(* True when the cwd is a dev-mode project: at least one *.opam file
-   is present AND none of them declare a numeric [version:]. opam
-   treats a missing [version:] as the implicit pin-version "dev", so
-   a project without explicit versions is deliberately tracking dev
-   code and the downstream [dev]-version warning would just be noise.
-   A mixed-version workspace (some .opam with numeric versions, some
-   without) counts as non-dev — the numeric files represent a real
-   release cadence. *)
-let project_is_dev ~fs cwd =
-  let opam_files =
-    try
-      Eio.Path.read_dir Eio.Path.(fs / cwd)
-      |> List.filter (fun f -> Filename.check_suffix f ".opam")
-    with Eio.Exn.Io _ -> []
-  in
-  let has_numeric_version file =
-    let path = cwd / file in
-    match OpamFile.OPAM.read_opt (OpamFile.make (OpamFilename.raw path)) with
-    | exception _ -> false
-    | None -> false
-    | Some opam -> (
-        match OpamFile.OPAM.version_opt opam with
-        | None -> false
-        | Some v ->
-            let s = OpamPackage.Version.to_string v in
-            String.length s > 0 && s.[0] >= '0' && s.[0] <= '9')
-  in
-  opam_files <> [] && not (List.exists has_numeric_version opam_files)
 
-(* Warn when the solver picks a package with a non-numeric opam version
-   (e.g. "dev", "master") AND that candidate came from a non-built-in
-   repository. opam's version comparator treats pure-alpha segments as
-   higher than any numeric, so an overlay entry with [version: unset]
-   or [version: "dev"] silently wins against every stable release that
-   satisfies the same [>= X] constraint. Pinned packages are trusted
-   since the user asked for them explicitly; dev-mode projects are
-   trusted because pulling in dev transitives is the explicit point of
-   the overlay. *)
-let warn_suspicious_versions ?(dev_mode = false) ~data_dir ~pin_dir
-    ~packages_dirs solved =
-  if dev_mode then ()
-  else
-    let builtins = get_packages_dirs ~data_dir () in
-    let trusted d =
-      List.mem d builtins
-      || match pin_dir with Some p -> d = p | None -> false
-    in
-    let source_dir pkg =
-      List.find_opt
-        (fun d ->
-          let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-          Sys.file_exists (d / name / OpamPackage.to_string pkg / "opam"))
-        packages_dirs
-    in
-    List.iter
-      (fun pkg ->
-        let ver = OpamPackage.(Version.to_string (version pkg)) in
-        if String.length ver > 0 && not (ver.[0] >= '0' && ver.[0] <= '9') then
-          match source_dir pkg with
-          | Some d when not (trusted d) ->
-              Fmt.epr
-                "%a %s picked from non-default repo %s.@.  Its version %S is \
-                 non-numeric; opam's version comparator ranks alphabetic \
-                 segments above any numeric version, so the solver preferred \
-                 it over every stable release satisfying the same \
-                 constraint.@.  If this is unintended, cap the dependency in \
-                 your *.opam or pin the specific version you want.@."
-                Fmt.(styled `Yellow string)
-                "warning:"
-                (OpamPackage.to_string pkg)
-                d ver
-          | _ -> ())
-      solved
 
 let make_d10 ~sys ~fs ~clock ~cache ~os_key : D10.Config.t =
   { sys; fs; clock; root = Oi.Cache.root cache; os_key }
@@ -630,11 +583,8 @@ let make_conf ~platform:(p : Osrel.t) : Oi.Opam_ctx.conf =
     [dry_run] is true, print the build plan and exit. *)
 let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     ~os_key ?(dry_run = false) ?(extra_repos = []) ?(pins = [])
-    ?(refresh = false) ?project_dir ?remote
+    ?(refresh = false) ?project_dir:_ ?remote
     ?(constraints = OpamPackage.Name.Map.empty) names =
-  let dev_mode =
-    match project_dir with None -> false | Some cwd -> project_is_dev ~fs cwd
-  in
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
@@ -652,7 +602,6 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     | Ok pkgs -> pkgs
     | Error msg -> Oi.Error.no_solution msg
   in
-  warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir ~packages_dirs pkgs;
   let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
   if dry_run then begin
@@ -749,12 +698,6 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
             Fmt.epr "No solution: %s@." msg;
             exit 1
       in
-      let dev_mode =
-        let cwd_s, _ = resolved_cwd fs in
-        project_is_dev ~fs cwd_s
-      in
-      warn_suspicious_versions ~dev_mode ~data_dir ~pin_dir:None ~packages_dirs
-        pkgs;
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
@@ -1277,8 +1220,6 @@ let plan_cmd =
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
     in
-    warn_suspicious_versions ~dev_mode:(project_is_dev ~fs cwd_s) ~data_dir
-      ~pin_dir ~packages_dirs pkgs;
     let d10 =
       make_d10 ~sys ~fs ~clock:(clock :> D10.Config.clk) ~cache ~os_key
     in
@@ -2484,9 +2425,63 @@ let registry_build_cmd =
     ignore (get_packages_dirs ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
-    let extra_pkg_dirs =
-      Oi.Repo.ensure_extra ~data_dir ~refresh (cli_extra_repos with_repos)
+    (* Classify each input into a plain target or an overlay form.
+       Overlay forms collect handles to thread through [with_repos]
+       so the later [cli_extra_repos] run clones them up front. The
+       "build everything in this overlay" form is expanded once the
+       clones exist. *)
+    let parsed = List.map parse_build_target targets in
+    let with_repos =
+      let handles =
+        List.filter_map
+          (function
+            | Plain_target _ -> None
+            | Overlay_pkg (h, _) | Overlay_all h -> Some h)
+          parsed
+        |> List.sort_uniq String.compare
+      in
+      with_repos @ handles
     in
+    let cli_extras_records = cli_extra_repos with_repos in
+    let extra_pkg_dirs =
+      Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras_records
+    in
+    (* Expand [handle:] into every package the overlay's clone
+       provides. List just the top-level names under the overlay's
+       [packages/] dir — the solver will pick specific versions. *)
+    let overlay_packages handle =
+      let entries = Oi.Reporepo.load ~path:(reporepo_path ()) in
+      match Oi.Reporepo.latest entries ~handle with
+      | None ->
+          Oi.Error.config_error "no overlay %s in reporepo" handle
+      | Some e ->
+          let dir =
+            data_dir / "repos"
+            / ("overlay-" ^ e.handle ^ "-" ^ e.version)
+            / "packages"
+          in
+          if not (Sys.file_exists dir) then
+            Oi.Error.config_error
+              "overlay %s clone has no packages/ tree at %s" handle dir;
+          Sys.readdir dir
+          |> Array.to_list
+          |> List.filter (fun n -> Sys.is_directory (dir / n))
+          |> List.sort String.compare
+    in
+    let targets =
+      List.concat_map
+        (function
+          | Plain_target t -> [ t ]
+          | Overlay_pkg (_, pkg_spec) -> [ pkg_spec ]
+          | Overlay_all h ->
+              let ps = overlay_packages h in
+              Fmt.pr "Overlay %s: %d package(s) to build@." h
+                (List.length ps);
+              ps)
+        parsed
+    in
+    if targets = [] then
+      Oi.Error.config_error "no targets to build";
     let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~data_dir () in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
@@ -2519,8 +2514,6 @@ let registry_build_cmd =
           with
           | Ok pkgs ->
               Fmt.pr "Solved %s: %d packages@." target (List.length pkgs);
-              warn_suspicious_versions ~data_dir ~pin_dir:None ~packages_dirs
-                pkgs;
               Some (target, pkgs)
           | Error msg ->
               Fmt.epr "%a %s: %s@."
@@ -2715,6 +2708,19 @@ let registry_build_cmd =
              compatible solutions together, which is much cheaper than \
              running $(b,oi run PKG) over each package in a loop.";
           `P
+            "$(b,PKG) accepts the same shortcuts $(b,oi run) does for \
+             reporepo overlays, plus one extra for batch-building an \
+             entire overlay.";
+          `I
+            ( "$(b,avsm:foo)",
+              "Build the $(b,foo) package from avsm's overlay, pinning \
+               the version the overlay ships." );
+          `I
+            ( "$(b,avsm:)",
+              "Build every package avsm's overlay provides. Handy for \
+               pre-warming a registry with a whole overlay in one \
+               step." );
+          `P
             "$(b,-n) / $(b,--dry-run) prints what would be built without \
              actually building, useful when you're lining up a batch.";
         ]
@@ -2775,8 +2781,6 @@ let depexts_cmd =
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
     in
-    warn_suspicious_versions ~dev_mode:(project_is_dev ~fs cwd_s) ~data_dir
-      ~pin_dir ~packages_dirs solved;
     let entries = Oi.Depexts.compute ctx ~packages_dirs solved in
     if by_package then
       List.iter
@@ -3334,9 +3338,9 @@ let ref_term =
         ~doc:
           "Track a specific branch or tag instead of the repository's \
            default branch. The branch name is remembered, so later \
-           $(b,oi repo bump) and $(b,oi repo refresh) invocations keep \
-           following the same branch rather than silently falling back \
-           to the default. Example: $(b,--ref=relocatable) for \
+           $(b,oi repo bump) invocations keep following the same \
+           branch rather than silently falling back to the default. \
+           Example: $(b,--ref=relocatable) for \
            $(b,dra27/opam-repository), whose payload lives on the \
            $(b,relocatable) branch."
         [ "ref"; "r" ])
@@ -3431,11 +3435,15 @@ let repo_bump_cmd =
       | [] -> None
       | _ -> Some (List.map parse_depend_spec depend_specs)
     in
-    let e =
-      Oi.Reporepo.bump ~sys ~path:reporepo ~handle ?url ?ref_ ?depends ()
-    in
-    Fmt.pr "Bumped %s to %s@ commit=%s@ at %s@." e.handle e.version
-      e.commit e.opam_path
+    (match Oi.Reporepo.bump ~sys ~path:reporepo ~handle ?url ?ref_ ?depends ()
+     with
+    | `Bumped e ->
+        Fmt.pr "Bumped %s to %s@ commit=%s@ at %s@." e.handle e.version
+          e.commit e.opam_path
+    | `Unchanged e ->
+        Fmt.pr
+          "No change: %s.%s already pins the current upstream commit (%s).@."
+          e.handle e.version e.commit)
   in
   let handle =
     Arg.(
@@ -3455,7 +3463,7 @@ let repo_bump_cmd =
   in
   let info =
     Cmd.info "bump"
-      ~doc:"Pin an overlay to its latest upstream commit"
+      ~doc:"Bring an overlay up to the latest upstream commit"
       ~man:
         [
           `S Manpage.s_description;
@@ -3466,19 +3474,28 @@ let repo_bump_cmd =
              packages or fixes that have landed upstream since the \
              last time you bumped.";
           `P
-            "Old versions aren't deleted, so the reporepo keeps a \
-             timeline of which commits you've pinned over time. If \
-             something breaks after a bump, you can point $(b,oi) \
-             back at an earlier version without consulting the \
-             upstream repo's history.";
+            "Safe to run at any time: if the upstream commit, \
+             branch, URL, and dependencies still match the previous \
+             entry, $(b,oi) prints $(b,No change) and leaves the \
+             reporepo alone. That makes bump double as the \"am I \
+             behind upstream?\" check, so you can run it from cron \
+             or a git pre-commit hook without worrying about \
+             spurious no-op churn.";
+          `P
+            "When there $(i,is) a new commit, $(b,oi) writes a new \
+             $(b,YYYYMMDD.N) entry and keeps the old one, giving \
+             the reporepo a git-like timeline of which commits \
+             you've pinned over time. If something breaks after a \
+             bump, point $(b,oi) back at an earlier version without \
+             consulting the upstream repo's history.";
           `P
             "When $(b,oi) bumps an overlay $(i,other than) \
-             $(b,default) or $(b,relocatable), it also refreshes that \
-             overlay's dependency on the bases to whatever their \
-             current latest versions are. Bumping therefore re-locks \
-             the overlay against the newest base set, which is \
-             normally what you want. Pass $(b,--depend) entries \
-             explicitly to override.";
+             $(b,default) or $(b,relocatable), it also refreshes \
+             that overlay's dependency on the bases to whatever \
+             their current latest versions are. Bumping therefore \
+             re-locks the overlay against the newest base set, \
+             which is normally what you want. Pass $(b,--depend) \
+             entries explicitly to override.";
         ]
   in
   Cmd.v info
@@ -3527,65 +3544,6 @@ let repo_remove_cmd =
   in
   Cmd.v info Term.(const run $ log_term $ reporepo_term $ handle_spec)
 
-let repo_refresh_cmd =
-  let run () reporepo =
-    with_error_handling @@ fun () ->
-    with_eio_root @@ fun env _sw ->
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    let fs = Eio.Stdenv.fs env in
-    let sys = D10.Sysops.create ~proc_mgr ~fs in
-    let entries = Oi.Reporepo.load ~path:reporepo in
-    let handles =
-      entries
-      |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
-      |> List.sort_uniq String.compare
-    in
-    let behind = ref 0 in
-    List.iter
-      (fun h ->
-        match Oi.Reporepo.latest entries ~handle:h with
-        | None -> ()
-        | Some e ->
-            let head =
-              try Oi.Reporepo.ls_remote_sha ~sys ?ref_:e.ref_ e.url
-              with _ -> ""
-            in
-            if head <> "" && head <> e.commit then begin
-              incr behind;
-              let short a = String.sub a 0 (min 7 (String.length a)) in
-              let ref_label =
-                match e.ref_ with None -> "HEAD" | Some r -> r
-              in
-              Fmt.pr "%-24s  %s  ->  %s  (%s: new commit available)@."
-                e.handle (short e.commit) (short head) ref_label
-            end)
-      handles;
-    if !behind = 0 then Fmt.pr "All %d overlays up to date.@." (List.length handles)
-    else
-      Fmt.pr "@.%d overlay(s) behind upstream. Run 'oi repo bump HANDLE' \
-              for each to pin the new commit.@."
-        !behind
-  in
-  let info =
-    Cmd.info "refresh"
-      ~doc:"Check each overlay for new upstream commits without changing anything"
-      ~man:
-        [
-          `S Manpage.s_description;
-          `P
-            "For every handle in the reporepo, looks up the current \
-             commit on its tracked branch and compares that to what's \
-             currently pinned. Prints a line per overlay that's fallen \
-             behind, so you can decide which ones to bring forward \
-             with $(b,oi repo bump).";
-          `P
-            "Nothing on disk is modified. Safe to run at any time, \
-             and fast enough to use as a cron/CI check for upstream \
-             drift.";
-        ]
-  in
-  Cmd.v info Term.(const run $ log_term $ reporepo_term)
-
 let repo_cmd =
   let info =
     Cmd.info "repo"
@@ -3615,8 +3573,11 @@ let repo_cmd =
              You'd typically bootstrap it once with $(b,oi repo add) \
              for the base ($(b,default), $(b,relocatable)) and for \
              each person whose overlay you want to consume, then run \
-             $(b,oi repo bump) occasionally to pull in their new \
-             commits.";
+             $(b,oi repo bump HANDLE) whenever you want to pull in \
+             their new commits. Bump is idempotent — it prints \
+             $(b,No change) and does nothing when the upstream commit \
+             already matches — so it doubles as the \"am I behind \
+             upstream?\" check and is safe to run on a schedule.";
         ]
   in
   Cmd.group info
@@ -3626,7 +3587,6 @@ let repo_cmd =
       repo_add_cmd;
       repo_bump_cmd;
       repo_remove_cmd;
-      repo_refresh_cmd;
     ]
 
 (* -- main ---------------------------------------------------------------- *)

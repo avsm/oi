@@ -127,19 +127,25 @@ val bump :
   ?ref_:string ->
   ?depends:(string * string option) list ->
   unit ->
-  entry
-(** Create a new version for [handle]: [YYYYMMDD.N] where [N] is the
-    next free sequence on today's date. Re-[ls-remote]s either the
-    supplied [url] or the one currently pinned by the highest
-    existing version. [~ref_] targets a specific branch or ref;
-    defaults to [HEAD].
+  [ `Bumped of entry | `Unchanged of entry ]
+(** Consider creating a new version for [handle]. Re-[ls-remote]s
+    either the supplied [url] or the one currently pinned by the
+    highest existing version; [~ref_] targets a specific branch or
+    ref (defaults to the one the previous version tracked, or
+    [HEAD]).
 
     When [depends] is omitted and [handle] is a non-base overlay, the
     auto-injected base pins are refreshed to the latest [relocatable]
     / [default] versions in the reporepo (re-locking the user overlay
     against the current base set). Base overlays and overlays without
     any auto-injected base pin preserve their previous [depends]
-    list. Raises if [handle] is unknown. *)
+    list.
+
+    When the resolved [(url, commit, ref_, depends)] matches the
+    previous version exactly, returns [`Unchanged prev] without
+    writing anything. Otherwise writes a new [YYYYMMDD.N] entry (where
+    [N] is the next free sequence on today's date) and returns
+    [`Bumped new_entry]. Raises if [handle] is unknown. *)
 
 val remove :
   path:string -> handle:string -> ?version:string -> unit -> unit
