@@ -1616,7 +1616,17 @@ let registry_export_cmd =
       let nl, nb, _ = D10.Index.stats db ~os_key in
       D10.Index.close db;
       Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
-    end
+    end;
+    (* Sources are OS-independent — publish them once at the registry
+       top level (sources/), not per os_key. A sibling [oi registry
+       export] from a different arch/distro will merge into the same
+       tree: blobs are content-addressed so collisions are correctness-
+       preserving, and the sqlite index.db is simply overwritten with
+       the union view (we hold both old and new rows because the mirror
+       never deletes a blob the builds actually needed). *)
+    let n_sources = Oi.Source_mirror.export ~cache ~dst in
+    if n_sources > 0 then
+      Fmt.pr "  sources: %d blob(s) at %s/sources/@." n_sources output
   in
   let output =
     Arg.(
@@ -1803,17 +1813,39 @@ let registry_build_cmd =
         end
         else begin
           Fmt.pr "%d to build, %d cached@." n_build n_cached;
+          (* Build the exec plan up front so the mirror-record pass sees
+             every source, whether this group rebuilt or not — opam's
+             download-cache may still hold tarballs from a prior run
+             that didn't make it into the mirror (e.g. a crash in the
+             first rollout of this feature). *)
+          let exec_plan =
+            Oi.Plan.create group_ctx ~cache_root ~os_key
+              ~ocaml_version:conf.ocaml_version build_plan
+          in
           if n_build > 0 then begin
             let build_plan =
               fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx:group_ctx
                 ~pkgs:sorted_pkgs build_plan
             in
             try
+              (* Read-side mirror wiring: opam probes the local mirror
+                 first (free on hit), then the remote registry's sources/
+                 subdir (if a registry is configured), then falls back to
+                 the upstream url: on miss. [build_plan] here may have
+                 been rewritten by [fetch_remote_layers], so we rebuild
+                 [exec_plan] fresh rather than reusing the outer one. *)
               let exec_plan =
                 Oi.Plan.create group_ctx ~cache_root ~os_key
                   ~ocaml_version:conf.ocaml_version build_plan
               in
-              Oi.Execute.run ~proc_mgr ~fs
+              let cache_urls =
+                let local = Oi.Source_mirror.url ~cache in
+                match remote with
+                | Some (`Http_remote r) ->
+                    [ local; Oi.Source_mirror.remote_url ~registry:r ]
+                | _ -> [ local ]
+              in
+              Oi.Execute.run ~cache_urls ~proc_mgr ~fs
                 ~clock:(clock :> D10.Config.clk)
                 ~sys ~os_key exec_plan
             with
@@ -1825,7 +1857,43 @@ let registry_build_cmd =
                   Fmt.(styled `Red string)
                   "FAIL (build)" group_targets msg;
                 incr n_build_failed
-          end
+          end;
+          (* Write-side mirror: promote every source blob that lives in
+             opam's download-cache into the registry mirror, regardless
+             of [method_]. Binary-cached layers still have source info
+             on the plan and may still have their tarballs in opam's
+             cache from an earlier run; [record] is a silent no-op for
+             anything not in the cache. *)
+          (try
+             List.iter
+               (fun (group : Oi.Plan.group) ->
+                 List.iter
+                   (fun (p : Oi.Plan.package_plan) ->
+                     let package = OpamPackage.of_string p.pkg in
+                     Stdlib.Option.iter
+                       (fun (src : Oi.Plan.source_info) ->
+                         let checksums =
+                           List.map OpamHash.of_string src.checksums
+                         in
+                         let url = OpamUrl.parse ~handle_suffix:true src.url in
+                         Oi.Source_mirror.record ~sys ~cache ~package
+                           ~kind:`Main ~url ~checksums)
+                       p.source;
+                     List.iter
+                       (fun (name, (src : Oi.Plan.source_info)) ->
+                         let checksums =
+                           List.map OpamHash.of_string src.checksums
+                         in
+                         let url = OpamUrl.parse ~handle_suffix:true src.url in
+                         Oi.Source_mirror.record ~sys ~cache ~package
+                           ~kind:(`Extra name) ~url ~checksums)
+                       p.extra_sources)
+                   group.packages)
+               exec_plan.groups
+           with Failure msg ->
+             Fmt.epr "%a %s: %s@."
+               Fmt.(styled `Yellow string)
+               "WARN (mirror)" group_targets msg)
         end)
       groups;
     if not dry_run then begin
@@ -2066,6 +2134,90 @@ let registry_docker_cmd =
   Cmd.v info
     Term.(const run $ log_term $ packages_file $ output_dir $ src_context)
 
+(* -- registry mirror ------------------------------------------------------ *)
+
+(* Human-readable byte size ("1.2GB", "47MB", …). Defined here rather
+   than reusing Cache.pp_size because we want to print directly into a
+   string for simple output, not via an Fmt formatter. *)
+let human_bytes b =
+  if Int64.compare b 1_000_000_000L > 0 then
+    Fmt.str "%.1fGB" (Int64.to_float b /. 1e9)
+  else if Int64.compare b 1_000_000L > 0 then
+    Fmt.str "%.1fMB" (Int64.to_float b /. 1e6)
+  else if Int64.compare b 1_000L > 0 then
+    Fmt.str "%.1fKB" (Int64.to_float b /. 1e3)
+  else Fmt.str "%LdB" b
+
+let registry_mirror_stats_cmd =
+  let run () cache_dir =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let _proc_mgr, _fs, _clock, _sys, _platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
+    let s = Oi.Source_mirror.stats ~cache in
+    Fmt.pr "Mirror: %s@." (Oi.Source_mirror.dir ~cache);
+    Fmt.pr "  blobs:      %d@." s.count;
+    Fmt.pr "  total size: %s@." (human_bytes s.total_size)
+  in
+  let info = Cmd.info "stats" ~doc:"Show source mirror statistics" in
+  Cmd.v info Term.(const run $ log_term $ cache_dir_term)
+
+let registry_mirror_gc_cmd =
+  let run () cache_dir =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let _proc_mgr, _fs, _clock, _sys, _platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
+    let n = Oi.Source_mirror.gc ~cache in
+    Fmt.pr "Removed %d orphaned blob(s)@." n
+  in
+  let info =
+    Cmd.info "gc"
+      ~doc:
+        "Remove source blobs no longer referenced by any package in the \
+         mirror index"
+  in
+  Cmd.v info Term.(const run $ log_term $ cache_dir_term)
+
+let registry_mirror_verify_cmd =
+  let run () cache_dir =
+    with_error_handling @@ fun () ->
+    Eio_main.run @@ fun env ->
+    let _proc_mgr, _fs, _clock, sys, _platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
+    match Oi.Source_mirror.verify ~sys ~cache with
+    | [] -> Fmt.pr "All blobs verified OK@."
+    | errs ->
+        List.iter
+          (fun (sha, msg) ->
+            Fmt.epr "%a %s: %s@." Fmt.(styled `Red string) "BAD" sha msg)
+          errs;
+        Fmt.epr "%d blob(s) failed verification@." (List.length errs);
+        exit 1
+  in
+  let info =
+    Cmd.info "verify"
+      ~doc:"Re-hash every mirrored blob and report any mismatches"
+  in
+  Cmd.v info Term.(const run $ log_term $ cache_dir_term)
+
+let registry_mirror_cmd =
+  let info =
+    Cmd.info "mirror"
+      ~doc:
+        "Manage the source tarball mirror (content-addressed, opam cache \
+         format)"
+  in
+  Cmd.group info
+    [
+      registry_mirror_stats_cmd;
+      registry_mirror_gc_cmd;
+      registry_mirror_verify_cmd;
+    ]
+
 let registry_cmd =
   let info =
     Cmd.info "registry" ~doc:"Manage the layer cache and remote registry"
@@ -2077,6 +2229,7 @@ let registry_cmd =
       registry_export_cmd;
       registry_build_cmd;
       registry_docker_cmd;
+      registry_mirror_cmd;
     ]
 
 (* -- main ---------------------------------------------------------------- *)

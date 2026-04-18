@@ -111,7 +111,7 @@ let run_cmd ~proc_mgr ~fs ~env ~cwd ~pkg cmd =
 
 (* -- Fetching ------------------------------------------------------------- *)
 
-let fetch_source (p : Plan.package_plan) =
+let fetch_source ?(cache_urls = []) (p : Plan.package_plan) =
   match p.source with
   | None -> ()
   | Some src ->
@@ -124,7 +124,8 @@ let fetch_source (p : Plan.package_plan) =
         in
         Log.info (fun m -> m "Fetching %s from %s" p.pkg src.url);
         let result =
-          OpamRepository.pull_tree p.pkg ~cache_dir dst_dir checksums [ url ]
+          OpamRepository.pull_tree p.pkg ~cache_dir ~cache_urls dst_dir
+            checksums [ url ]
           |> OpamProcess.Job.run
         in
         match result with
@@ -133,7 +134,7 @@ let fetch_source (p : Plan.package_plan) =
             Fmt.failwith "Failed to fetch %s: %s" p.pkg msg
       end
 
-let fetch_extra_sources (p : Plan.package_plan) =
+let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
   List.iter
     (fun (name, (src : Plan.source_info)) ->
       let dst = p.build_dir / name in
@@ -145,8 +146,8 @@ let fetch_extra_sources (p : Plan.package_plan) =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
         let result =
-          OpamRepository.pull_file name ~cache_dir ~silent_hits:true dst_file
-            checksums [ url ]
+          OpamRepository.pull_file name ~cache_dir ~cache_urls
+            ~silent_hits:true dst_file checksums [ url ]
           |> OpamProcess.Job.run
         in
         match result with
@@ -188,14 +189,14 @@ let apply_substs (p : Plan.package_plan) =
 
 (* -- Build and install ---------------------------------------------------- *)
 
-let build_package ~proc_mgr ~fs (p : Plan.package_plan) =
-  fetch_source p;
+let build_package ?(cache_urls = []) ~proc_mgr ~fs (p : Plan.package_plan) =
+  fetch_source ~cache_urls p;
   (* Ensure build_dir exists before fetching extra-sources: pull_tree
      (in fetch_source) creates the directory, but packages with no main
      source (e.g. seq.base) still need the directory to exist so that
      extra-source files can be written into it. *)
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / p.build_dir);
-  fetch_extra_sources p;
+  fetch_extra_sources ~cache_urls p;
   apply_patches ~proc_mgr ~fs p;
   apply_substs p;
   List.iter
@@ -214,7 +215,7 @@ let install_package ~proc_mgr ~fs (p : Plan.package_plan) =
 
 (* -- Main loop ------------------------------------------------------------ *)
 
-let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
+let run ?(cache_urls = []) ~proc_mgr ~fs ~clock ~sys ~os_key plan =
   let d10 : D10.Config.t =
     { sys; fs; clock; root = Eio.Path.(fs / plan.Plan.cache_root); os_key }
   in
@@ -283,7 +284,7 @@ let run ~proc_mgr ~fs ~clock ~sys ~os_key plan =
                 (try
                    Eio.Path.rmtree ~missing_ok:true
                      Eio.Path.(fs / p.build_dir);
-                   build_package ~proc_mgr ~fs p
+                   build_package ~cache_urls ~proc_mgr ~fs p
                  with exn ->
                    build_failures := (p.pkg, exn) :: !build_failures;
                    Hashtbl.replace failed_pkgs p.pkg true);

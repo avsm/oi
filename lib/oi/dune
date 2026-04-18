@@ -15,4 +15,5 @@
   fmt
   logs
   jsont
-  jsont.bytesrw))
+  jsont.bytesrw
+  sqlite3))

@@ -62,8 +62,15 @@ let oi_builder_stage ~src_context =
   @@ DF.workdir "/home/opam/src"
   @@ DF.copy ~chown:"opam:opam" ~src:[ src_context ] ~dst:"/home/opam/src" ()
   @@ DF.env [ ("OPAMYES", "true"); ("OPAMCONFIRMLEVEL", "unsafe-yes") ]
-  @@ DF.run "opam-2.5 update default"
-  @@ DF.run "opam-2.5 install --deps-only ./oi.opam ./d10.opam ./osrel.opam"
+  (* The ocaml/opam image's [default] repo points at a baked-in local
+     clone (git+file:///home/opam/opam-repository), so `opam update
+     default` alone just re-reads that frozen snapshot. Pull the clone
+     from upstream first so recent packages (e.g. dune >= 3.21 required
+     by tomlt) are visible to the solver. *)
+  @@ DF.run
+       "cd ~/opam-repository && git pull --quiet origin master && opam-2.5 \
+        update default"
+  @@ DF.run "opam-2.5 install ."
   @@ DF.run "opam-2.5 exec -- dune build --profile=static bin/main.exe"
   @@ DF.user "root"
   @@ DF.run
