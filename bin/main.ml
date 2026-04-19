@@ -4180,127 +4180,90 @@ let () =
              every build so repeated invocations reuse what's already \
              there.";
           `S "QUICK START";
-          `P
-            "The shortest path to seeing $(b,oi) do something useful is \
-             to run a well-known tool from the opam ecosystem. The first \
-             call builds whatever it needs; later calls reuse the cache.";
+          `P "Run any tool from opam. First call builds, later calls hit the cache.";
           `Pre "  oi run utop\n  oi run ocamlformat -- --help";
           `P
-            "You can also run a short OCaml script directly. Declare the \
-             packages it uses on the first line:";
+            "Pin a specific version with $(b,pkg.version), $(b,pkg=version), \
+             or an opam relop:";
+          `Pre
+            "  oi run --with=dune.3.20.0 -- dune --version\n\
+            \  oi run --with=fmt>=0.9 my_script.ml";
+          `P
+            "Run a package straight from a git repo. $(b,oi) clones the \
+             URL and pins every $(b,*.opam) at its root:";
+          `Pre
+            "  oi run --with=https://github.com/owner/project.git target\n\
+            \  oi run --with=git+https://example.org/foo.git#branch foo";
+          `P "Run a $(b,.ml) script. Declare deps on the first line:";
           `Pre
             "  [@@@opam fmt cmdliner lwt>=5.0 ppx_deriving.show]\n\
-            \  let () = ...";
-          `Pre "  oi run my_script.ml";
-          `P "Scripts can live on the web too. $(b,oi) fetches them for you.";
-          `Pre "  oi run https://example.com/hello.ml";
+            \  let () = ...\n\n\
+            \  oi run my_script.ml\n\
+            \  oi run https://example.com/hello.ml";
           `P
-            "Inside an existing OCaml project (one with $(b,*.opam) files \
-             or a $(b,dune-project) that generates them), $(b,oi sync) \
-             installs the project's dependencies into a local \
-             $(b,_oi/prefix/) and writes an $(b,.envrc) so your shell \
-             picks them up.";
+            "Inside a project, $(b,oi sync) installs deps into \
+             $(b,_oi/prefix/) and writes $(b,.envrc). The sync also \
+             installs dev tools ($(b,odoc), $(b,merlin), \
+             $(b,ocaml-lsp-server), plus $(b,mdx) and $(b,ocamlformat) \
+             when the project uses them) into $(b,_oi/tools/).";
           `Pre
             "  oi sync\n\
             \  direnv allow      # or: eval \"\\$(oi env)\"\n\
             \  oi exec dune build";
-          `P
-            "Use $(b,oi add PKG) to add a new dependency to the project \
-             (it edits $(b,dune-project) and re-syncs for you).";
+          `P "Add a dep. Edits $(b,dune-project) and re-syncs:";
           `Pre "  oi add logs\n  oi add \"fmt>=0.9\"";
           `P
-            "Pull a package from someone's personal collection by \
-             prefixing its $(i,handle):";
+            "An $(i,overlay) is someone's curated opam repository, \
+             pinned to a git commit and referenced by a short \
+             $(i,handle). The $(i,reporepo) is the directory of \
+             overlays $(b,oi) knows about. See $(b,oi repo --help) \
+             to manage it. Prefix any target or $(b,--with) value \
+             with $(i,handle:) to pull from that overlay:";
           `Pre
             "  oi run avsm:owntracks\n\
             \  oi run --with=avsm:crockford roguedoi";
-          `P "Preview what $(b,oi) would do without actually doing it.";
+          `P "Find which package ships a binary:";
+          `Pre "  oi which dune\n  oi which 'ocaml*'";
+          `P "Preview without doing:";
           `Pre "  oi plan utop\n  oi run -n utop";
           `S "COMMAND CATEGORIES";
-          `P "Commands are listed alphabetically below. By purpose:";
           `I
             ( "$(b,Getting started)",
-              "$(b,run) is the one command most people need. It executes \
-               an OCaml script (local file or http(s) URL) or any binary \
-               provided by an opam package, fetching what's missing and \
-               caching it for next time." );
+              "$(b,run) executes a binary or $(b,.ml) script, fetching \
+               missing deps and caching them." );
           `I
             ( "$(b,Working in a project)",
-              "$(b,sync) installs everything your $(b,*.opam) files need \
-               into a local $(b,_oi/prefix/) directory and writes an \
-               $(b,.envrc) so your shell picks it up. $(b,exec) runs \
-               commands (such as $(b,dune build)) against that directory. \
-               $(b,env) prints the same environment for piping into \
-               $(b,eval). $(b,add) adds a new dependency to \
-               $(b,dune-project) and re-syncs. $(b,depexts) tells you \
-               which system packages (from $(b,apt), $(b,brew), and so on) \
-               the dependency tree also wants." );
+              "$(b,sync) installs project deps and dev tools. $(b,exec) \
+               runs commands in the project environment. $(b,env) \
+               prints the same environment for $(b,eval). $(b,add) \
+               adds a new dep to $(b,dune-project). $(b,depexts) lists \
+               system packages needed by the closure." );
           `I
             ( "$(b,Checking what's going on)",
-              "$(b,plan) shows which packages will be downloaded from the \
-               registry, which will be built from source, and which are \
-               already cached. $(b,which) finds which package provides a \
-               given binary. $(b,config) dumps the detected platform and \
-               cache paths, which is useful when something solved \
-               unexpectedly." );
+              "$(b,plan) shows the build plan. $(b,which) finds which \
+               package ships a binary. $(b,config) dumps platform, \
+               caches, project state, and dev-tool probes." );
           `I
             ( "$(b,Sharing builds and managing disk)",
-              "$(b,registry) manages the cache of pre-built packages. You \
-               can fetch from a remote registry, publish back to one, and \
-               mirror the source tarballs too. $(b,clean) deletes cached \
-               data when you need the disk space back." );
+              "$(b,registry) manages the pre-built package cache and \
+               source mirror. $(b,clean) frees disk space." );
           `I
             ( "$(b,Picking package sources)",
-              "$(b,repo) edits the small directory that tells $(b,oi) \
-               which git commits of which opam-package collections to \
-               draw from. Use it to bootstrap the base sources, to \
-               opt in to someone else's overlay by their handle, or \
-               to pull their new commits over time." );
-          `S "HOW IT WORKS";
-          `P
-            "The first time you run $(b,oi), it downloads a compiler and \
-             the opam package index. For each $(b,oi run) after that, it \
-             follows four steps.";
-          `P
-            "First, it resolves the exact version of every dependency \
-             (including transitive ones).";
-          `P
-            "Second, for each one, it reuses a pre-built copy if one is \
-             cached locally or available from the configured remote \
-             registry.";
-          `P "Third, it builds anything that's missing, in parallel where possible.";
-          `P
-            "Fourth, it stitches the pieces together into a working \
-             toolchain and runs your code.";
-          `P
-            "The next invocation with the same dependencies skips straight \
-             to step four.";
+              "$(b,repo) manages the reporepo (see QUICK START): \
+               register overlays, inspect their pinned commits, bump \
+               them forward." );
           `S "SCRIPT FORMAT";
-          `P
-            "A script is any $(b,.ml) file whose first line declares the \
-             opam packages it uses.";
+          `P "First line of a $(b,.ml) script:";
           `Pre "  [@@@opam fmt cmdliner>=1.2.0 lwt]";
           `P
-            "Each token is one dependency. Add a version constraint with \
-             $(b,>=), $(b,>), $(b,<=), $(b,<), or $(b,=) if you need a \
-             specific version.";
+            "Each token is an opam package with an optional version \
+             constraint ($(b,>=), $(b,>), $(b,<=), $(b,<), $(b,=)). A \
+             $(b,.sub) suffix selects a findlib sub-library, e.g. \
+             $(b,ppx_deriving.show).";
           `P
-            "A $(b,.sub) suffix selects a specific findlib library \
-             inside an opam package. $(b,oi) installs the package and \
-             hands the full name to the build system. For example, \
-             $(b,ppx_deriving.show) installs the $(b,ppx_deriving) \
-             package and makes $(b,ppx_deriving.show) available.";
-          `P
-            "Packages whose name starts with $(b,ppx_) are automatically \
-             wired in as PPX preprocessors rather than plain libraries, \
-             so $(b,@@deriving show) and similar annotations just work. \
-             Everything else goes in as a normal library, so use the \
-             opam name in $(b,open) and module paths (for example \
-             $(b,open Fmt) for the $(b,fmt) package).";
-          `P
-            "If the build doesn't pick up your packages the way you \
-             expected, run $(b,oi run -vv SCRIPT.ml). It logs the exact \
-             build file $(b,oi) generated from your dependency list.";
+            "Packages starting with $(b,ppx_) are wired in as PPX \
+             preprocessors. Run $(b,oi run -vv SCRIPT.ml) to see the \
+             generated build file.";
           `S Manpage.s_environment;
           `P
             "$(b,oi) uses two directories: a $(i,data) directory for \
