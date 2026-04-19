@@ -40,6 +40,14 @@ type meta = {
   deps : string list;  (** Direct dependency name.versions. *)
   hashes : string list;  (** Layer hashes of direct dependencies. *)
   created : float;  (** Unix timestamp of layer creation. *)
+  overlay_handle : string option;
+      (** Reporepo overlay handle that contributed this package's opam
+          file, or [None] for legacy builds and pin-depends-only
+          packages. *)
+  overlay_version : string option;
+      (** Reporepo overlay version (e.g. ["20260418.6"]) when
+          [overlay_handle] is set. Pins the layer to a specific
+          reporepo snapshot. *)
 }
 
 val save_meta : _ Eio.Path.t -> meta -> unit
@@ -79,12 +87,16 @@ val store :
   deps:string list ->
   parent_hashes:string list ->
   exit_status:int ->
+  ?overlay_handle:string ->
+  ?overlay_version:string ->
+  unit ->
   unit
 (** [store c ~hash ~prefix ~files ~package ~deps ~parent_hashes ~exit_status]
     creates a layer at [<root>/layers/<os_key>/<hash>/]. Each file in [files]
     (relative paths within [prefix]) is hardlinked into [fs/]. Symlinks are
     preserved by recreating them with the same target. Writes [layer.json] with
-    the provided metadata. *)
+    the provided metadata. [overlay_handle] / [overlay_version] are persisted
+    so later indexing knows which reporepo entry contributed this package. *)
 
 val restore : Config.t -> hash:string -> prefix:string -> unit
 (** [restore c ~hash ~prefix] hardlinks the layer's [fs/] tree into [prefix] via
@@ -128,7 +140,33 @@ val export : Config.t -> hash:string -> dst:_ Eio.Path.t -> bool
     layer [hash]. Returns [true] if a new archive was created. Returns [false]
     if the layer doesn't exist locally or the archive already exists. *)
 
+val write_index : dst:_ Eio.Path.t -> string -> unit
+(** [write_index ~dst os_key] rewrites [<dst>/<os_key>/OINDEX.txt] by
+    scanning the directory for [*.tar.zst] files and recording their
+    SHA-256 and size. Call after repopulating the directory (e.g. by
+    {!export_all}, a [rsync], or the server-side merge that unions
+    per-overlay subtrees into [ALL/]). *)
+
 val export_all : Config.t -> dst:_ Eio.Path.t -> int
 (** [export_all c ~dst] exports all succeeded layers for all os_keys to [dst].
     Writes [OINDEX.txt] for each os_key after exporting. Returns the number of
     newly exported layers. *)
+
+val layers_by_overlay :
+  Config.t -> (string * string * string * string list) list
+(** [layers_by_overlay c] returns succeeded layers grouped by their overlay
+    tag as [(handle, version, os_key, hashes)]. Layers without an overlay
+    (legacy builds, pin-depends trees) are omitted. *)
+
+val export_per_overlay :
+  Config.t ->
+  dst:_ Eio.Path.t ->
+  ?handles:string list ->
+  unit ->
+  int
+(** [export_per_overlay c ~dst ?handles ()] hardlinks each overlay-tagged
+    layer archive already emitted under [<dst>/<os_key>/] into
+    [<dst>/<handle>.<version>/<os_key>/] and writes a per-overlay
+    [OINDEX.txt] there. [handles], if set, restricts output to the listed
+    overlay handles. Returns the number of newly linked archives. Must be
+    called after {!export_all} has populated the top-level tree. *)

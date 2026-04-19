@@ -11,7 +11,7 @@
 (source (github avsm/oi))
 
 (package (name osrel) (synopsis "OS and platform detection via Eio")
- (depends (ocaml (>= 5.2.0)) (eio (>= 1.0)) fmt (tomlt (> 1))))
+ (depends (ocaml (>= 5.2.0)) (eio (>= 1.0)) fmt))
 
 (package (name d10)
  (synopsis "Content-addressed binary layer cache (day10 format)")
@@ -23,5 +23,5 @@
  (depends (ocaml (>= 5.2.0)) (eio_main (>= 1.0)) (d10 (= :version))
   (osrel (= :version)) (opam-format (>= 2.2.0)) (opam-state (>= 2.2.0))
   (opam-client (>= 2.2.0)) (opam-0install (>= 0.4)) (progress (>= 0.4))
-  (xdge (>= 1.0)) cmdliner fmt logs jsont bytesrw tomlt
+  (xdge (>= 1.0)) cmdliner fmt logs jsont bytesrw
   (dockerfile (>= 8.3.0)) (dockerfile-opam (>= 8.3.0))))

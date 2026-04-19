@@ -17,16 +17,18 @@ let exec db sql =
 let schema =
   {|
   CREATE TABLE IF NOT EXISTS layers (
-    hash          TEXT PRIMARY KEY,
-    os_key        TEXT NOT NULL,
-    arch          TEXT NOT NULL,
-    os            TEXT NOT NULL,
-    distro        TEXT NOT NULL,
-    os_version    TEXT NOT NULL,
-    package_name  TEXT NOT NULL,
-    package_ver   TEXT NOT NULL,
-    exit_status   INTEGER NOT NULL,
-    created       REAL NOT NULL
+    hash            TEXT PRIMARY KEY,
+    os_key          TEXT NOT NULL,
+    arch            TEXT NOT NULL,
+    os              TEXT NOT NULL,
+    distro          TEXT NOT NULL,
+    os_version      TEXT NOT NULL,
+    package_name    TEXT NOT NULL,
+    package_ver     TEXT NOT NULL,
+    exit_status     INTEGER NOT NULL,
+    created         REAL NOT NULL,
+    overlay_handle  TEXT,
+    overlay_version TEXT
   );
 
   CREATE TABLE IF NOT EXISTS layer_deps (
@@ -53,6 +55,9 @@ let schema =
   CREATE INDEX IF NOT EXISTS idx_layers_arch ON layers(arch);
   CREATE INDEX IF NOT EXISTS idx_layers_distro ON layers(distro);
   CREATE INDEX IF NOT EXISTS idx_layers_name ON layers(package_name, os_key);
+  -- idx_layers_overlay is created in [open_] after the ALTER TABLE
+  -- migration has added overlay_handle / overlay_version to pre-existing
+  -- schemas; creating it here would fail on older DBs.
   CREATE INDEX IF NOT EXISTS idx_binaries_name ON layer_binaries(binary_name);
   CREATE INDEX IF NOT EXISTS idx_deps_hash ON layer_deps(layer_hash);
   CREATE INDEX IF NOT EXISTS idx_files_hash ON layer_files(layer_hash);
@@ -65,10 +70,26 @@ let rec mkdir_p dir =
     try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   end
 
+(* Idempotent ALTER TABLE for older index DBs that predate the
+   overlay_handle / overlay_version columns. SQLite has no
+   [ADD COLUMN IF NOT EXISTS]; we simply ignore the duplicate-column
+   error. *)
+let try_add_column db sql =
+  match Sqlite3.exec db sql with
+  | Sqlite3.Rc.OK -> ()
+  | Sqlite3.Rc.ERROR -> ()
+  | rc ->
+      Fmt.failwith "layer_index sqlite: %s: %s" (Sqlite3.Rc.to_string rc) sql
+
 let open_ ~path =
   mkdir_p (Filename.dirname path);
   let db = Sqlite3.db_open path in
   exec db schema;
+  try_add_column db "ALTER TABLE layers ADD COLUMN overlay_handle TEXT";
+  try_add_column db "ALTER TABLE layers ADD COLUMN overlay_version TEXT";
+  exec db
+    "CREATE INDEX IF NOT EXISTS idx_layers_overlay ON layers(overlay_handle, \
+     overlay_version)";
   exec db "PRAGMA journal_mode=WAL";
   exec db "PRAGMA synchronous=NORMAL";
   db
@@ -146,14 +167,21 @@ let rebuild (c : Config.t) db =
         | None -> ()
         | Some info ->
             let name, version = parse_pkg_string info.package in
+            let null_or_quote = function
+              | None -> "NULL"
+              | Some s -> quote s
+            in
             exec db
               (Fmt.str
                  "INSERT OR REPLACE INTO layers (hash, os_key, arch, os, \
                   distro, os_version, package_name, package_ver, exit_status, \
-                  created) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %d, %f)"
+                  created, overlay_handle, overlay_version) VALUES (%s, %s, \
+                  %s, %s, %s, %s, %s, %s, %d, %f, %s, %s)"
                  (quote hash) (quote os_key) (quote arch) (quote os)
                  (quote distro) (quote os_version) (quote name) (quote version)
-                 info.exit_status info.created);
+                 info.exit_status info.created
+                 (null_or_quote info.overlay_handle)
+                 (null_or_quote info.overlay_version));
             (* Insert deps *)
             List.iteri
               (fun i dep_s ->
@@ -253,24 +281,33 @@ let find_binary db ~binary ~os_key =
 
 let search_binary db ~pattern ~os_key =
   let results = ref [] in
+  let some_if_set s = if s = "" then None else Some s in
   let cb row =
     match row with
-    | [| binary; name; version; hash |] ->
-        results := (binary, name, version, hash) :: !results
+    | [| binary; name; version; hash; oh; ov |] ->
+        let overlay =
+          match (some_if_set oh, some_if_set ov) with
+          | Some h, Some v -> Some (h, v)
+          | _ -> None
+        in
+        results := (binary, name, version, hash, overlay) :: !results
     | _ -> ()
   in
   (* Convert user wildcards: * → % *)
   let sql_pattern = String.map (fun c -> if c = '*' then '%' else c) pattern in
   let op = if String.contains sql_pattern '%' then "LIKE" else "=" in
+  (* COALESCE the nullable overlay columns so [exec_not_null_no_headers]
+     (which skips rows containing NULLs) still sees every match. *)
   ignore
     (Sqlite3.exec_not_null_no_headers db ~cb
        (Fmt.str
-          "SELECT b.binary_name, l.package_name, l.package_ver, l.hash FROM \
-           layer_binaries b JOIN layers l ON b.layer_hash = l.hash WHERE \
+          "SELECT b.binary_name, l.package_name, l.package_ver, l.hash, \
+           COALESCE(l.overlay_handle, ''), COALESCE(l.overlay_version, '') \
+           FROM layer_binaries b JOIN layers l ON b.layer_hash = l.hash WHERE \
            b.binary_name %s %s AND l.os_key = %s AND l.exit_status = 0"
           op (quote sql_pattern) (quote os_key)));
   List.sort
-    (fun (b1, _, v1, _) (b2, _, v2, _) ->
+    (fun (b1, _, v1, _, _) (b2, _, v2, _, _) ->
       let c = String.compare b1 b2 in
       if c <> 0 then c
       else
@@ -371,6 +408,11 @@ let stats db ~os_key =
 
 let merge_remote db ~remote_path =
   exec db (Fmt.str "ATTACH DATABASE %s AS remote" (quote remote_path));
+  (* Bring older remote index snapshots up to the current schema so the
+     column-position-sensitive [SELECT *] below keeps working. The
+     remote_path is a locally-downloaded copy; migrating it is safe. *)
+  try_add_column db "ALTER TABLE remote.layers ADD COLUMN overlay_handle TEXT";
+  try_add_column db "ALTER TABLE remote.layers ADD COLUMN overlay_version TEXT";
   exec db
     "CREATE TEMP TABLE _new_hashes AS SELECT hash FROM remote.layers WHERE \
      hash NOT IN (SELECT hash FROM main.layers)";
@@ -388,3 +430,49 @@ let merge_remote db ~remote_path =
      IN (SELECT hash FROM _new_hashes)";
   exec db "DROP TABLE _new_hashes";
   exec db "DETACH DATABASE remote"
+
+(* -- Per-overlay extraction ----------------------------------------------- *)
+
+(* Copy [src_path] to [dst_path] byte-for-byte. Overwrites existing. *)
+let copy_file ~src_path ~dst_path =
+  let ic = open_in_bin src_path in
+  let oc = open_out_bin dst_path in
+  let buf = Bytes.create 65536 in
+  let rec loop () =
+    let n = input ic buf 0 (Bytes.length buf) in
+    if n > 0 then begin
+      output oc buf 0 n;
+      loop ()
+    end
+  in
+  loop ();
+  close_in ic;
+  close_out oc
+
+(* Produce an index.db at [dst_path] containing only the rows for a
+   single overlay (handle, version) restricted to [os_key]. Implemented
+   as "copy then prune" so the resulting schema always matches what a
+   client would open fresh. *)
+let export_overlay ~src_path ~dst_path ~overlay_handle ~overlay_version ~os_key
+    =
+  mkdir_p (Filename.dirname dst_path);
+  (try Sys.remove dst_path with Sys_error _ -> ());
+  copy_file ~src_path ~dst_path;
+  let db = Sqlite3.db_open dst_path in
+  try_add_column db "ALTER TABLE layers ADD COLUMN overlay_handle TEXT";
+  try_add_column db "ALTER TABLE layers ADD COLUMN overlay_version TEXT";
+  exec db
+    (Fmt.str
+       "DELETE FROM layers WHERE NOT (overlay_handle = %s AND overlay_version \
+        = %s AND os_key = %s)"
+       (quote overlay_handle)
+       (quote overlay_version) (quote os_key));
+  exec db
+    "DELETE FROM layer_deps WHERE layer_hash NOT IN (SELECT hash FROM layers)";
+  exec db
+    "DELETE FROM layer_binaries WHERE layer_hash NOT IN (SELECT hash FROM \
+     layers)";
+  exec db
+    "DELETE FROM layer_files WHERE layer_hash NOT IN (SELECT hash FROM layers)";
+  exec db "VACUUM";
+  ignore (Sqlite3.db_close db)

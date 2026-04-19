@@ -23,6 +23,8 @@ type package_plan = {
   env : string array;
   build_dir : string;
   prefix : string;
+  overlay_handle : string option;
+  overlay_version : string option;
 }
 
 type group = { stage : int; packages : package_plan list }
@@ -35,7 +37,30 @@ type t = {
   total_packages : int;
 }
 
-let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
+(* Derive [overlay_handle] / [overlay_version] from a [packages/] dir
+   that an opam file was sourced from. The reporepo materialiser
+   creates [{data_dir}/repos/overlay-<handle>-<version>/packages];
+   anything else (pin-depends trees, raw URLs) returns [None]. *)
+let overlay_of_packages_dir pkgs_dir =
+  let base = Filename.basename (Filename.dirname pkgs_dir) in
+  if String.length base > 8 && String.sub base 0 8 = "overlay-" then
+    let rest = String.sub base 8 (String.length base - 8) in
+    match String.rindex_opt rest '-' with
+    | None -> (None, None)
+    | Some i ->
+        let h = String.sub rest 0 i in
+        let v = String.sub rest (i + 1) (String.length rest - i - 1) in
+        (Some h, Some v)
+  else (None, None)
+
+let find_pkg_source_dir ~packages_dirs pkg =
+  let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
+  let full = OpamPackage.to_string pkg in
+  List.find_opt
+    (fun d -> Sys.file_exists (d / name / full / "opam"))
+    packages_dirs
+
+let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
   let prefix = cache_root / "build" / "prefix" in
   let groups = Action.parallel_groups action_plan in
   (* Track which packages have been "installed" in the synthetic ctx
@@ -137,6 +162,11 @@ let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
             let install_file = build_dir / (name_s ^ ".install") in
             let env = Opam_ctx.compilation_env ctx opam in
             let subst_vars = Opam_ctx.resolve_substs ctx opam in
+            let overlay_handle, overlay_version =
+              match find_pkg_source_dir ~packages_dirs pkg with
+              | None -> (None, None)
+              | Some d -> overlay_of_packages_dir d
+            in
             {
               pkg = pkg_s;
               layer_hash;
@@ -153,6 +183,8 @@ let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
               env;
               build_dir;
               prefix;
+              overlay_handle;
+              overlay_version;
             })
           names
       in
@@ -160,8 +192,10 @@ let resolve_plan ctx ~cache_root ~os_key:_ action_plan =
       { stage = i + 1; packages })
     groups
 
-let create ctx ~cache_root ~os_key ~ocaml_version action_plan =
-  let groups = resolve_plan ctx ~cache_root ~os_key action_plan in
+let create ctx ~packages_dirs ~cache_root ~os_key ~ocaml_version action_plan =
+  let groups =
+    resolve_plan ctx ~packages_dirs ~cache_root ~os_key action_plan
+  in
   let total_packages =
     List.fold_left (fun acc g -> acc + List.length g.packages) 0 groups
   in

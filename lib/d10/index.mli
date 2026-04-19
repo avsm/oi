@@ -9,11 +9,17 @@
 
     {v
     layers:          hash, os_key, arch, os, distro, os_version,
-                     package_name, package_ver, exit_status, created
+                     package_name, package_ver, exit_status, created,
+                     overlay_handle, overlay_version
     layer_deps:      layer_hash, dep_name, dep_version, dep_hash
     layer_files:     layer_hash, path
     layer_binaries:  layer_hash, binary_name   (files under bin/)
     v}
+
+    [overlay_handle] / [overlay_version] identify the reporepo overlay
+    that contributed the opam file used to build a layer. Both are NULL
+    for layers built before tagging was introduced or for packages that
+    came from a pin-depends tree.
 
     The [layer_binaries] table enables [oi run <binary>] to quickly find which
     package provides a given binary without scanning layer trees. *)
@@ -56,12 +62,15 @@ val search_binary :
   db ->
   pattern:string ->
   os_key:string ->
-  (string * string * string * string) list
+  (string * string * string * string * (string * string) option) list
 (** [search_binary db ~pattern ~os_key] searches for binaries matching
     [pattern], returning
-    [(binary_name, package_name, package_version, layer_hash)]. The pattern is
-    matched exactly by default; use [*] as a wildcard (mapped to SQL [LIKE %]).
-    Results are sorted by binary name then opam version descending. *)
+    [(binary_name, package_name, package_version, layer_hash, overlay)]. The
+    [overlay] field is [Some (handle, version)] when the layer was tagged with
+    a reporepo overlay, and [None] otherwise (pin-depends, pre-tagging layers).
+    The pattern is matched exactly by default; use [*] as a wildcard (mapped to
+    SQL [LIKE %]). Results are sorted by binary name then opam version
+    descending. *)
 
 val deps : db -> hash:string -> (string * string * string) list
 (** [deps db ~hash] returns the direct dependencies of a layer as
@@ -89,3 +98,19 @@ val merge_remote : db -> remote_path:string -> unit
     into [db]. Only layers whose hash does not already exist in [db] are
     inserted (local entries take precedence). Associated deps, binaries, and
     files for new layers are also imported. *)
+
+(** {1 Per-overlay extraction} *)
+
+val export_overlay :
+  src_path:string ->
+  dst_path:string ->
+  overlay_handle:string ->
+  overlay_version:string ->
+  os_key:string ->
+  unit
+(** [export_overlay ~src_path ~dst_path ~overlay_handle ~overlay_version
+    ~os_key] writes an index database at [dst_path] containing only the
+    rows tagged with the given overlay handle/version for [os_key]. The
+    source database at [src_path] is copied then pruned, so the output
+    schema is always a self-contained, freshly-vacuumed DB ready to be
+    served alongside its overlay's archives. *)

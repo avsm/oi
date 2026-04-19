@@ -668,8 +668,8 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
   end
   else begin
     let exec_plan =
-      Oi.Plan.create ctx ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
-        build_plan
+      Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
+        ~ocaml_version:conf.ocaml_version build_plan
     in
     Oi.Execute.run ~proc_mgr ~fs
       ~clock:(clock :> D10.Config.clk)
@@ -735,8 +735,8 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
       let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
       let plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
       let exec_plan =
-        Oi.Plan.create ctx ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
-          plan
+        Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
+          ~ocaml_version:conf.ocaml_version plan
       in
       Oi.Execute.run ~proc_mgr ~fs
         ~clock:(clock :> D10.Config.clk)
@@ -1259,8 +1259,8 @@ let plan_cmd =
     in
     let action_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
     let plan =
-      Oi.Plan.create ctx ~cache_root:(Oi.Cache.root_s cache) ~os_key
-        ~ocaml_version:conf.ocaml_version action_plan
+      Oi.Plan.create ctx ~packages_dirs ~cache_root:(Oi.Cache.root_s cache)
+        ~os_key ~ocaml_version:conf.ocaml_version action_plan
     in
     Fmt.pr "%a@." Oi.Plan.pp plan
   in
@@ -1418,13 +1418,21 @@ let which_cmd =
         { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
       in
       List.iter
-        (fun (binary, pkg_name, pkg_ver, hash) ->
+        (fun (binary, pkg_name, pkg_ver, hash, overlay) ->
           let source =
             if D10.Layer.succeeded d10 ~hash then
               Fmt.str "%a" Fmt.(styled `Green string) "local"
             else Fmt.str "%a" Fmt.(styled `Cyan string) "remote"
           in
-          Fmt.pr "%-20s %s.%-12s (%s)@." binary pkg_name pkg_ver source)
+          let overlay_s =
+            match overlay with
+            | None -> "-"
+            | Some (h, v) -> Fmt.str "%s.%s" h v
+          in
+          Fmt.pr "%-20s %-24s %-20s (%s)@."
+            binary
+            (Fmt.str "%s.%s" pkg_name pkg_ver)
+            overlay_s source)
         results
     end
   in
@@ -1452,8 +1460,10 @@ let which_cmd =
           `P
             "$(b,PATTERN) accepts $(b,*) as a wildcard. Output has one row \
              per hit: the binary name, the package and version that \
-             provides it, and a short hash of the cached build (for \
-             feeding into other $(b,oi registry) commands if you want).";
+             provides it, the reporepo overlay (handle.version) the opam \
+             file came from — or $(b,-) for pre-tagging / pin-depends \
+             layers — and whether the cached layer lives locally or on \
+             the configured registry.";
           `P
             "Results are sorted alphabetically by binary name, with newer \
              versions of the same package listed first.";
@@ -2294,81 +2304,135 @@ let fetch_remote_to ~sys ~fs ~registry ~rel ~dst =
       ~dst:Eio.Path.(fs / dst)
   end
 
+(* Body of [oi registry export]; factored out so [oi registry push]
+   can stage into its own directory without re-implementing it. *)
+let do_registry_export ~fs ~clock ~sys ~os_key ~cache ~registry ~handles
+    ~output =
+  let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
+  let dst = Eio.Path.(fs / output) in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
+  let count = D10.Layer.export_all d10 ~dst in
+  Fmt.pr "Exported %d layer(s) to %s@." count output;
+  (* Rebuild the index.db only for this container's os_key. Sibling os_key
+     subdirs may exist alongside ours when [dst] is a shared volume (e.g.
+     docker-compose bind mount) — leave their indices alone. *)
+  let top_index_path = output / os_key / "index.db" in
+  if Sys.file_exists (output / os_key) then begin
+    (try Sys.remove top_index_path with Sys_error _ -> ());
+    let db = D10.Index.open_ ~path:top_index_path in
+    D10.Index.rebuild d10 db;
+    (* If a remote registry is configured, fetch its current
+       <os_key>/index.db into a scratch file and merge those rows
+       in. This keeps rows for layers that live on the remote but
+       haven't been rebuilt locally this run — important for rsync:
+       without it, the published index would shrink to just what the
+       caller happens to have cached. *)
+    if registry <> "" then begin
+      let scratch = output / os_key / ".remote-index.db" in
+      if
+        fetch_remote_to ~sys ~fs ~registry ~rel:(os_key / "index.db")
+          ~dst:scratch
+      then begin
+        (try D10.Index.merge_remote db ~remote_path:scratch
+         with Failure msg ->
+           Logs.warn (fun m -> m "Failed to merge remote layer index: %s" msg));
+        try Sys.remove scratch with Sys_error _ -> ()
+      end
+      else
+        Logs.info (fun m ->
+            m "No remote layer index at %s/%s/index.db (skipping merge)"
+              registry os_key)
+    end;
+    let nl, nb, _ = D10.Index.stats db ~os_key in
+    D10.Index.close db;
+    Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
+  end;
+  (* Per-overlay subtrees: hardlink the archives already at
+     <dst>/<os_key>/ into <dst>/<handle>.<version>/<os_key>/ and
+     write a per-overlay index.db + OINDEX.txt filtered to that
+     overlay. Clients that want a single overlay's layers can point
+     at [<base>/<handle>.<version>/<os_key>/] directly; a central
+     server will later union these into ALL/. *)
+  let handles_opt = if handles = [] then None else Some handles in
+  let n_linked =
+    D10.Layer.export_per_overlay d10 ~dst ?handles:handles_opt ()
+  in
+  if n_linked > 0 || handles <> [] then
+    Fmt.pr "  per-overlay: %d archive(s) linked@." n_linked;
+  if Sys.file_exists top_index_path then begin
+    let buckets = D10.Layer.layers_by_overlay d10 in
+    List.iter
+      (fun (handle, version, bucket_os_key, _hashes) ->
+        if bucket_os_key = os_key then
+          let keep =
+            match handles_opt with
+            | None -> true
+            | Some hs -> List.mem handle hs
+          in
+          if keep then begin
+            let overlay_dir =
+              output / Fmt.str "%s.%s" handle version / os_key
+            in
+            if Sys.file_exists overlay_dir then begin
+              let dst_idx = overlay_dir / "index.db" in
+              D10.Index.export_overlay ~src_path:top_index_path
+                ~dst_path:dst_idx ~overlay_handle:handle
+                ~overlay_version:version ~os_key;
+              Fmt.pr "    %s.%s: index.db written@." handle version
+            end
+          end)
+      buckets
+  end;
+  (* Sources are OS-independent — publish them once at the registry
+     top level (sources/), not per os_key. A sibling [oi registry
+     export] from a different arch/distro will merge into the same
+     tree: blobs are content-addressed so collisions are correctness-
+     preserving. *)
+  let n_sources = Oi.Source_mirror.export ~cache ~dst in
+  if registry <> "" then begin
+    let scratch = output / "sources" / ".remote-index.db" in
+    if fetch_remote_to ~sys ~fs ~registry ~rel:"sources/index.db" ~dst:scratch
+    then begin
+      let index_path = output / "sources" / "index.db" in
+      (try Oi.Source_mirror.merge_remote ~index_path ~remote_path:scratch
+       with Failure msg ->
+         Logs.warn (fun m -> m "Failed to merge remote sources index: %s" msg));
+      try Sys.remove scratch with Sys_error _ -> ()
+    end
+    else
+      Logs.info (fun m ->
+          m "No remote sources index at %s/sources/index.db (skipping merge)"
+            registry)
+  end;
+  if n_sources > 0 then
+    Fmt.pr "  sources: %d blob(s) at %s/sources/@." n_sources output
+
 let registry_export_cmd =
-  let run () cache_dir registry output =
+  let run () cache_dir registry handles output =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
       bootstrap env cache_dir
     in
-    let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
-    let dst = Eio.Path.(fs / output) in
-    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dst;
-    let count = D10.Layer.export_all d10 ~dst in
-    Fmt.pr "Exported %d layer(s) to %s@." count output;
-    (* Rebuild the index.db only for this container's os_key. Sibling os_key
-       subdirs may exist alongside ours when [dst] is a shared volume (e.g.
-       docker-compose bind mount) — leave their indices alone. *)
-    if Sys.file_exists (output / os_key) then begin
-      let index_path = output / os_key / "index.db" in
-      (try Sys.remove index_path with Sys_error _ -> ());
-      let db = D10.Index.open_ ~path:index_path in
-      D10.Index.rebuild d10 db;
-      (* If a remote registry is configured, fetch its current
-         <os_key>/index.db into a scratch file and merge those rows
-         in. This keeps rows for layers that live on the remote but
-         haven't been rebuilt locally this run — important for rsync:
-         without it, the published index would shrink to just what the
-         caller happens to have cached. *)
-      if registry <> "" then begin
-        let scratch = output / os_key / ".remote-index.db" in
-        if
-          fetch_remote_to ~sys ~fs ~registry ~rel:(os_key / "index.db")
-            ~dst:scratch
-        then begin
-          (try D10.Index.merge_remote db ~remote_path:scratch
-           with Failure msg ->
-             Logs.warn (fun m -> m "Failed to merge remote layer index: %s" msg));
-          try Sys.remove scratch with Sys_error _ -> ()
-        end
-        else
-          Logs.info (fun m ->
-              m "No remote layer index at %s/%s/index.db (skipping merge)"
-                registry os_key)
-      end;
-      let nl, nb, _ = D10.Index.stats db ~os_key in
-      D10.Index.close db;
-      Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
-    end;
-    (* Sources are OS-independent — publish them once at the registry
-       top level (sources/), not per os_key. A sibling [oi registry
-       export] from a different arch/distro will merge into the same
-       tree: blobs are content-addressed so collisions are correctness-
-       preserving. *)
-    let n_sources = Oi.Source_mirror.export ~cache ~dst in
-    if registry <> "" then begin
-      let scratch = output / "sources" / ".remote-index.db" in
-      if fetch_remote_to ~sys ~fs ~registry ~rel:"sources/index.db" ~dst:scratch
-      then begin
-        let index_path = output / "sources" / "index.db" in
-        (try Oi.Source_mirror.merge_remote ~index_path ~remote_path:scratch
-         with Failure msg ->
-           Logs.warn (fun m -> m "Failed to merge remote sources index: %s" msg));
-        try Sys.remove scratch with Sys_error _ -> ()
-      end
-      else
-        Logs.info (fun m ->
-            m "No remote sources index at %s/sources/index.db (skipping merge)"
-              registry)
-    end;
-    if n_sources > 0 then
-      Fmt.pr "  sources: %d blob(s) at %s/sources/@." n_sources output
+    do_registry_export ~fs ~clock ~sys ~os_key ~cache ~registry ~handles
+      ~output
   in
   let output =
     Arg.(
       required
       & pos 0 (some string) None
       & info ~docv:"DIR" ~doc:"Output directory for the registry" [])
+  in
+  let handles_term =
+    Arg.(
+      value & opt_all string []
+      & info [ "handle" ] ~docv:"HANDLE"
+          ~doc:
+            "Limit the per-overlay subtree to these reporepo handles \
+             (e.g. $(b,default), $(b,avsm)). May be repeated. When \
+             omitted, every overlay found in the local cache is \
+             exported. Untagged layers (pin-depends, pre-tagging \
+             builds) always land only in the top-level os_key tree.")
   in
   let info =
     Cmd.info "export"
@@ -2384,6 +2448,18 @@ let registry_export_cmd =
              (static file hosting is fine) or $(b,rsync)'d to another \
              machine.";
           `P
+            "The layout has two parallel views. The top-level \
+             $(b,DIR/<os_key>/) holds every archive plus a union \
+             $(b,index.db) and $(b,OINDEX.txt), matching the legacy \
+             flat layout. Alongside it, one subtree per reporepo \
+             overlay is produced at \
+             $(b,DIR/<handle>.<version>/<os_key>/): the archives are \
+             hardlinked from the top level so no disk is wasted, and \
+             the $(b,index.db)/$(b,OINDEX.txt) there are filtered to \
+             just that overlay. A central server rsync'ing per-overlay \
+             subtrees from multiple machines can later rebuild a union \
+             $(b,ALL/) with $(b,oi registry merge-all).";
+          `P
             "If $(b,--registry URL) is given, $(b,oi) first downloads \
              the registry's existing index and merges those rows into \
              the one being published. This matters when you $(b,rsync) \
@@ -2396,7 +2472,221 @@ let registry_export_cmd =
         ]
   in
   Cmd.v info
-    Term.(const run $ log_term $ cache_dir_term $ registry_term $ output)
+    Term.(
+      const run $ log_term $ cache_dir_term $ registry_term $ handles_term
+      $ output)
+
+(* -- registry merge-all -------------------------------------------------- *)
+
+(* Decide whether a direct child of the registry root is a per-overlay
+   subtree ([<handle>.<version>/<os_key>/...]) or a flat os_key subtree
+   (legacy [<os_key>/...]). os_key names contain dots too, so we can't
+   just look at the name — we probe the filesystem. A flat subtree has
+   [index.db] or [OINDEX.txt] directly inside; a per-overlay subtree
+   has them one level deeper. *)
+type contrib_kind = Overlay | Flat
+
+let classify_contrib full =
+  if
+    Sys.file_exists (full / "index.db") || Sys.file_exists (full / "OINDEX.txt")
+  then Some Flat
+  else
+    match Sys.readdir full with
+    | exception Sys_error _ -> None
+    | entries ->
+        let has_os_key =
+          Array.exists
+            (fun sub ->
+              let p = full / sub in
+              Sys.is_directory p
+              && (Sys.file_exists (p / "index.db")
+                 || Sys.file_exists (p / "OINDEX.txt")))
+            entries
+        in
+        if has_os_key then Some Overlay else None
+
+(* Hardlink (falling back to a copy on EXDEV) all files in [src_dir]
+   matching [filter] into [dst_dir]. Returns the count of newly-linked
+   files. Existing entries in [dst_dir] are skipped so repeated
+   merge-alls are idempotent and cheap. *)
+let link_dir_contents ~src_dir ~dst_dir ~filter =
+  if not (Sys.file_exists src_dir) then 0
+  else begin
+    (try Unix.mkdir dst_dir 0o755
+     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let entries = Sys.readdir src_dir in
+    Array.sort String.compare entries;
+    let n = ref 0 in
+    Array.iter
+      (fun name ->
+        if filter name then begin
+          let src = Filename.concat src_dir name in
+          let dst = Filename.concat dst_dir name in
+          if not (Sys.file_exists dst) then
+            try
+              Unix.link src dst;
+              incr n
+            with Unix.Unix_error _ -> (
+              try
+                let ic = open_in_bin src in
+                let oc = open_out_bin dst in
+                let buf = Bytes.create 65536 in
+                let rec loop () =
+                  let bytes = input ic buf 0 (Bytes.length buf) in
+                  if bytes > 0 then begin
+                    output oc buf 0 bytes;
+                    loop ()
+                  end
+                in
+                loop ();
+                close_in ic;
+                close_out oc;
+                incr n
+              with _ -> ())
+        end)
+      entries;
+    !n
+  end
+
+let is_archive name =
+  Filename.check_suffix name ".tar.zst"
+  || Filename.check_suffix name ".txt.zst"
+
+let registry_merge_all_cmd =
+  let run () registry_dir =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let fs = Eio.Stdenv.fs env in
+    if not (Sys.file_exists registry_dir) then
+      Oi.Error.config_error "registry directory %S does not exist"
+        registry_dir;
+    (* Collect per-overlay subtrees — and also the legacy top-level
+       [<os_key>/] trees (unioned under the special tag "_flat" so
+       they're folded into ALL alongside overlays). *)
+    let entries = Sys.readdir registry_dir in
+    Array.sort String.compare entries;
+    let overlay_subtrees = ref [] in
+    let flat_subtrees = ref [] in
+    Array.iter
+      (fun name ->
+        let full = Filename.concat registry_dir name in
+        if
+          Sys.is_directory full && name <> "ALL" && name <> "sources"
+        then
+          match classify_contrib full with
+          | Some Overlay -> overlay_subtrees := name :: !overlay_subtrees
+          | Some Flat -> flat_subtrees := name :: !flat_subtrees
+          | None -> ())
+      entries;
+    let overlay_subtrees = List.rev !overlay_subtrees in
+    let flat_subtrees = List.rev !flat_subtrees in
+    Fmt.pr "Merging %d overlay subtree(s) and %d flat subtree(s) into %s/ALL/@."
+      (List.length overlay_subtrees)
+      (List.length flat_subtrees)
+      registry_dir;
+    (* Walk each contributor, collect (os_key, archive_source_dir,
+       index_db_source) triples, and apply them to ALL/. *)
+    let all_root = registry_dir / "ALL" in
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / all_root);
+    let os_keys_seen = Hashtbl.create 8 in
+    let ingest ~label ~contrib_dir ~os_key src =
+      let all_os = Filename.concat all_root os_key in
+      let n =
+        link_dir_contents ~src_dir:src ~dst_dir:all_os ~filter:is_archive
+      in
+      let src_db = Filename.concat src "index.db" in
+      if Sys.file_exists src_db then begin
+        let all_db = Filename.concat all_os "index.db" in
+        let db = D10.Index.open_ ~path:all_db in
+        (try D10.Index.merge_remote db ~remote_path:src_db
+         with Failure msg ->
+           Logs.warn (fun m ->
+               m "%s/%s: failed to merge index.db: %s" contrib_dir os_key msg));
+        D10.Index.close db
+      end;
+      Hashtbl.replace os_keys_seen os_key ();
+      if n > 0 then
+        if contrib_dir = os_key then
+          Fmt.pr "  %s %s: %d new archive(s)@." label os_key n
+        else
+          Fmt.pr "  %s %s/%s: %d new archive(s)@." label contrib_dir os_key n
+    in
+    List.iter
+      (fun contrib_dir ->
+        let sub = Filename.concat registry_dir contrib_dir in
+        let entries = try Sys.readdir sub with Sys_error _ -> [||] in
+        Array.iter
+          (fun os_key ->
+            let src = Filename.concat sub os_key in
+            if Sys.is_directory src && os_key <> "." && os_key <> ".." then
+              ingest ~label:"overlay" ~contrib_dir ~os_key src)
+          entries)
+      overlay_subtrees;
+    (* For flat contribs the directory name *is* the os_key. *)
+    List.iter
+      (fun contrib_dir ->
+        let src = Filename.concat registry_dir contrib_dir in
+        ingest ~label:"flat" ~contrib_dir ~os_key:contrib_dir src)
+      flat_subtrees;
+    (* Rewrite OINDEX.txt for every touched ALL/<os_key>/ dir. *)
+    Hashtbl.iter
+      (fun os_key () ->
+        D10.Layer.write_index ~dst:Eio.Path.(fs / all_root) os_key;
+        let all_db = Filename.concat all_root os_key / "index.db" in
+        if Sys.file_exists all_db then begin
+          let db = D10.Index.open_ ~path:all_db in
+          let nl, nb, _ = D10.Index.stats db ~os_key in
+          D10.Index.close db;
+          Fmt.pr "  ALL/%s: %d layers, %d binaries@." os_key nl nb
+        end)
+      os_keys_seen
+  in
+  let registry_dir =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"DIR"
+          ~doc:
+            "Registry root directory (where per-overlay $(b,<handle>.<version>/) \
+             subtrees have been rsync'd in from multiple machines)."
+          [])
+  in
+  let info =
+    Cmd.info "merge-all"
+      ~doc:"Server-side union of per-overlay subtrees into ALL/"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Scans $(b,DIR) for per-overlay subtrees \
+             ($(b,<handle>.<version>/<os_key>/)) and any legacy \
+             top-level $(b,<os_key>/) subtrees, and hardlinks every \
+             $(b,*.tar.zst) / $(b,*.txt.zst) archive into \
+             $(b,DIR/ALL/<os_key>/). Per-overlay $(b,index.db) files \
+             are merged into a union $(b,DIR/ALL/<os_key>/index.db) \
+             using the same append-only merge logic that $(b,oi) uses \
+             when pulling a remote layer index, so rows from different \
+             overlays coexist without stomping on each other. \
+             $(b,OINDEX.txt) is rewritten for every touched ALL/ \
+             directory.";
+          `P
+            "Intended to be run on a registry server after multiple \
+             clients have rsync'd their $(b,oi registry export) \
+             output under $(b,DIR), and also inside the compose \
+             project emitted by $(b,oi registry docker) so each batch \
+             of per-distro builds finishes with a fresh ALL/. A cron \
+             job that runs this every few minutes is a reasonable way \
+             to keep ALL/ fresh on a shared server. The operation is \
+             idempotent: archives that are already linked in ALL/ are \
+             left untouched, and the index merge only imports rows \
+             whose layer hash is new.";
+          `P
+            "Clients point at $(b,BASE/ALL) to fetch the union, or at \
+             $(b,BASE/<handle>.<version>) to pin themselves to a \
+             specific overlay snapshot.";
+        ]
+  in
+  Cmd.v info Term.(const run $ log_term $ registry_dir)
 
 let registry_build_cmd =
   (* Group solutions by layer-hash compatibility. Two solutions are compatible
@@ -2628,7 +2918,7 @@ let registry_build_cmd =
              that didn't make it into the mirror (e.g. a crash in the
              first rollout of this feature). *)
           let exec_plan =
-            Oi.Plan.create group_ctx ~cache_root ~os_key
+            Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
               ~ocaml_version:conf.ocaml_version build_plan
           in
           if n_build > 0 then begin
@@ -2644,7 +2934,7 @@ let registry_build_cmd =
                  been rewritten by [fetch_remote_layers], so we rebuild
                  [exec_plan] fresh rather than reusing the outer one. *)
               let exec_plan =
-                Oi.Plan.create group_ctx ~cache_root ~os_key
+                Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
                   ~ocaml_version:conf.ocaml_version build_plan
               in
               let cache_urls =
@@ -2892,7 +3182,7 @@ let registry_docker_cmd =
       `Fedora `Latest;
     ]
   in
-  let run () packages_file output_dir src_context =
+  let run () packages_file overlays output_dir src_context =
     with_error_handling @@ fun () ->
     let pkgs = Registry_docker.parse_packages_file packages_file in
     if pkgs = [] then
@@ -2919,8 +3209,8 @@ let registry_docker_cmd =
     in
     let compose_path = output_dir / "docker-compose.yml" in
     let compose_yaml =
-      Registry_docker.docker_compose_yaml ~distros:default_distros
-        ~registry_host_path:"./registry"
+      Registry_docker.docker_compose_yaml ~overlays ~distros:default_distros
+        ~registry_host_path:"./registry" ()
     in
     Registry_docker.write_file compose_path compose_yaml;
     Fmt.pr "Wrote:@.";
@@ -2932,8 +3222,9 @@ let registry_docker_cmd =
     Fmt.pr "Static oi release binary:@.";
     Fmt.pr "  docker buildx build -f %s --output type=local,dest=./oi-bin .@."
       oi_path;
-    Fmt.pr "Run the registry build + export (all distros in parallel):@.";
-    Fmt.pr "  docker compose up --build   # exports to ./registry/@."
+    Fmt.pr "Run the registry build + export + merge-all:@.";
+    Fmt.pr
+      "  docker compose up --build   # writes ./registry/ALL/<os_key>/@."
   in
   let packages_file =
     Arg.(
@@ -2963,6 +3254,19 @@ let registry_docker_cmd =
              Defaults to the context root."
           [ "src" ])
   in
+  let overlays =
+    Arg.(
+      value & opt_all string []
+      & info [ "overlay" ] ~docv:"HANDLE"
+          ~doc:
+            "Add an extra build pass that builds every package the \
+             named reporepo overlay contributes (i.e. invokes $(b,oi \
+             registry build HANDLE:)). May be repeated. Produces \
+             layers tagged with $(b,HANDLE.<version>) so the \
+             per-overlay subtree of the resulting registry is \
+             populated. Without this flag the distro services run \
+             the main build pass only.")
+  in
   let info =
     Cmd.info "docker"
       ~doc:
@@ -2978,19 +3282,38 @@ let registry_docker_cmd =
              $(b,docker-compose.yml) that bind-mounts $(b,./registry) onto \
              $(b,/out) in every service.";
           `P
-            "Each per-distro image has a $(b,CMD) that runs $(b,oi registry \
-             build --registry=) for the packages in $(b,packages.txt) then \
-             $(b,oi registry export /out). Running the compose project \
-             executes all distros in parallel and leaves the exported layers \
-             on the host:";
+            "The per-distro images are intentionally generic: they \
+             install depexts, copy in a static $(b,oi) binary, and \
+             stage $(b,packages.txt) at $(b,/work/packages.txt). The \
+             compose file drives the actual work via a $(b,command:) \
+             override so the same image can be re-used against \
+             different overlay sets. Each distro service runs $(b,oi \
+             registry build) for the main list, plus one $(b,oi \
+             registry build HANDLE:) pass per $(b,--overlay) handle \
+             (which builds every package the overlay contributes), \
+             and finishes with $(b,oi registry export /out). A final \
+             $(b,merge-all) service depends on every distro build \
+             completing and unions the per-overlay subtrees into \
+             $(b,/out/ALL/<os_key>/), which is what clients fetch. \
+             Run the whole thing with:";
           `Pre "  docker compose up --build";
           `P
-            "Each service exits when its build+export completes; $(b,compose \
-             up) returns when every service has finished.";
+            "$(b,compose up) returns after $(b,merge-all) has \
+             published $(b,./registry/ALL/). The resulting tree is \
+             ready to serve over static HTTP or to $(b,rsync) onto a \
+             registry server — no further $(b,oi) commands needed.";
+          `S Manpage.s_examples;
+          `P
+            "Generate a compose project that produces the main \
+             registry plus an $(b,avsm)-flavoured overlay subtree:";
+          `Pre
+            "  oi registry docker packages.txt --overlay avsm -o ./registry-build";
         ]
   in
   Cmd.v info
-    Term.(const run $ log_term $ packages_file $ output_dir $ src_context)
+    Term.(
+      const run $ log_term $ packages_file $ overlays $ output_dir
+      $ src_context)
 
 (* -- registry mirror ------------------------------------------------------ *)
 
@@ -3208,6 +3531,7 @@ let registry_cmd =
       registry_show_cmd;
       registry_index_cmd;
       registry_export_cmd;
+      registry_merge_all_cmd;
       registry_build_cmd;
       registry_docker_cmd;
       registry_mirror_cmd;

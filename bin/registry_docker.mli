@@ -1,10 +1,10 @@
 (** Dockerfile generation for [oi registry docker].
 
-    Emits a standalone static musl build of [oi] on alpine, plus one runnable
-    per-distro image whose [CMD] runs [oi registry build] followed by
-    [oi registry export /out]. A [docker-compose.yml] orchestrates them with a
-    shared host bind mount at [/out] so a single [docker compose up] runs every
-    distro in parallel and leaves the exported registry on the host. *)
+    Emits a standalone static musl build of [oi] on alpine plus one runnable
+    per-distro image that ships [oi], the target's depexts, and a
+    [packages.txt]. The actual [oi registry build] and [oi registry export]
+    invocations live in [docker-compose.yml] as a [command:] override, so the
+    same image can run against different overlay sets without rebuilding. *)
 
 module Distro = Dockerfile_opam.Distro
 
@@ -16,10 +16,8 @@ val dockerfile_oi : src_context:string -> Dockerfile.t
 val dockerfile_one_distro :
   src_context:string -> packages_ctx_path:string -> Distro.t -> Dockerfile.t
 (** Per-distro build image. Stage 0 is the [oi-builder]; the final stage
-    installs depexts, copies the static [oi] and [packages.txt] into place, and
-    sets a [CMD] that runs [oi registry build] followed by
-    [oi registry export /out]. The image is launched via [docker-compose.yml]
-    with a bind mount at [/out]. *)
+    installs depexts and copies the static [oi] and [packages.txt] into place.
+    No [CMD] is set — the compose file drives the build+export steps. *)
 
 val one_distro_filename : Distro.t -> string
 (** Filename (without directory) for a per-distro Dockerfile, e.g.
@@ -29,10 +27,19 @@ val service_name : Distro.t -> string
 (** docker-compose service name for a distro, e.g. [alpine-3.23]. *)
 
 val docker_compose_yaml :
-  distros:Distro.t list -> registry_host_path:string -> string
-(** [docker_compose_yaml ~distros ~registry_host_path] emits a compose file
-    whose services each build the corresponding per-distro Dockerfile and
-    bind-mount [registry_host_path] onto [/out]. *)
+  ?overlays:string list ->
+  distros:Distro.t list ->
+  registry_host_path:string ->
+  unit ->
+  string
+(** [docker_compose_yaml ?overlays ~distros ~registry_host_path ()] emits a
+    compose file whose services each run [oi registry build] over the packages
+    list followed by [oi registry export]. One extra build pass is scheduled
+    per [overlay] handle — for each [H], the service also runs
+    [oi registry build H:], which builds every package that overlay [H]
+    contributes (layers are tagged with [H.<version>]). A final [merge-all]
+    service depends on every distro finishing and unions the per-overlay
+    subtrees into [ALL/<os_key>/]. *)
 
 val parse_packages_file : string -> string list
 (** Read a packages file at [path]: strip [#] comments and blank lines, return

@@ -328,6 +328,8 @@ let run ?(cache_urls = []) ~proc_mgr ~fs ~clock ~sys ~os_key plan =
                           (fun (d : Plan.dep_layer) -> d.pkg)
                           p.dep_layers)
                      ~parent_hashes:dep_hashes ~exit_status:0
+                     ?overlay_handle:p.overlay_handle
+                     ?overlay_version:p.overlay_version ()
                  with exn ->
                    Hashtbl.replace failed_pkgs p.pkg true;
                    Progress.interject_with (fun () ->
