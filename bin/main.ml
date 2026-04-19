@@ -1429,7 +1429,7 @@ let env_cmd =
 (* -- which --------------------------------------------------------------- *)
 
 let which_cmd =
-  let run () cache_dir registry pattern =
+  let run () cache_dir registry long pattern =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
@@ -1443,13 +1443,16 @@ let which_cmd =
     | None -> ());
     let db = D10.Index.open_ ~path:index_path in
     let results = D10.Index.search_binary db ~pattern ~os_key in
-    D10.Index.close db;
-    if results = [] then Fmt.pr "No binaries matching %s@." pattern
+    if results = [] then begin
+      Fmt.pr "No binaries matching %s@." pattern;
+      D10.Index.close db
+    end
     else begin
       (* Determine which hashes are available locally *)
       let d10 : D10.Config.t =
         { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
       in
+      let short h = String.sub h 0 (min 12 (String.length h)) in
       List.iter
         (fun (binary, pkg_name, pkg_ver, hash, overlay) ->
           let source =
@@ -1462,11 +1465,23 @@ let which_cmd =
             | None -> "-"
             | Some (h, v) -> Fmt.str "%s.%s" h v
           in
-          Fmt.pr "%-20s %-24s %-20s (%s)@."
-            binary
+          Fmt.pr "%-20s %-24s %-20s %-12s (%s)@." binary
             (Fmt.str "%s.%s" pkg_name pkg_ver)
-            overlay_s source)
-        results
+            overlay_s (short hash) source;
+          if long then begin
+            let deps = D10.Index.deps db ~hash in
+            if deps = [] then
+              Fmt.pr "  %a@." Fmt.(styled `Faint string) "(no deps)"
+            else
+              List.iter
+                (fun (dep_name, dep_ver, dep_hash) ->
+                  Fmt.pr "  %a %s.%s@."
+                    Fmt.(styled `Faint string)
+                    (short dep_hash) dep_name dep_ver)
+                deps
+          end)
+        results;
+      D10.Index.close db
     end
   in
   let pattern =
@@ -1478,6 +1493,18 @@ let which_cmd =
             "Binary name to search for. Use * as wildcard (e.g. ocaml* or \
              *format*)."
           [])
+  in
+  let long =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Show the direct dependencies (name, version, short hash) under \
+             each matching layer. Useful when the same package appears more \
+             than once: duplicates are distinct layer hashes with different \
+             dep closures, and this flag reveals which dependencies \
+             differ."
+          [ "l"; "long" ])
   in
   let info =
     Cmd.info "which"
@@ -1495,17 +1522,27 @@ let which_cmd =
              per hit: the binary name, the package and version that \
              provides it, the reporepo overlay (handle.version) the opam \
              file came from — or $(b,-) for pre-tagging / pin-depends \
-             layers — and whether the cached layer lives locally or on \
-             the configured registry.";
+             layers — the first 12 hex chars of the layer hash, and \
+             whether the cached layer lives locally or on the configured \
+             registry.";
+          `P
+            "The same package may appear more than once when $(b,oi) has \
+             built it under different dependency contexts: each build \
+             produces a distinct layer hash. $(b,-l) expands each hit with \
+             the direct dependencies it was built against, so you can \
+             compare the closures and see what differs.";
           `P
             "Results are sorted alphabetically by binary name, with newer \
              versions of the same package listed first.";
           `Pre
-            "  oi which dune\n  oi which 'ocaml*'\n  oi which '*fmt*'";
+            "  oi which dune\n\
+            \  oi which -l jsont\n\
+            \  oi which 'ocaml*'\n\
+            \  oi which '*fmt*'";
         ]
   in
   Cmd.v info
-    Term.(const run $ log_term $ cache_dir_term $ registry_term $ pattern)
+    Term.(const run $ log_term $ cache_dir_term $ registry_term $ long $ pattern)
 
 (* -- sync ---------------------------------------------------------------- *)
 
