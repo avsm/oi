@@ -7,6 +7,10 @@ open Cmdliner
 let ( / ) = Filename.concat
 let app_name = "oi"
 
+let log_src = Logs.Src.create "oi.cli"
+
+module Log = (val Logs.src_log log_src : Logs.LOG)
+
 (* -- Common terms -------------------------------------------------------- *)
 
 let setup_log style_renderer level =
@@ -2633,6 +2637,87 @@ let registry_export_cmd =
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ registry_term $ output)
 
+(* Render the per-target summary emitted at the end of [oi registry build].
+   One row per target, in the order the user asked for them. Columns are
+   truncated/padded so the table stays readable even with long overlay
+   package names. Group-level counts are repeated across all targets that
+   shared a group — two targets under the same solver solution get the same
+   "packages / built / cached" figures, which matches how the build itself
+   treated them. *)
+let print_build_summary ~targets ~solve_failures ~target_group ~group_results =
+  let module R = struct
+    type t =
+      | Skipped of string  (** solver failure *)
+      | Ok of int * int * int
+      | Failed of int * int * int * string
+  end in
+  let result_for t =
+    match Hashtbl.find_opt solve_failures t with
+    | Some msg -> R.Skipped msg
+    | None -> (
+        match Hashtbl.find_opt target_group t with
+        | None -> R.Skipped "unknown"
+        | Some gi -> (
+            match Hashtbl.find_opt group_results gi with
+            | None -> R.Skipped "group not built"
+            | Some (`Ok (p, b, c)) -> R.Ok (p, b, c)
+            | Some (`Fail (p, b, c, msg)) -> R.Failed (p, b, c, msg)))
+  in
+  let rows = List.map (fun t -> (t, result_for t)) targets in
+  let n_ok, n_failed, n_skipped =
+    List.fold_left
+      (fun (o, f, s) (_, r) ->
+        match r with
+        | R.Ok _ -> (o + 1, f, s)
+        | R.Failed _ -> (o, f + 1, s)
+        | R.Skipped _ -> (o, f, s + 1))
+      (0, 0, 0) rows
+  in
+  let status_col r =
+    match r with
+    | R.Ok _ -> Fmt.str "%a" Fmt.(styled `Green string) "ok"
+    | R.Failed _ -> Fmt.str "%a" Fmt.(styled `Red string) "fail"
+    | R.Skipped _ -> Fmt.str "%a" Fmt.(styled `Yellow string) "skip"
+  in
+  (* Shorten multi-line solver diagnostics to the first line so the
+     table stays readable. Full detail is still logged per-target
+     below. *)
+  let first_line s =
+    match String.index_opt s '\n' with
+    | None -> s
+    | Some i -> String.sub s 0 i
+  in
+  let detail_col r =
+    match r with
+    | R.Ok (p, b, c) -> Fmt.str "%d pkg (%d built, %d cached)" p b c
+    | R.Failed (p, b, c, _) ->
+        Fmt.str "%d pkg (%d built, %d cached) — build failed" p b c
+    | R.Skipped msg -> Fmt.str "skipped (%s)" (first_line msg)
+  in
+  let target_width =
+    List.fold_left
+      (fun w (t, _) -> max w (String.length t))
+      12 rows
+  in
+  Fmt.pr "@.";
+  List.iter
+    (fun (target, r) ->
+      Fmt.pr "  %-6s %-*s  %s@." (status_col r) target_width target
+        (detail_col r))
+    rows;
+  Fmt.pr "@.%d ok, %d failed, %d skipped@." n_ok n_failed n_skipped;
+  (* Dump per-target build-failure output at debug level so `-v` still
+     shows the reason, without dumping a compiler transcript by
+     default. *)
+  List.iter
+    (fun (target, r) ->
+      match r with
+      | R.Failed (_, _, _, msg) -> Log.info (fun m -> m "%s: %s" target msg)
+      | R.Skipped msg when String.contains msg '\n' ->
+          Log.info (fun m -> m "%s: %s" target msg)
+      | _ -> ())
+    rows
+
 let registry_build_cmd =
   (* Group solutions by layer-hash compatibility. Two solutions are compatible
      if every package name appearing in both has the same layer hash — this
@@ -2758,8 +2843,8 @@ let registry_build_cmd =
           | Overlay_pkg (_, pkg_spec) -> [ pkg_spec ]
           | Overlay_all h ->
               let ps = overlay_packages h in
-              Fmt.pr "Overlay %s: %d package(s) to build@." h
-                (List.length ps);
+              Log.info (fun m ->
+                  m "Overlay %s: %d package(s) to build" h (List.length ps));
               ps)
         parsed
     in
@@ -2786,45 +2871,78 @@ let registry_build_cmd =
       @ List.map OpamPackage.Name.of_string url_project.roots
     in
     let targets = targets @ url_project.roots in
-    (* 1. Solve each target independently *)
-    let n_solve_failed = ref 0 in
+    (* Per-target result tracking; the final summary walks [targets] in
+       order and looks each name up here. A target either fails to
+       solve (status stored directly), or lands in some group. Groups
+       are keyed by index; their build result (ok / failed, with the
+       package counts) is written into [group_results] when the group
+       finishes. *)
+    let solve_failures : (string, string) Hashtbl.t = Hashtbl.create 16 in
+    let target_group : (string, int) Hashtbl.t = Hashtbl.create 16 in
+    let group_results
+      : (int, [`Ok of int * int * int | `Fail of int * int * int * string])
+        Hashtbl.t =
+      Hashtbl.create 16
+    in
+    (* 1. Solve each target independently. Per-target progress bar so
+       the user sees something when there are many overlay roots. *)
     let solutions =
-      List.filter_map
-        (fun target ->
-          let name, version_constraint = parse_pkg_target target in
-          let constraints =
-            match version_constraint with
-            | None -> base_constraints
-            | Some c -> OpamPackage.Name.Map.add name c base_constraints
-          in
-          match
-            Oi.Solve.solve ctx ~packages_dirs ~constraints (name :: extra_names)
-          with
-          | Ok pkgs ->
-              Fmt.pr "Solved %s: %d packages@." target (List.length pkgs);
-              Some (target, pkgs)
-          | Error msg ->
-              Fmt.epr "%a %s: %s@."
-                Fmt.(styled `Red string)
-                "FAIL (solve)" target msg;
-              incr n_solve_failed;
-              None)
-        targets
+      let n_targets = List.length targets in
+      let solve_one target =
+        let name, version_constraint = parse_pkg_target target in
+        let constraints =
+          match version_constraint with
+          | None -> base_constraints
+          | Some c -> OpamPackage.Name.Map.add name c base_constraints
+        in
+        match
+          Oi.Solve.solve ctx ~packages_dirs ~constraints (name :: extra_names)
+        with
+        | Ok pkgs ->
+            Log.info (fun m ->
+                m "Solved %s: %d packages" target (List.length pkgs));
+            Some (target, pkgs)
+        | Error msg ->
+            Hashtbl.replace solve_failures target msg;
+            Log.debug (fun m -> m "solve failed: %s: %s" target msg);
+            None
+      in
+      if n_targets <= 1 then List.filter_map solve_one targets
+      else
+        let config = Progress.Config.v ~persistent:false () in
+        let bar =
+          let open Progress.Line in
+          pair ~sep:(const " ")
+            (list [ spinner (); brackets (count_to n_targets) ])
+            (rpad 40 string)
+        in
+        let acc = ref [] in
+        Progress.with_reporter ~config bar (fun report ->
+            List.iter
+              (fun target ->
+                report (0, Fmt.str "solve %s" target);
+                (match solve_one target with
+                 | Some s -> acc := s :: !acc
+                 | None -> ());
+                report (1, Fmt.str "solve %s" target))
+              targets);
+        List.rev !acc
     in
     if solutions = [] then Oi.Error.msg "no packages solved successfully";
     (* 2. Group compatible solutions *)
     let groups = group_solutions ctx ~packages_dirs solutions in
     let n_groups = List.length groups in
-    Fmt.pr "%d target(s) in %d compatible group(s)@." (List.length solutions)
-      n_groups;
+    Log.info (fun m ->
+        m "%d target(s) in %d compatible group(s)" (List.length solutions)
+          n_groups);
     (* 3. Build each group *)
-    let n_build_failed = ref 0 in
     List.iteri
       (fun gi (group_solutions, _) ->
-        let group_targets =
-          List.map fst group_solutions |> String.concat ", "
-        in
-        (* Merge packages, deduplicate by name+version *)
+        let group_targets_list = List.map fst group_solutions in
+        let group_targets = String.concat ", " group_targets_list in
+        List.iter
+          (fun t -> Hashtbl.replace target_group t gi)
+          group_targets_list;
         let seen = Hashtbl.create 256 in
         let merged_pkgs =
           List.concat_map
@@ -2840,8 +2958,6 @@ let registry_build_cmd =
                 pkgs)
             group_solutions
         in
-        (* Fresh context per group — Plan.create mutates ctx to track
-           installed packages, so groups must not share state. *)
         let group_ctx =
           Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf
         in
@@ -2849,9 +2965,11 @@ let registry_build_cmd =
           Oi.Solve.topo_sort ~packages_dirs group_ctx merged_pkgs
         in
         if n_groups > 1 then
-          Fmt.pr "Group %d/%d [%s]: %d packages@." (gi + 1) n_groups
-            group_targets (List.length sorted_pkgs)
-        else Fmt.pr "%d unique packages@." (List.length sorted_pkgs);
+          Log.info (fun m ->
+              m "Group %d/%d [%s]: %d packages" (gi + 1) n_groups group_targets
+                (List.length sorted_pkgs))
+        else
+          Log.info (fun m -> m "%d unique packages" (List.length sorted_pkgs));
         let build_plan =
           Oi.Action.plan group_ctx ~d10 ~packages_dirs sorted_pkgs
         in
@@ -2864,6 +2982,7 @@ let registry_build_cmd =
         let n_cached =
           count_by (fun (n : Oi.Action.node) -> n.method_ = Binary)
         in
+        let n_pkgs = n_build + n_cached in
         if dry_run then begin
           let remote_has =
             match remote with
@@ -2875,52 +2994,43 @@ let registry_build_cmd =
           Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has) build_plan
         end
         else begin
-          Fmt.pr "%d to build, %d cached@." n_build n_cached;
-          (* Build the exec plan up front so the mirror-record pass sees
-             every source, whether this group rebuilt or not — opam's
-             download-cache may still hold tarballs from a prior run
-             that didn't make it into the mirror (e.g. a crash in the
-             first rollout of this feature). *)
+          Log.info (fun m -> m "%d to build, %d cached" n_build n_cached);
           let exec_plan =
             Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
               ~ocaml_version:conf.ocaml_version build_plan
           in
-          if n_build > 0 then begin
-            let build_plan =
-              fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs
-                ~ctx:group_ctx ~pkgs:sorted_pkgs build_plan
-            in
-            try
-              (* Read-side mirror wiring: opam probes the local mirror
-                 first (free on hit), then the remote registry's sources/
-                 subdir (if a registry is configured), then falls back to
-                 the upstream url: on miss. [build_plan] here may have
-                 been rewritten by [fetch_remote_layers], so we rebuild
-                 [exec_plan] fresh rather than reusing the outer one. *)
-              let exec_plan =
-                Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
-                  ~ocaml_version:conf.ocaml_version build_plan
+          let build_outcome : [ `Ok | `Fail of string ] =
+            if n_build = 0 then `Ok
+            else begin
+              let build_plan =
+                fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs
+                  ~ctx:group_ctx ~pkgs:sorted_pkgs build_plan
               in
-              let cache_urls =
-                let local = Oi.Source_mirror.url ~cache in
-                match remote with
-                | Some (`Http_remote r) ->
-                    [ local; Oi.Source_mirror.remote_url ~registry:r ]
-                | _ -> [ local ]
-              in
-              Oi.Execute.run ~cache_urls ?jobs ~proc_mgr ~fs
-                ~clock:(clock :> D10.Config.clk)
-                ~sys ~os_key exec_plan
-            with
-            | Oi.Error.E e ->
-                Fmt.epr "%a@." Oi.Error.pp e;
-                incr n_build_failed
-            | Failure msg ->
-                Fmt.epr "%a %s: %s@."
-                  Fmt.(styled `Red string)
-                  "FAIL (build)" group_targets msg;
-                incr n_build_failed
-          end;
+              try
+                let exec_plan =
+                  Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
+                    ~ocaml_version:conf.ocaml_version build_plan
+                in
+                let cache_urls =
+                  let local = Oi.Source_mirror.url ~cache in
+                  match remote with
+                  | Some (`Http_remote r) ->
+                      [ local; Oi.Source_mirror.remote_url ~registry:r ]
+                  | _ -> [ local ]
+                in
+                Oi.Execute.run ~cache_urls ?jobs ~proc_mgr ~fs
+                  ~clock:(clock :> D10.Config.clk)
+                  ~sys ~os_key exec_plan;
+                `Ok
+              with
+              | Oi.Error.E e -> `Fail (Fmt.str "%a" Oi.Error.pp e)
+              | Failure msg -> `Fail msg
+            end
+          in
+          Hashtbl.replace group_results gi
+            (match build_outcome with
+             | `Ok -> `Ok (n_pkgs, n_build, n_cached)
+             | `Fail msg -> `Fail (n_pkgs, n_build, n_cached, msg));
           (* Write-side mirror: promote every source blob that lives in
              opam's download-cache into the registry mirror, regardless
              of [method_]. Binary-cached layers still have source info
@@ -2959,18 +3069,11 @@ let registry_build_cmd =
                   group.packages)
               exec_plan.groups
           with Failure msg ->
-            Fmt.epr "%a %s: %s@."
-              Fmt.(styled `Yellow string)
-              "WARN (mirror)" group_targets msg
+            Log.warn (fun m -> m "mirror %s: %s" group_targets msg)
         end)
       groups;
-    if not dry_run then begin
-      Fmt.pr "Done: %d target(s)" (List.length solutions);
-      if !n_solve_failed > 0 then Fmt.pr ", %d failed to solve" !n_solve_failed;
-      if !n_build_failed > 0 then
-        Fmt.pr ", %d group(s) failed to build" !n_build_failed;
-      Fmt.pr "@."
-    end
+    if not dry_run then
+      print_build_summary ~targets ~solve_failures ~target_group ~group_results
   in
   let targets =
     Arg.(
