@@ -323,6 +323,54 @@ let remote_of_registry = function
   | "" -> None
   | url -> Some (`Http_remote url : D10.Layer.remote)
 
+(* Build the [cache_urls] list that opam's [pull_tree]/[pull_file] probe
+   before falling back to the upstream source URL. Always includes the
+   local {!Source_mirror}; when a remote registry is configured it
+   appends the registry's [sources/] subtree. opam tries entries in
+   order and silently skips those that don't have the blob, so either
+   or both is a no-op if they lack the source. *)
+let cache_urls_of ~cache ~remote =
+  let local = Oi.Source_mirror.url ~cache in
+  match remote with
+  | Some (`Http_remote r) -> [ local; Oi.Source_mirror.remote_url ~registry:r ]
+  | None | Some _ -> [ local ]
+
+(* After a successful [Execute.run], promote every source blob that now
+   lives in opam's download-cache into the local {!Source_mirror} and
+   record its metadata rows. Idempotent — [record] no-ops on blobs
+   already present, and logs-and-continues on I/O errors so a mirror
+   write failure never fails an otherwise-successful build. *)
+let record_sources_to_mirror ~sys ~cache (exec_plan : Oi.Plan.t) =
+  try
+    List.iter
+      (fun (group : Oi.Plan.group) ->
+        List.iter
+          (fun (p : Oi.Plan.package_plan) ->
+            let package = OpamPackage.of_string p.pkg in
+            let overlay =
+              match (p.overlay_handle, p.overlay_version) with
+              | Some h, Some v -> Some (h, v)
+              | _ -> None
+            in
+            Stdlib.Option.iter
+              (fun (src : Oi.Plan.source_info) ->
+                let checksums = List.map OpamHash.of_string src.checksums in
+                let url = OpamUrl.parse ~handle_suffix:true src.url in
+                Oi.Source_mirror.record ~sys ~cache ~package ?overlay
+                  ~kind:`Main ~url ~checksums ())
+              p.source;
+            List.iter
+              (fun (name, (src : Oi.Plan.source_info)) ->
+                let checksums = List.map OpamHash.of_string src.checksums in
+                let url = OpamUrl.parse ~handle_suffix:true src.url in
+                Oi.Source_mirror.record ~sys ~cache ~package ?overlay
+                  ~kind:(`Extra name) ~url ~checksums ())
+              p.extra_sources)
+          group.packages)
+      exec_plan.groups
+  with Failure msg ->
+    Log.warn (fun m -> m "source mirror write failed: %s" msg)
+
 let remote_index_max_age = 3600.0 (* 1 hour *)
 
 (* Join a registry base URL and a relative path with a single [/], regardless
@@ -745,9 +793,14 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
       Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
         ~ocaml_version:conf.ocaml_version build_plan
     in
-    Oi.Execute.run ~proc_mgr ~fs ?jobs
+    let cache_urls = cache_urls_of ~cache ~remote in
+    Oi.Execute.run ~cache_urls ~proc_mgr ~fs ?jobs
       ~clock:(clock :> D10.Config.clk)
       ~sys ~os_key exec_plan;
+    (* Contribute any newly-fetched sources to the mirror so the next
+       build — here or on another machine sharing the registry — can
+       hit the mirror instead of upstream. *)
+    record_sources_to_mirror ~sys ~cache exec_plan;
     (* Invalidate any stale prefix cache *)
     let prefix_hash = D10.Prefix.solve_hash hashes in
     let prefix_dir =
@@ -766,7 +819,7 @@ let assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes =
 (* -- run ----------------------------------------------------------------- *)
 
 let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
-    script_path cli_deps args =
+    ?remote script_path cli_deps args =
   let file_deps = Oi.Script.parse_deps_from_file script_path in
   let all_deps = Oi.Script.dedup (file_deps @ cli_deps) in
   if all_deps = [] then
@@ -811,9 +864,11 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
         Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
           ~ocaml_version:conf.ocaml_version plan
       in
-      Oi.Execute.run ~proc_mgr ~fs
+      let cache_urls = cache_urls_of ~cache ~remote in
+      Oi.Execute.run ~cache_urls ~proc_mgr ~fs
         ~clock:(clock :> D10.Config.clk)
-        ~sys ~os_key exec_plan
+        ~sys ~os_key exec_plan;
+      record_sources_to_mirror ~sys ~cache exec_plan
     end;
     let build_dir = run_dir_s in
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / build_dir);
@@ -1045,7 +1100,7 @@ let run_cmd =
         assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes
       in
       run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache
-        ~data_dir target extra_deps args
+        ~data_dir ?remote target extra_deps args
     end
     else begin
       (* Include --with deps in every solve *)
@@ -3011,13 +3066,7 @@ let registry_build_cmd =
                   Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
                     ~ocaml_version:conf.ocaml_version build_plan
                 in
-                let cache_urls =
-                  let local = Oi.Source_mirror.url ~cache in
-                  match remote with
-                  | Some (`Http_remote r) ->
-                      [ local; Oi.Source_mirror.remote_url ~registry:r ]
-                  | _ -> [ local ]
-                in
+                let cache_urls = cache_urls_of ~cache ~remote in
                 Oi.Execute.run ~cache_urls ?jobs ~proc_mgr ~fs
                   ~clock:(clock :> D10.Config.clk)
                   ~sys ~os_key exec_plan;
@@ -3031,45 +3080,11 @@ let registry_build_cmd =
             (match build_outcome with
              | `Ok -> `Ok (n_pkgs, n_build, n_cached)
              | `Fail msg -> `Fail (n_pkgs, n_build, n_cached, msg));
-          (* Write-side mirror: promote every source blob that lives in
-             opam's download-cache into the registry mirror, regardless
-             of [method_]. Binary-cached layers still have source info
-             on the plan and may still have their tarballs in opam's
-             cache from an earlier run; [record] is a silent no-op for
-             anything not in the cache. *)
-          try
-            List.iter
-              (fun (group : Oi.Plan.group) ->
-                List.iter
-                  (fun (p : Oi.Plan.package_plan) ->
-                    let package = OpamPackage.of_string p.pkg in
-                    let overlay =
-                      match (p.overlay_handle, p.overlay_version) with
-                      | Some h, Some v -> Some (h, v)
-                      | _ -> None
-                    in
-                    Stdlib.Option.iter
-                      (fun (src : Oi.Plan.source_info) ->
-                        let checksums =
-                          List.map OpamHash.of_string src.checksums
-                        in
-                        let url = OpamUrl.parse ~handle_suffix:true src.url in
-                        Oi.Source_mirror.record ~sys ~cache ~package ?overlay
-                          ~kind:`Main ~url ~checksums ())
-                      p.source;
-                    List.iter
-                      (fun (name, (src : Oi.Plan.source_info)) ->
-                        let checksums =
-                          List.map OpamHash.of_string src.checksums
-                        in
-                        let url = OpamUrl.parse ~handle_suffix:true src.url in
-                        Oi.Source_mirror.record ~sys ~cache ~package ?overlay
-                          ~kind:(`Extra name) ~url ~checksums ())
-                      p.extra_sources)
-                  group.packages)
-              exec_plan.groups
-          with Failure msg ->
-            Log.warn (fun m -> m "mirror %s: %s" group_targets msg)
+          (* Write-side mirror: run unconditionally so binary-cached
+             layers whose tarballs still live in opam's download-cache
+             from an earlier run also get promoted. [record] is a
+             silent no-op for anything not in the cache. *)
+          record_sources_to_mirror ~sys ~cache exec_plan
         end)
       groups;
     if not dry_run then
