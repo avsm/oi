@@ -401,18 +401,48 @@ let merge_remote_into_local ~index_path ~remote_path =
      (try Sys.remove remote_path with Sys_error _ -> ()));
   D10.Index.close db
 
-(* Ensure the local index exists, rebuilding it from the layer cache if
-   missing. Call before any index query in oi run / oi which. *)
+(* Count [hash/] directories directly under [layers/<os_key>/]. Each
+   corresponds to one stored layer. Returns 0 if the directory does
+   not yet exist. *)
+let count_on_disk_layers ~os_layer_dir =
+  match Sys.readdir os_layer_dir with
+  | exception Sys_error _ -> 0
+  | entries ->
+      Array.fold_left
+        (fun n name ->
+          if Sys.is_directory (os_layer_dir / name) then n + 1 else n)
+        0 entries
+
+(* Ensure the local index exists and is not stale. A stale index is
+   the common cause of [oi which] missing a just-built layer: the
+   index is built once when [oi which] / [oi run] first needs it, but
+   subsequent builds store layers on disk without touching it. Cheap
+   staleness check: compare [layers/<os_key>/] directory count with
+   the row count in the index. A mismatch triggers a full rebuild.
+   Call before any index query in oi run / oi which. *)
 let ensure_local_index ~sys ~fs ~clock ~cache ~os_key =
-  let index_path = Oi.Cache.root_s cache / "layers" / os_key / "index.db" in
-  if not (Sys.file_exists index_path) then begin
-    Logs.info (fun m -> m "Building local index for %s" os_key);
-    let d10 : D10.Config.t =
-      { sys; fs; clock; root = Oi.Cache.root cache; os_key }
-    in
+  let layers_dir = Oi.Cache.root_s cache / "layers" / os_key in
+  let index_path = layers_dir / "index.db" in
+  let d10 : D10.Config.t =
+    { sys; fs; clock; root = Oi.Cache.root cache; os_key }
+  in
+  let rebuild reason =
+    Logs.info (fun m -> m "%s local index for %s" reason os_key);
     let db = D10.Index.open_ ~path:index_path in
     D10.Index.rebuild d10 db;
     D10.Index.close db
+  in
+  if not (Sys.file_exists index_path) then rebuild "Building"
+  else begin
+    let disk = count_on_disk_layers ~os_layer_dir:layers_dir in
+    let db = D10.Index.open_ ~path:index_path in
+    let indexed, _, _ = D10.Index.stats db ~os_key in
+    D10.Index.close db;
+    (* [disk] may dip below [indexed] when layers have been merged from
+       a remote registry index but not yet downloaded, so only rebuild
+       when the disk count exceeds what the index knows about. *)
+    if disk > indexed then
+      rebuild (Fmt.str "Refreshing (%d on-disk vs %d indexed)" disk indexed)
   end;
   index_path
 
@@ -727,7 +757,7 @@ let assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes =
 let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
     script_path with_deps args =
   let file_deps = Oi.Script.parse_deps_from_file script_path in
-  let cli_deps = List.map Oi.Script.parse_dep with_deps in
+  let cli_deps = List.map Oi.Script.parse_cli_dep with_deps in
   let all_deps = Oi.Script.dedup (file_deps @ cli_deps) in
   if all_deps = [] then
     Oi.Error.msg
@@ -851,7 +881,7 @@ let run_cmd =
               (repos @ [ pin.handle ], deps @ [ pkg_spec ], pins @ [ pin ]))
         (with_repos, [], []) with_deps
     in
-    let extra_deps = List.map Oi.Script.parse_dep with_deps in
+    let extra_deps = List.map Oi.Script.parse_cli_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
     (* Resolve the cwd once; reused for project-extras loading and the
        script-file existence check below. *)
@@ -1268,7 +1298,7 @@ let plan_cmd =
       @ extra_pkg_dirs
       @ get_packages_dirs ~sys ~data_dir ()
     in
-    let extra_deps = List.map Oi.Script.parse_dep with_deps in
+    let extra_deps = List.map Oi.Script.parse_cli_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
     let extra_names =
       List.filter_map
@@ -1365,7 +1395,7 @@ let env_cmd =
         ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
         let conf = make_conf ~platform in
         let extras = cli_extra_repos ~sys with_repos in
-        let extra_cli = List.map Oi.Script.parse_dep with_deps in
+        let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
         let extra_constraints = Oi.Script.constraints extra_cli in
         let extra_names =
           List.filter_map
@@ -1580,7 +1610,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
             all_extras));
   let conf = make_conf ~platform in
   let remote = remote_of_registry registry in
-  let extra_cli = List.map Oi.Script.parse_dep with_deps in
+  let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
   let extra_constraints = Oi.Script.constraints extra_cli in
   let extra_names =
     List.filter_map
@@ -1720,7 +1750,7 @@ let add_cmd =
           "multiple packages in dune-project (%s); re-run with -p PKG to pick \
            one"
           (String.concat ", " many));
-    let dep = Oi.Script.parse_dep pkg_spec in
+    let dep = Oi.Script.parse_cli_dep pkg_spec in
     let dep_name = OpamPackage.Name.to_string dep.name in
     let op_ver = Stdlib.Option.map constr_to_op_ver dep.constraint_ in
     let render_constraint = function
@@ -2618,7 +2648,7 @@ let registry_build_cmd =
     let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
     (* [--with] adds extra packages to every target's root set plus any
        version constraints they carry. *)
-    let extra_cli = List.map Oi.Script.parse_dep with_deps in
+    let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
     let base_constraints = Oi.Script.constraints extra_cli in
     let extra_names =
       List.filter_map
@@ -2774,14 +2804,19 @@ let registry_build_cmd =
                 List.iter
                   (fun (p : Oi.Plan.package_plan) ->
                     let package = OpamPackage.of_string p.pkg in
+                    let overlay =
+                      match (p.overlay_handle, p.overlay_version) with
+                      | Some h, Some v -> Some (h, v)
+                      | _ -> None
+                    in
                     Stdlib.Option.iter
                       (fun (src : Oi.Plan.source_info) ->
                         let checksums =
                           List.map OpamHash.of_string src.checksums
                         in
                         let url = OpamUrl.parse ~handle_suffix:true src.url in
-                        Oi.Source_mirror.record ~sys ~cache ~package ~kind:`Main
-                          ~url ~checksums)
+                        Oi.Source_mirror.record ~sys ~cache ~package ?overlay
+                          ~kind:`Main ~url ~checksums ())
                       p.source;
                     List.iter
                       (fun (name, (src : Oi.Plan.source_info)) ->
@@ -2789,8 +2824,8 @@ let registry_build_cmd =
                           List.map OpamHash.of_string src.checksums
                         in
                         let url = OpamUrl.parse ~handle_suffix:true src.url in
-                        Oi.Source_mirror.record ~sys ~cache ~package
-                          ~kind:(`Extra name) ~url ~checksums)
+                        Oi.Source_mirror.record ~sys ~cache ~package ?overlay
+                          ~kind:(`Extra name) ~url ~checksums ())
                       p.extra_sources)
                   group.packages)
               exec_plan.groups
@@ -2894,7 +2929,7 @@ let depexts_cmd =
     in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
-    let extra_cli = List.map Oi.Script.parse_dep with_deps in
+    let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_cli in
     let extra_names =
       List.filter_map

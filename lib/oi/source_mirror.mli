@@ -38,15 +38,21 @@ val record :
   sys:D10.Sysops.t ->
   cache:Cache.t ->
   package:OpamPackage.t ->
+  ?overlay:string * string ->
   kind:[ `Main | `Extra of string ] ->
   url:OpamUrl.t ->
   checksums:OpamHash.t list ->
+  unit ->
   unit
 (** Promote a just-fetched source from opam's own download-cache into the
     mirror, and record metadata rows.
 
     Idempotent. If the file isn't present in opam's cache (e.g. it was a git pin
-    with no url: section), silently does nothing. *)
+    with no url: section), silently does nothing.
+
+    [overlay] is the reporepo overlay [(handle, version)] the opam file came
+    from; it is included in diagnostic log lines so a missing-checksums message
+    points at the responsible overlay. *)
 
 (** {1 Queries} *)
 

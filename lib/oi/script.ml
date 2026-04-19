@@ -39,6 +39,23 @@ let parse_dep s =
   in
   { name; findlib_name; constraint_ }
 
+(* CLI flag parser: [--with=pkg.version] / [--with=pkg>=1.0]. No findlib
+   syntax here — a [.] after the package name is always an opam version
+   shorthand (equivalent to [=<version>]). Script [@@@opam ...] lines
+   use {!parse_dep} instead, which keeps findlib support. *)
+let parse_cli_dep s =
+  let base, constraint_text = split_at_relop s in
+  let opam_spec =
+    match (constraint_text, String.index_opt base '.') with
+    | "", Some i ->
+        let name = String.sub base 0 i in
+        let ver = String.sub base (i + 1) (String.length base - i - 1) in
+        if ver = "" then base else name ^ "=" ^ ver
+    | _ -> base ^ constraint_text
+  in
+  let name, constraint_ = OpamFormula.atom_of_string opam_spec in
+  { name; findlib_name = OpamPackage.Name.to_string name; constraint_ }
+
 let parse_deps_from_line line =
   let line = String.trim line in
   let prefix = "[@@@opam " in

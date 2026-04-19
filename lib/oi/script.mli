@@ -32,8 +32,18 @@ val parse_deps_from_file : string -> dep list
     attribute is found. *)
 
 val parse_dep : string -> dep
-(** [parse_dep s] parses ["pkg>=1.0"] into a dep using
-    {!OpamFormula.atom_of_string}. *)
+(** [parse_dep s] parses a script-style dep spec (from [[\@\@\@opam ...]]) into
+    a dep. A [.] is treated as a findlib sub-library separator — e.g.
+    [ppx_deriving.show>=1.0] yields opam package [ppx_deriving] at
+    [>= 1.0] with findlib library [ppx_deriving.show]. For CLI [--with=]
+    inputs use {!parse_cli_dep}, which treats [.] as an opam version
+    shorthand instead. *)
+
+val parse_cli_dep : string -> dep
+(** [parse_cli_dep s] parses a CLI-style dep spec into a dep. A [.]
+    after the package name is interpreted as opam's [pkg.version]
+    shorthand — [dune.3.20.0] means [dune = 3.20.0]. There is no findlib
+    syntax at the CLI; [findlib_name] is always the plain package name. *)
 
 val name_s : dep -> string
 (** [name_s d] is the package name as a string. *)

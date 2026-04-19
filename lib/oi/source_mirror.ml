@@ -182,18 +182,26 @@ let opam_cache_file checksums =
 
 (* -- Public: record ------------------------------------------------------ *)
 
-let record ~sys:_ ~cache ~package ~kind ~url ~checksums =
+let record ~sys:_ ~cache ~package ?overlay ~kind ~url ~checksums () =
+  let provenance =
+    match overlay with
+    | None -> ""
+    | Some (h, v) -> Fmt.str " (from %s.%s)" h v
+  in
+  let kind_tag =
+    match kind with `Main -> "" | `Extra name -> Fmt.str " [extra:%s]" name
+  in
   match checksums with
   | [] ->
       Log.debug (fun m ->
-          m "no checksums for %s, nothing to mirror"
-            (OpamPackage.to_string package))
+          m "no checksums for %s%s%s, nothing to mirror"
+            (OpamPackage.to_string package) kind_tag provenance)
   | _ -> (
       match opam_cache_file checksums with
       | None ->
           Log.debug (fun m ->
-              m "no cached blob for %s, skipping mirror"
-                (OpamPackage.to_string package))
+              m "no cached blob for %s%s%s, skipping mirror"
+                (OpamPackage.to_string package) kind_tag provenance)
       | Some src_path ->
           let sha256_hash = OpamHash.compute ~kind:`SHA256 src_path in
           let sha256 = OpamHash.contents sha256_hash in
