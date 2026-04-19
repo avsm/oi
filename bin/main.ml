@@ -50,17 +50,8 @@ let refresh_term =
     value & flag
     & info
         ~doc:
-          "Force refresh of all timestamp-driven caches (opam repos, extra \
-           repos, pin-depends sources, and any other aged caches). Without \
-           this flag, caches older than 24 hours are refreshed automatically; \
-           newer ones are reused. For $(b,pin-depends) entries on git URLs \
-           this is how new upstream commits become visible: the pinned source \
-           is re-pulled, HEAD is re-resolved, and the resolved commit is baked \
-           into the synthesized opam file's $(b,url:) fragment. That fragment \
-           participates in the layer hash, so a new upstream commit \
-           invalidates the binary cache for the pin (and its reverse deps) and \
-           triggers a rebuild. Between refreshes, upstream changes on a git \
-           pin are not observed."
+          "Force refresh of opam repos, pins, and URL clones. Caches \
+           older than 24 hours refresh automatically."
         [ "refresh" ])
 
 (* Common CLI flag: [--with-repo URL], repeatable. Available on every
@@ -71,9 +62,8 @@ let with_repos_term =
     value & opt_all string []
     & info ~docv:"URL"
         ~doc:
-          "Additional opam repository URL to include in solving. Repeatable; \
-           merges with any [x-opam-repositories:] declared in the project's \
-           *.opam files."
+          "Additional opam repository to include when solving. Accepts \
+           a URL or a reporepo handle. Repeatable."
         [ "with-repo" ])
 
 (* Common CLI flag: [-j N] / [--jobs N]. Available on every command that
@@ -85,12 +75,7 @@ let jobs_term =
     value
     & opt (some int) None
     & info ~docv:"N"
-        ~doc:
-          "Maximum number of packages to build in parallel within a stage. \
-           Each in-flight build spawns a tree of compiler subprocesses, so \
-           raising this too high can exhaust the process file-descriptor \
-           limit (macOS defaults to 256). Overrides \
-           $(b,OI_BUILD_PARALLELISM); default is $(b,min cpu-count 4)."
+        ~doc:"Maximum number of packages to build in parallel. Default 4."
         [ "j"; "jobs" ])
 
 (* Common CLI flag: [--with PKG], repeatable. Available on every command
@@ -103,14 +88,10 @@ let with_deps_term =
     value & opt_all string []
     & info ~docv:"PKG"
         ~doc:
-          "Additional dependency to include in solving. Accepts a package \
-           name, an opam atom with a version constraint (e.g. \
-           $(b,--with=fmt>=0.9) or $(b,--with=dune.3.20.0)), or a git URL \
-           ($(b,http(s)://), $(b,git+), $(b,git@), $(b,git://), $(b,ssh://)). \
-           URLs are cloned into the local pin cache and every [*.opam] at \
-           the root is pinned as a solver root — so \
-           $(b,oi run --with=https://example.org/merry.git merry) behaves \
-           like a local project. Repeatable."
+          "Additional dependency to include when solving. Accepts a \
+           package name, an opam atom ($(b,fmt>=0.9), \
+           $(b,dune.3.20.0)), or a git URL. URLs are cloned and every \
+           $(b,*.opam) at the root is pinned. Repeatable."
         [ "with" ])
 
 (* Convert a CLI [--with-repo URL] entry into a [Project.extra_repo] with a
@@ -1197,103 +1178,76 @@ let run_cmd =
         [
           `S Manpage.s_description;
           `P
-            "$(b,oi run TARGET) figures out what TARGET needs, installs \
-             those dependencies into a local cache (reusing whatever is \
-             already there), and runs TARGET. After the first run with a \
-             given dependency set, subsequent runs with the same \
-             dependencies are near-instant.";
+            "Solve for $(b,TARGET)'s dependencies, install them into \
+             the local cache, and run $(b,TARGET). Re-runs are instant \
+             when the dep set is unchanged.";
           `P
-            "TARGET can be an installed binary name (for example \
-             $(b,utop)), a $(b,.ml) script file, or an http(s) URL to a \
-             $(b,.ml) script.";
-          `S "RUNNING A BINARY";
+            "$(b,TARGET) is a binary name, a $(b,.ml) script, or an \
+             http(s) URL pointing at a $(b,.ml) script.";
+          `S "BINARIES";
           `P
-            "Give the name of any executable an opam package provides, \
-             and $(b,oi) finds the package that ships it. If the name \
-             doesn't obviously match a package, $(b,oi) also tries \
-             dash-split prefixes: $(b,ocluster-admin) will also try \
-             $(b,ocluster). When $(b,--with) is given, $(b,oi) tries the \
-             listed packages first. This is useful when you already know \
-             which package ships the binary but the binary name differs \
-             from the package name.";
+            "Pass a binary name. $(b,oi) finds the opam package that \
+             ships it. Dash-split prefixes are also tried, so \
+             $(b,ocluster-admin) falls back to $(b,ocluster). Packages \
+             listed in $(b,--with) are tried first.";
           `Pre
             "  oi run utop\n\
             \  oi run ocamlformat -- --help\n\
             \  oi run --with=crockford roguedoi";
-          `S "PULLING FROM A SOMEONE ELSE'S OVERLAY";
+          `S "OVERLAYS";
           `P
-            "If someone publishes their own collection of opam packages \
-             (an $(i,overlay)) and you've registered it in the reporepo \
-             (see $(b,oi repo add)), prefix the target or a $(b,--with) \
-             value with their handle and a colon to opt in to their \
-             version rather than the default one.";
+            "Prefix a target or a $(b,--with) value with a reporepo \
+             handle and a colon to pin the named package to whatever \
+             version that overlay ships. Stack handles to compose \
+             overlays. Add $(b,x-reporepo: [\"handle\"]) in an opam \
+             file to make it automatic.";
           `Pre
             "  oi run avsm:owntracks\n\
             \  oi run samoht:irmin\n\
             \  oi run --with=avsm:crockford roguedoi";
+          `S "GIT URLS";
           `P
-            "When a handle is used, $(b,oi) pins the named package to \
-             whatever version that overlay ships, even if a different \
-             overlay advertises a higher version. Stack handles to \
-             compose overlays on one command; later handles take \
-             priority when they disagree on a package. Inside a \
-             project, $(b,x-reporepo: [\"avsm\"]) in an opam file has \
-             the same effect as $(b,--with-repo=avsm) for every \
-             invocation in that directory.";
-          `S "RUNNING A SCRIPT";
+            "$(b,--with=URL) clones the repository and pins every \
+             $(b,*.opam) at its root as a solver root. Schemes: \
+             $(b,http(s)://), $(b,git+), $(b,git@), $(b,git://), \
+             $(b,ssh://). Append $(b,#ref) to pin a branch or commit.";
+          `Pre
+            "  oi run --with=https://github.com/owner/project.git target\n\
+            \  oi run --with=git+https://example.org/foo.git#branch foo";
+          `S "VERSIONS";
           `P
-            "Scripts are plain $(b,.ml) files with dependencies declared \
-             on the first line.";
+            "$(b,--with=pkg.version) and $(b,--with=pkg=version) pin a \
+             package to a specific version. Relops $(b,>=), $(b,>), \
+             $(b,<=), $(b,<) also work.";
+          `Pre
+            "  oi run --with=dune.3.20.0 -- dune --version\n\
+            \  oi run --with=fmt>=0.9 my_script.ml";
+          `S "SCRIPTS";
+          `P
+            "Scripts are $(b,.ml) files with dependencies on the first \
+             line:";
           `Pre "  [@@@opam fmt cmdliner lwt>=5.0]";
           `P
             "Each token is an opam package, optionally with a version \
-             constraint ($(b,>=), $(b,>), $(b,<=), $(b,<), or $(b,=)).";
+             constraint. A dot names a findlib sub-library, e.g. \
+             $(b,ppx_deriving.show). Packages starting with $(b,ppx_) \
+             are wired in as PPX preprocessors.";
           `P
-            "If a token contains a dot (for example \
-             $(b,ppx_deriving.show) or $(b,eio.core)), it names a \
-             specific findlib library inside an opam package. The opam \
-             package before the dot is installed and the full name is \
-             passed to the build system.";
-          `P
-            "Packages starting with $(b,ppx_) are wired in as PPX \
-             preprocessors automatically, so $(b,@@deriving show) and \
-             similar annotations just work.";
-          `Pre "  [@@@opam eio.core ppx_deriving.show ppx_jane]";
-          `P
-            "If the build doesn't pick up your packages the way you \
-             expected, $(b,oi run -vv SCRIPT.ml) logs the dune file that \
-             was generated.";
-          `P
-            "Scripts are cached by a hash of the file contents plus the \
-             dependency list. Running the same script again is instant. \
-             Editing it triggers a rebuild. URL targets are fetched to a \
-             fresh temp file on each run, but the content-based hash \
-             means unchanged remote scripts still hit the cache.";
+            "Builds are cached by script content plus dep list. Edit the \
+             script to trigger a rebuild. URL targets are re-fetched on \
+             every run but hit the cache when unchanged.";
           `Pre
             "  oi run my_script.ml\n\
             \  oi run my_script.ml --with=tls -- arg1 arg2\n\
             \  oi run https://gist.example.com/hello.ml";
-          `S "PREVIEWING WITHOUT RUNNING";
+          `S "DRY RUN";
           `P
-            "$(b,-n) or $(b,--dry-run) resolves dependencies and checks \
-             the cache, but skips the actual build and execution. Each \
-             package is tagged so you can see what work $(b,oi) would do:";
-          `I
-            ( "$(b,binary)",
-              "The package is already cached locally, so a real run \
-               would be instant." );
-          `I
-            ( "$(b,remote)",
-              "The package is available from the configured registry \
-               and would be downloaded rather than built." );
-          `I
-            ( "$(b,source)",
-              "The package is neither cached nor in the registry, so \
-               $(b,oi) would build it from source." );
-          `I
-            ( "$(b,virtual)",
-              "The package is a stub (such as $(b,conf-pkg-config)) and \
-               needs no work." );
+            "$(b,-n) / $(b,--dry-run) prints the plan without \
+             executing. Each package is tagged:";
+          `I ("$(b,binary)", "Already cached locally.");
+          `I ("$(b,remote)", "Available from the registry.");
+          `I ("$(b,source)", "Would be built from source.");
+          `I ("$(b,virtual)", "A stub like $(b,conf-pkg-config).");
         ]
   in
   Cmd.v info
@@ -1375,36 +1329,21 @@ let plan_cmd =
       & info ~docv:"PKG" ~doc:"Package(s) to plan" [])
   in
   let info =
-    Cmd.info "plan" ~doc:"Show what would happen if you ran these packages"
+    Cmd.info "plan" ~doc:"Show the build plan for these packages"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Answers the question 'what does $(b,oi) need to do if I run \
-             $(b,PKG)?'. It resolves the dependency tree (including any \
-             project pins, extra repositories, and $(b,--with) or \
-             $(b,--with-repo) additions) and prints every package it \
-             would touch, without downloading or building anything.";
+            "Resolve the dependency tree for $(b,PKG) and print every \
+             package in it. Does not download or build anything.";
           `P "Each node is tagged:";
-          `I
-            ( "$(b,source)",
-              "The package would be built from source on a real run." );
-          `I
-            ( "$(b,binary)",
-              "The package is already cached locally and needs no work." );
-          `I
-            ( "$(b,remote)",
-              "The package is available in the configured registry and \
-               would be downloaded rather than built." );
-          `I
-            ( "$(b,virtual)",
-              "The package is a stub (such as $(b,conf-pkg-config)) and \
-               needs no work." );
+          `I ("$(b,source)", "Would be built from source.");
+          `I ("$(b,binary)", "Already cached locally.");
+          `I ("$(b,remote)", "Available from the registry.");
+          `I ("$(b,virtual)", "A stub like $(b,conf-pkg-config).");
           `P
-            "Reach for this when an $(b,oi run) is slower than you \
-             expected (to see which packages are being built vs. \
-             downloaded), or when deciding whether to prime a remote \
-             registry with $(b,oi registry build).";
+            "$(b,--with) and $(b,--with-repo) accept the same forms as \
+             $(b,oi run).";
         ]
   in
   Cmd.v info
@@ -1483,26 +1422,22 @@ let env_cmd =
   in
   let info =
     Cmd.info "env"
-      ~doc:"Print shell exports that point OCaml tools at the project prefix"
+      ~doc:"Print shell exports for the project environment"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Prints $(b,export PATH=...), $(b,export OCAMLLIB=...), and the \
-             other variables OCaml tools look at, so that running \
-             $(b,ocaml), $(b,dune), or anything else picks up the \
-             dependency set installed under $(b,_oi/prefix/). The typical \
-             usage is:";
+            "Print $(b,export) statements for $(b,PATH), $(b,OCAMLLIB), \
+             and the other variables OCaml tools look at. Typical \
+             usage:";
           `Pre "  eval \"\\$(oi env)\"";
           `P
-            "This is the same environment $(b,oi sync) writes into \
-             $(b,.envrc) for $(b,direnv), but without the $(b,direnv) \
-             wrapper. Use it when direnv isn't available, for a \
-             throw-away shell, or inside a Makefile target.";
+            "Same environment $(b,oi sync) writes into $(b,.envrc), \
+             without the $(b,direnv) wrapper. Sync runs implicitly if \
+             $(b,_oi/prefix/) is missing or stale.";
           `P
-            "If $(b,_oi/prefix/) is missing or out-of-date, a sync runs \
-             implicitly before the variables are printed, so the \
-             resulting environment is always consistent.";
+            "$(b,--with) and $(b,--with-repo) force a fresh solve. \
+             They accept the same forms as $(b,oi run).";
         ]
   in
   Cmd.v info
@@ -1599,27 +1534,16 @@ let which_cmd =
         [
           `S Manpage.s_description;
           `P
-            "Answers the question 'which package do I need to install to \
-             get this binary?'. Searches both the local cache and the \
-             configured remote registry, so you get hits even for \
-             packages you've never built yourself.";
+            "Search the local cache and remote registry for packages \
+             providing $(b,PATTERN). Wildcards with $(b,*).";
           `P
-            "$(b,PATTERN) accepts $(b,*) as a wildcard. Output has one row \
-             per hit: the binary name, the package and version that \
-             provides it, the reporepo overlay (handle.version) the opam \
-             file came from — or $(b,-) for pre-tagging / pin-depends \
-             layers — the first 12 hex chars of the layer hash, and \
-             whether the cached layer lives locally or on the configured \
-             registry.";
+            "Each row: binary name, package.version, overlay tag, \
+             short layer hash, source (local or remote).";
           `P
-            "The same package may appear more than once when $(b,oi) has \
-             built it under different dependency contexts: each build \
-             produces a distinct layer hash. $(b,-l) expands each hit with \
-             the direct dependencies it was built against, so you can \
-             compare the closures and see what differs.";
-          `P
-            "Results are sorted alphabetically by binary name, with newer \
-             versions of the same package listed first.";
+            "A package can appear more than once: different dep \
+             closures produce different layer hashes. $(b,-l) / \
+             $(b,--long) prints each layer's direct deps so you can \
+             see what differs.";
           `Pre
             "  oi which dune\n\
             \  oi which -l jsont\n\
@@ -1843,44 +1767,47 @@ let sync_cmd =
   in
   let info =
     Cmd.info "sync"
-      ~doc:"Install the current project's dependencies into _oi/prefix/"
+      ~doc:"Install project dependencies into _oi/prefix/"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Reads every $(b,*.opam) file in the current directory, works \
-             out the complete list of dependencies (including pins and \
-             any extra repositories the project declares), and installs \
-             them into a local $(b,_oi/prefix/) directory. From then on, \
-             running $(b,ocaml), $(b,dune), $(b,utop) and friends in this \
-             project uses that dependency set.";
+            "Solve for every dep declared in the directory's \
+             $(b,*.opam) files and install into $(b,_oi/prefix/). \
+             Write $(b,.envrc) so $(b,PATH) and OCaml environment \
+             variables point at it.";
           `P
-            "After a successful sync two things exist alongside the \
-             project. $(b,_oi/prefix/) contains the assembled toolchain \
-             ($(b,bin/), $(b,lib/), $(b,share/), and so on), built from \
-             hardlinks into the cache so it's cheap to recreate. \
-             $(b,.envrc) is a shell script that points $(b,PATH) and the \
-             OCaml-related variables at that prefix. You can source it \
-             manually, or install $(b,direnv) and run $(b,direnv allow) \
-             to have it activated automatically when you enter the \
-             directory.";
+            "Activate the environment by running $(b,direnv allow) or \
+             sourcing $(b,.envrc) manually.";
           `P
-            "Rerun this when you edit $(b,*.opam) files, pull new pins, \
-             or want to pick up packages that appeared on the remote \
-             registry since last time. $(b,oi exec) does an implicit \
-             sync when the prefix is older than the opam files, so most \
-             people only reach for $(b,oi sync) directly after a \
-             deliberate change.";
+            "Rerun after editing $(b,*.opam) files or pulling new \
+             pins. $(b,oi exec) auto-syncs, so $(b,oi sync) is only \
+             needed for deliberate changes.";
+          `S "DEV TOOLS";
           `P
-            "Opt into someone's package overlay by adding \
-             $(b,x-reporepo: [\"handle\"]) to any of the project's \
-             opam files. $(b,oi sync) will then behave as if you had \
-             passed $(b,--with-repo=handle) on every invocation. \
-             Multiple handles stack; later ones win on conflicts.";
+            "$(b,oi sync) also installs dev tools onto $(b,PATH):";
+          `I ("$(b,odoc)", "Documentation generator.");
+          `I ("$(b,merlin)", "Editor integration.");
+          `I ("$(b,ocaml-lsp-server)", "LSP server for editors.");
+          `I
+            ( "$(b,mdx)",
+              "Installed when $(b,dune-project) uses it." );
+          `I
+            ( "$(b,ocamlformat)",
+              "Installed at the version $(b,.ocamlformat) declares." );
+          `P "Run $(b,oi config) to see the current probe table.";
+          `S "OPTIONS";
           `P
-            "$(b,--refresh) forces re-pulls of opam repositories and git \
-             pins even if their timestamp says they're fresh, which is \
-             how you pick up a commit that just landed upstream.";
+            "$(b,--with=PKG) adds extra deps to the solve. See \
+             $(b,oi run) for accepted forms.";
+          `P
+            "$(b,--with-repo=URL|HANDLE) layers an extra opam \
+             repository onto the solve.";
+          `P
+            "$(b,-j N) caps parallel builds. Default 4.";
+          `P
+            "$(b,--refresh) forces re-pulls of opam repos, pins, and \
+             URL clones.";
         ]
   in
   Cmd.v info
@@ -2069,22 +1996,20 @@ let exec_cmd =
   in
   let info =
     Cmd.info "exec"
-      ~doc:"Run a command against the current project's dependencies"
+      ~doc:"Run a command in the project environment"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Runs $(b,CMD) with the project's toolchain active (that is, \
-             with the environment that $(b,oi sync) writes into \
-             $(b,.envrc)). Use this for one-off invocations of \
-             $(b,dune), $(b,ocamlformat), $(b,utop), or any other tool \
-             supplied by the project's dependencies, without installing \
-             anything globally or sourcing $(b,.envrc) by hand.";
+            "Run $(b,CMD) with the project's toolchain on $(b,PATH) \
+             and OCaml environment variables set.";
           `P
-            "$(b,oi exec) auto-syncs when $(b,_oi/prefix/) is missing or \
-             when any $(b,*.opam) in the current directory is newer than \
-             the prefix, so you can run it immediately after editing \
-             your dependencies without a separate $(b,oi sync) step.";
+            "Auto-syncs when $(b,_oi/prefix/) is missing or older than \
+             any $(b,*.opam) file. Passing $(b,--with) or \
+             $(b,--with-repo) forces a re-sync.";
+          `P
+            "Dev tools ($(b,ocamlformat), $(b,ocamllsp), $(b,odoc), \
+             $(b,ocamlmerlin), $(b,ocaml-mdx)) are on $(b,PATH) too.";
           `Pre
             "  oi exec dune build\n\
             \  oi exec -- ocamlformat --check .\n\
@@ -2191,34 +2116,31 @@ let config_cmd =
   in
   let info =
     Cmd.info "config"
-      ~doc:"Show what oi has detected about this machine and its caches"
+      ~doc:"Show oi's view of this machine and project"
       ~man:
         [
           `S Manpage.s_description;
-          `P "Prints a human-readable summary of $(b,oi)'s view of the world.";
+          `P "Summarise platform, caches, repositories, and project state.";
           `I
             ( "$(b,Platform)",
-              "Operating system, architecture, and distribution that \
-               $(b,oi) detected. Package availability can differ between \
-               distros, so this is the first thing to check if a solve \
-               gives unexpected results." );
+              "OS, architecture, distro. Check here first when a solve \
+               picks unexpected packages." );
           `I
             ( "$(b,Directories)",
-              "The cache and data directories $(b,oi) is using, which \
-               honour $(b,OI_CACHE_DIR) and $(b,OI_DATA_DIR) if set and \
-               otherwise follow the XDG conventions. Each line shows \
-               current disk usage." );
+              "Cache and data directories. Honours $(b,OI_CACHE_DIR) \
+               and $(b,OI_DATA_DIR); falls back to XDG." );
           `I
             ( "$(b,Repositories)",
-              "The local clone paths of the opam package index and any \
-               extra repositories, with their last-updated timestamps \
-               so you can tell whether a $(b,--refresh) would pull new \
-               data." );
-          `P
-            "Start here when a command 'solved something weird'. The \
-             platform line shows which package candidates $(b,oi) \
-             considered, and the repository timestamps show whether you \
-             were looking at a stale index.";
+              "Opam repo clones with last-updated timestamps." );
+          `I
+            ( "$(b,Project extra repositories / pins / overlays)",
+              "Shown when the current directory's $(b,*.opam) files \
+               declare $(b,x-opam-repositories:), $(b,pin-depends:), \
+               or $(b,x-reporepo:)." );
+          `I
+            ( "$(b,Dev tools)",
+              "Which tools the next $(b,oi sync) will install. \
+               $(b,hit) means yes, $(b,miss) means no." );
         ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term $ data_dir_term)
@@ -3063,37 +2985,33 @@ let registry_build_cmd =
   in
   let info =
     Cmd.info "build"
-      ~doc:"Build a list of packages so later users don't have to"
+      ~doc:"Build packages into the local cache for later publication"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Solves for and builds every $(b,PKG) into the local cache \
-             (and the source-tarball mirror alongside it). Intended for \
-             priming a machine that will later publish the cache via \
-             $(b,oi registry export), so that other $(b,oi) clients \
-             pointed at the registry get an instant binary download \
-             instead of building from source.";
-          `P
-            "Pass many packages on one invocation. $(b,oi) groups \
-             compatible solutions together, which is much cheaper than \
-             running $(b,oi run PKG) over each package in a loop.";
-          `P
-            "$(b,PKG) accepts the same shortcuts $(b,oi run) does for \
-             reporepo overlays, plus one extra for batch-building an \
-             entire overlay.";
+            "Solve and build every $(b,PKG) into the local cache and \
+             source mirror. Pass many packages at once: $(b,oi) groups \
+             compatible solutions so one invocation is cheaper than a \
+             loop.";
+          `P "Intended for priming a cache before $(b,oi registry export).";
+          `S "PKG FORMS";
           `I
-            ( "$(b,avsm:foo)",
-              "Build the $(b,foo) package from avsm's overlay, pinning \
-               the version the overlay ships." );
+            ( "$(b,PKG)",
+              "Opam package name." );
           `I
-            ( "$(b,avsm:)",
-              "Build every package avsm's overlay provides. Handy for \
-               pre-warming a registry with a whole overlay in one \
-               step." );
+            ( "$(b,HANDLE:PKG)",
+              "Build $(b,PKG) pinned to the version $(b,HANDLE)'s \
+               overlay ships." );
+          `I
+            ( "$(b,HANDLE:)",
+              "Build every package in $(b,HANDLE)'s overlay." );
+          `S "OPTIONS";
           `P
-            "$(b,-n) / $(b,--dry-run) prints what would be built without \
-             actually building, useful when you're lining up a batch.";
+            "$(b,--with) adds extra packages or URL-supplied projects \
+             as build targets.";
+          `P "$(b,-j N) caps parallel builds and fetches. Default 4.";
+          `P "$(b,-n) / $(b,--dry-run) prints the plan without building.";
         ]
   in
   Cmd.v info
@@ -3193,30 +3111,25 @@ let depexts_cmd =
   in
   let info =
     Cmd.info "depexts"
-      ~doc:"List the system packages your project's dependencies need"
+      ~doc:"List system packages required by the dependency closure"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "Some opam packages need C libraries or development tools that \
-             have to come from your operating system's package manager \
-             ($(b,apt), $(b,dnf), $(b,brew), and so on). This command \
-             solves the project's dependency tree and prints every \
-             such system package, tagged for the distribution you're \
-             running on.";
-          `P
-            "Typical use is piping into your package manager before a \
-             build, for example:";
+            "Solve the dep tree and print every system package \
+             (C library, build tool) it needs. Tagged for the current \
+             distro.";
           `Pre "  sudo apt install \\$(oi depexts)";
+          `S "OPTIONS";
           `P
-            "$(b,--by-package) groups the output by the opam package that \
-             requires each system dependency, so you can tell which \
-             package wants which library. Useful when diagnosing a \
-             $(b,./configure) error inside a single package.";
+            "$(b,--by-package) groups output by the opam package that \
+             needs each system dependency.";
           `P
-            "$(b,--os=NAME) pretends you're on a different distro and \
-             prints what you'd need there. Use this when scripting for \
-             multiple targets from one machine.";
+            "$(b,--os=NAME) prints what would be needed on another \
+             distro.";
+          `P
+            "$(b,--with) and $(b,--with-repo) extend the solve. Same \
+             forms as $(b,oi run).";
         ]
   in
   Cmd.v info
@@ -3733,27 +3646,20 @@ let repo_list_cmd =
   in
   let info =
     Cmd.info "list"
-      ~doc:"Show which overlays are registered in the reporepo"
+      ~doc:"List overlays registered in the reporepo"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "One line per handle, showing the current pinned commit, how \
-             it compares to the live upstream tip, and the upstream URL. \
-             Start here if you want to know what package collections \
-             $(b,oi) will look at when you run $(b,oi run) or $(b,oi \
-             sync) without explicit overrides.";
+            "One line per handle: pinned commit, upstream status, \
+             URL. Status comes from $(b,git ls-remote) (up to four in \
+             parallel):";
+          `I ("$(b,up-to-date)", "Pinned commit matches upstream.");
+          `I ("$(b,stale)", "Upstream has newer commits.");
+          `I ("$(b,unreachable)", "Remote refused or offline.");
           `P
-            "$(b,oi) re-runs $(b,git ls-remote) per entry (capped at four \
-             in parallel) and flags each row as $(b,up-to-date) if the \
-             pinned commit equals the upstream tip, $(b,stale) (with the \
-             live tip's short sha) if it's behind, or $(b,unreachable) \
-             when the remote refuses. Pass $(b,--no-check) to skip the \
-             network round-trip when you're offline or in a hurry.";
-          `P
-            "A stale row is actionable: $(b,oi repo bump <handle>) \
-             inside the reporepo's working copy rolls the pin forward \
-             and writes a new $(b,YYYYMMDD.N) overlay entry.";
+            "Fix a stale row with $(b,oi repo bump HANDLE). Pass \
+             $(b,--no-check) to skip the network call.";
         ]
   in
   Cmd.v info
