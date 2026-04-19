@@ -50,15 +50,13 @@ let resolve_in_path ~env exe =
     match path_of_env env with
     | None -> exe
     | Some path ->
-        let found =
-          String.split_on_char ':' path
-          |> List.find_map (function
-            | "" -> None
-            | d ->
-                let candidate = d / exe in
-                if is_executable candidate then Some candidate else None)
-        in
-        Stdlib.Option.value ~default:exe found
+        String.split_on_char ':' path
+        |> List.find_map (function
+          | "" -> None
+          | d ->
+              let candidate = d / exe in
+              if is_executable candidate then Some candidate else None)
+        |> Stdlib.Option.value ~default:exe
 
 let find_in_path ~env exe =
   let s = resolve_in_path ~env exe in
@@ -238,7 +236,6 @@ let run ?(cache_urls = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~os_key plan =
     { sys; fs; clock; root = Eio.Path.(fs / plan.Plan.cache_root); os_key }
   in
   let prefix = plan.cache_root / "build" / "prefix" in
-  (* Clean and create prefix directories *)
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix);
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / prefix);
   List.iter

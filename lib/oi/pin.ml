@@ -24,26 +24,15 @@ let url_key (url : OpamUrl.t) =
    next run re-enters the fetch branch below and wipes+retries. *)
 let sentinel_path src_dir = src_dir / ".oi-pin-ok"
 
-(* A cached [src_dir] is considered fresh when the sentinel exists and is
-   younger than [Repo.refresh_max_age]. [--refresh] forces a re-fetch
-   unconditionally, which is how users pick up new upstream commits on a
-   git pin between age-based refreshes. *)
-let cache_fresh ~refresh src_dir =
-  if refresh then false
-  else
-    let sentinel = sentinel_path src_dir in
-    if not (Sys.file_exists sentinel) then false
-    else
-      try
-        let age = Unix.time () -. (Unix.stat sentinel).Unix.st_mtime in
-        age <= Repo.refresh_max_age
-      with Unix.Unix_error _ -> false
-
 let fetch_pin ~fs ~cache ~refresh (pin : Project.pin) =
   let root = Cache.pins_dir cache in
   let src_dir = root / "sources" / url_key pin.url in
   let sentinel = sentinel_path src_dir in
-  if cache_fresh ~refresh src_dir then src_dir
+  (* [--refresh] forces a re-fetch unconditionally, which is how users
+     pick up new upstream commits on a git pin between age-based
+     refreshes. *)
+  if Repo.cache_fresh ~refresh ~sentinel ~max_age:Repo.refresh_max_age then
+    src_dir
   else begin
     Log.info (fun m ->
         m "Fetching pin %s from %s"

@@ -13,6 +13,7 @@ let create ~root fs =
 let root t = Eio.Path.(t.fs / t.root)
 let root_s t = t.root
 let dune_root t = t.root / "dune"
+let fs t = t.fs
 
 (* -- Script run cache ---------------------------------------------------- *)
 
@@ -67,7 +68,8 @@ let size ~sys path =
   try
     let s = String.trim (D10.Sysops.Cmd.run_out sys [ "du"; "-sk"; path_s ]) in
     let kb =
-      try Int64.of_string (List.hd (String.split_on_char '\t' s)) with _ -> 0L
+      Int64.of_string_opt (List.hd (String.split_on_char '\t' s))
+      |> Stdlib.Option.value ~default:0L
     in
     Int64.mul kb 1024L
   with _ -> 0L

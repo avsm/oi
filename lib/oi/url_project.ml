@@ -56,21 +56,12 @@ let url_key (url : OpamUrl.t) =
 
 let sentinel_path src_dir = src_dir / ".oi-pin-ok"
 
-let cache_fresh ~refresh src_dir =
-  if refresh then false
-  else
-    let sentinel = sentinel_path src_dir in
-    if not (Sys.file_exists sentinel) then false
-    else
-      try
-        let age = Unix.time () -. (Unix.stat sentinel).Unix.st_mtime in
-        age <= Repo.refresh_max_age
-      with Unix.Unix_error _ -> false
-
 let fetch ~fs ~cache ~refresh url =
   let root = Cache.pins_dir cache in
   let src_dir = root / "sources" / url_key url in
-  if cache_fresh ~refresh src_dir then src_dir
+  let sentinel = sentinel_path src_dir in
+  if Repo.cache_fresh ~refresh ~sentinel ~max_age:Repo.refresh_max_age then
+    src_dir
   else begin
     Log.info (fun m ->
         m "Cloning URL project %s" (OpamUrl.to_string url));
@@ -107,10 +98,10 @@ let synth_pin ~src_dir url name =
     match
       OpamFile.OPAM.read_opt (OpamFile.make (OpamFilename.raw opam_path))
     with
-    | Some opam -> (
-        match OpamFile.OPAM.version_opt opam with
-        | Some v -> OpamPackage.Version.to_string v
-        | None -> "dev")
+    | Some opam ->
+        OpamFile.OPAM.version_opt opam
+        |> Stdlib.Option.map OpamPackage.Version.to_string
+        |> Stdlib.Option.value ~default:"dev"
     | None -> "dev"
   in
   let pkg =

@@ -43,9 +43,8 @@ let plan ctx ?d10 ~packages_dirs pkgs =
           |> List.filter (fun n -> OpamPackage.Name.Set.mem n in_solution)
         in
         let opam =
-          match Solve.load_opam packages_dirs pkg with
-          | Some o -> o
-          | None -> OpamFile.OPAM.create pkg
+          Solve.load_opam packages_dirs pkg
+          |> Stdlib.Option.value ~default:(OpamFile.OPAM.create pkg)
         in
         let trans =
           List.fold_left

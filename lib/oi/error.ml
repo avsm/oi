@@ -1,3 +1,7 @@
+[@@@ai_disclosure "ai-assisted"]
+[@@@ai_model "claude-opus-4-7"]
+[@@@ai_provider "Anthropic"]
+
 type t =
   | Not_found of { target : string; msg : string }
   | No_solution of { msg : string }

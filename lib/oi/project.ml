@@ -134,52 +134,65 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
 
 (* -- Merging across *.opam files ----------------------------------------- *)
 
-let merge_extra_repos entries =
-  (* Preserve first-occurrence order; detect conflicts on repeated name
-     with a different URL. *)
-  let seen : (string, string * string) Hashtbl.t = Hashtbl.create 8 in
+(* Dedup-and-conflict-check: preserve first-occurrence order, drop repeats
+   that agree under [equal], and raise [Error.config_error] via [on_conflict]
+   when two entries share a [key] but disagree. [equal] defaults to physical
+   equality, suitable for the plain-string dedup case (overlays). *)
+let dedup_with_conflict_check (type a) ~(key : a -> string)
+    ?(equal : (a -> a -> bool) = ( == ))
+    ?(on_conflict : (prev:a -> curr:a -> string -> unit) option) (items : a list)
+    : a list =
+  let seen : (string, a) Hashtbl.t = Hashtbl.create 8 in
   let ordered = ref [] in
   List.iter
-    (fun (declared_in, name, url) ->
-      match Hashtbl.find_opt seen name with
+    (fun entry ->
+      let k = key entry in
+      match Hashtbl.find_opt seen k with
       | None ->
-          Hashtbl.add seen name (declared_in, url);
-          ordered := { name; url } :: !ordered
-      | Some (_, prev_url) when prev_url = url -> ()
-      | Some (prev_file, prev_url) ->
-          Error.config_error
-            "package %s and %s disagree on x-opam-repositories entry %s: %s vs \
-             %s"
-            prev_file declared_in name prev_url url)
-    entries;
+          Hashtbl.add seen k entry;
+          ordered := entry :: !ordered
+      | Some prev when equal prev entry -> ()
+      | Some prev -> (
+          match on_conflict with
+          | Some f -> f ~prev ~curr:entry k
+          | None -> ()))
+    items;
   List.rev !ordered
 
-let merge_pins entries =
-  let seen : (OpamPackage.Name.t, pin) Hashtbl.t = Hashtbl.create 8 in
-  let ordered = ref [] in
-  List.iter
-    (fun (pin : pin) ->
-      let name = OpamPackage.name pin.pkg in
-      match Hashtbl.find_opt seen name with
-      | None ->
-          Hashtbl.add seen name pin;
-          ordered := pin :: !ordered
-      | Some prev
-        when OpamPackage.equal prev.pkg pin.pkg
-             && OpamUrl.to_string prev.url = OpamUrl.to_string pin.url ->
-          ()
-      | Some prev ->
-          Error.config_error
-            "package %s and %s disagree on pin-depends entry %s: %s (%s) vs %s \
-             (%s)"
-            prev.declared_in pin.declared_in
-            (OpamPackage.Name.to_string name)
-            (OpamPackage.version_to_string prev.pkg)
-            (OpamUrl.to_string prev.url)
-            (OpamPackage.version_to_string pin.pkg)
-            (OpamUrl.to_string pin.url))
-    entries;
-  List.rev !ordered
+let merge_extra_repos entries =
+  (* [entries] is [(declared_in, name, url) list]; stash [declared_in] in
+     the pre-image, then project away once dedup is done. *)
+  dedup_with_conflict_check
+    ~key:(fun (_, name, _) -> name)
+    ~equal:(fun (_, _, u1) (_, _, u2) -> u1 = u2)
+    ~on_conflict:(fun ~prev ~curr name ->
+      let prev_file, _, prev_url = prev in
+      let declared_in, _, url = curr in
+      Error.config_error
+        "package %s and %s disagree on x-opam-repositories entry %s: %s vs %s"
+        prev_file declared_in name prev_url url)
+    entries
+  |> List.map (fun (_, name, url) -> { name; url })
+
+let merge_pins (entries : pin list) : pin list =
+  dedup_with_conflict_check
+    ~key:(fun pin -> OpamPackage.Name.to_string (OpamPackage.name pin.pkg))
+    ~equal:(fun p1 p2 ->
+      OpamPackage.equal p1.pkg p2.pkg
+      && OpamUrl.to_string p1.url = OpamUrl.to_string p2.url)
+    ~on_conflict:(fun ~prev ~curr name ->
+      Error.config_error
+        "package %s and %s disagree on pin-depends entry %s: %s (%s) vs %s (%s)"
+        prev.declared_in curr.declared_in name
+        (OpamPackage.version_to_string prev.pkg)
+        (OpamUrl.to_string prev.url)
+        (OpamPackage.version_to_string curr.pkg)
+        (OpamUrl.to_string curr.url))
+    entries
+
+let merge_overlays (handles : string list) : string list =
+  (* Plain string dedup — no conflict possible. *)
+  dedup_with_conflict_check ~key:(fun s -> s) handles
 
 (* -- Public entry point -------------------------------------------------- *)
 
@@ -234,13 +247,7 @@ let load ~fs dir =
   let pins = merge_pins pin_entries in
   (* Overlays: union across *.opam, preserving first-occurrence order. *)
   let overlays =
-    let seen = Hashtbl.create 4 in
     List.concat_map (fun (_, raw) -> raw.raw_overlays) per_file_raws
-    |> List.filter (fun h ->
-           if Hashtbl.mem seen h then false
-           else begin
-             Hashtbl.add seen h ();
-             true
-           end)
+    |> merge_overlays
   in
   { deps; local_packages; extra_repos; pins; overlays }

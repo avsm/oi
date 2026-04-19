@@ -26,8 +26,8 @@ type dep = {
 }
 (** A dependency parsed from the opam attribute or --with flag. *)
 
-val parse_deps_from_file : string -> dep list
-(** [parse_deps_from_file path] reads the first line of [path] and parses
+val parse_deps_from_file : fs:Eio.Fs.dir_ty Eio.Path.t -> string -> dep list
+(** [parse_deps_from_file ~fs path] reads the first line of [path] and parses
     [[\@\@\@opam pkg1>=1.0 pkg2 ...]] into a dependency list. Returns [[]] if no
     attribute is found. *)
 

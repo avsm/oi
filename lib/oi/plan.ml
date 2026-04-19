@@ -1,5 +1,9 @@
 (** Execution plan: resolved build/install commands for all packages. *)
 
+[@@@ai_disclosure "ai-assisted"]
+[@@@ai_model "claude-opus-4-7"]
+[@@@ai_provider "Anthropic"]
+
 let ( / ) = Filename.concat
 
 type source_info = { url : string; checksums : string list }
@@ -97,7 +101,6 @@ let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
               | Action.Binary -> `Binary
               | Action.Source -> `Source
             in
-            (* Dependency layers needed for this build *)
             let dep_layers =
               List.filter_map
                 (fun dep_name ->
@@ -115,14 +118,13 @@ let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
                 node.Action.deps
             in
             let source =
-              match OpamFile.OPAM.url opam with
-              | None -> None
-              | Some urlf ->
-                  let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
-                  let checksums =
-                    List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
-                  in
-                  Some { url; checksums }
+              OpamFile.OPAM.url opam
+              |> Stdlib.Option.map (fun urlf ->
+                let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
+                let checksums =
+                  List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
+                in
+                { url; checksums })
             in
             let extra_sources =
               List.map
@@ -139,9 +141,7 @@ let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
               List.map
                 (fun (base, filter) ->
                   let file = OpamFilename.Base.to_string base in
-                  let filter =
-                    Stdlib.Option.map (fun f -> OpamFilter.to_string f) filter
-                  in
+                  let filter = Stdlib.Option.map OpamFilter.to_string filter in
                   { file; filter })
                 (OpamFile.OPAM.patches opam)
             in

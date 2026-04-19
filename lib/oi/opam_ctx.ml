@@ -51,7 +51,7 @@ let load_opams_from_dir dir =
               let pkg_dir = name_dir / pkg_s in
               let opam_path = pkg_dir / "opam" in
               if Sys.file_exists opam_path then
-                begin try
+                try
                   let opam =
                     OpamFile.OPAM.read
                       (OpamFile.make (OpamFilename.raw opam_path))
@@ -59,8 +59,7 @@ let load_opams_from_dir dir =
                   let pkg = OpamPackage.of_string pkg_s in
                   opams := OpamPackage.Map.add pkg opam !opams
                 with _ ->
-                  Log.debug (fun m -> m "Could not parse %s" opam_path)
-                end)
+                  Log.debug (fun m -> m "Could not parse %s" opam_path))
             (Sys.readdir name_dir))
       (Sys.readdir dir);
   !opams
@@ -144,7 +143,6 @@ let create ~prefix ~packages_dirs ~conf =
   let root = OpamFilename.Dir.of_string switch_parent in
   let switch = OpamSwitch.of_string switch_name in
 
-  (* Create minimal switch directory structure *)
   OpamFilename.mkdir root;
   OpamFilename.mkdir (OpamFilename.Dir.of_string prefix);
   let meta_dir = OpamFilename.Dir.of_string (prefix / ".opam-switch") in
@@ -175,7 +173,6 @@ let create ~prefix ~packages_dirs ~conf =
 
   OpamStateConfig.update ~root_dir:root ();
 
-  (* Load all opam files from repos *)
   let all_opams =
     List.fold_left
       (fun acc dir ->

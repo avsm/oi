@@ -143,7 +143,7 @@ let materialize_with_deps ~fs ~sys ~cache ?refresh with_deps =
    entries, including their transitive overlay deps. Later handles in
    the input list are given highest priority: they come first in the
    output so the solver's first-wins fold favours them. *)
-let overlay_extras_of_handles ~sys handles =
+let overlay_extras_of_handles ~fs ~sys handles =
   if handles = [] then []
   else begin
     let path = reporepo_path () in
@@ -152,7 +152,7 @@ let overlay_extras_of_handles ~sys handles =
       | Some v when v <> "" -> v
       | _ -> Oi.Reporepo.default_url
     in
-    Oi.Reporepo.ensure_clone ~sys ~path ~url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path ~url;
     log_overlay "resolving handles %s against reporepo %s"
       (String.concat ", " handles) path;
     let entries = Oi.Reporepo.load ~path in
@@ -186,9 +186,9 @@ let overlay_extras_of_handles ~sys handles =
       resolved
   end
 
-let cli_extra_repos ~sys tokens =
+let cli_extra_repos ~fs ~sys tokens =
   let urls, handles = List.partition is_url_like tokens in
-  overlay_extras_of_handles ~sys handles
+  overlay_extras_of_handles ~fs ~sys handles
   @ List.map cli_extra_repo_of_url urls
 
 (* A ([handle:pkg...]) shortcut parsed out of a TARGET or [--with] token,
@@ -600,8 +600,8 @@ let with_eio_root f =
   Oi.Signals.install ~sw;
   f env sw
 
-let get_packages_dirs ?(refresh = false) ~sys ~data_dir () =
-  Oi.Reporepo.ensure_base ~sys ~data_dir ~refresh ()
+let get_packages_dirs ?(refresh = false) ~fs ~sys ~data_dir () =
+  Oi.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh ()
 
 
 
@@ -741,10 +741,10 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     ~os_key ?(dry_run = false) ?(extra_repos = []) ?(pins = [])
     ?(refresh = false) ?project_dir:_ ?remote ?jobs
     ?(constraints = OpamPackage.Name.Map.empty) names =
-  let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
+  let extra_pkg_dirs = Oi.Repo.ensure_extra ~fs ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
   let packages_dirs =
-    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~sys ~data_dir ()
+    Stdlib.Option.to_list pin_dir @ extra_pkg_dirs @ get_packages_dirs ~fs ~sys ~data_dir ()
   in
   log_overlay "solver packages_dirs (first-wins, %d entries):%s"
     (List.length packages_dirs)
@@ -820,7 +820,7 @@ let assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes =
 
 let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
     ?remote script_path cli_deps args =
-  let file_deps = Oi.Script.parse_deps_from_file script_path in
+  let file_deps = Oi.Script.parse_deps_from_file ~fs script_path in
   let all_deps = Oi.Script.dedup (file_deps @ cli_deps) in
   if all_deps = [] then
     Oi.Error.msg
@@ -838,7 +838,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
               ~dune_cache_root:(Oi.Cache.dune_root cache) ())
          (cached_bin :: args))
   else begin
-    let packages_dirs = get_packages_dirs ~sys ~data_dir () in
+    let packages_dirs = get_packages_dirs ~fs ~sys ~data_dir () in
     let ocaml_name = OpamPackage.Name.of_string "ocaml" in
     let dep_names =
       List.filter_map
@@ -898,7 +898,7 @@ let run_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
@@ -973,7 +973,7 @@ let run_cmd =
        list so CLI-supplied ones take priority (first-wins at repos
        level; later arguments stack atop). *)
     let with_repos = project_overlays @ with_repos in
-    let cli_extras = cli_extra_repos ~sys with_repos in
+    let cli_extras = cli_extra_repos ~fs ~sys with_repos in
     let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
     (* Pin each [handle:pkg] (from TARGET or [--with]) to whatever
        version the overlay ships, so a dev-tagged version (e.g.
@@ -986,7 +986,7 @@ let run_cmd =
       if handle_pins = [] then OpamPackage.Name.Map.empty
       else
         let overlay_pkg_dirs =
-          Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras
+          Oi.Repo.ensure_extra ~fs ~data_dir ~refresh cli_extras
         in
         List.fold_left
           (fun acc { handle; pkg; user_constr } ->
@@ -1075,7 +1075,7 @@ let run_cmd =
         Oi.Error.not_found target "file not found: %s" target;
       (* For scripts, solve deps first to get a prefix with the compiler *)
       let all_script_deps =
-        Oi.Script.parse_deps_from_file target @ extra_deps
+        Oi.Script.parse_deps_from_file ~fs target @ extra_deps
       in
       let ocaml_name = OpamPackage.Name.of_string "ocaml" in
       let dep_opam_names =
@@ -1185,8 +1185,8 @@ let run_cmd =
           in
           let packages_dirs =
             Stdlib.Option.to_list pin_dir
-            @ Oi.Repo.ensure_extra ~data_dir ~refresh all_extras
-            @ get_packages_dirs ~sys ~data_dir ~refresh ()
+            @ Oi.Repo.ensure_extra ~fs ~data_dir ~refresh all_extras
+            @ get_packages_dirs ~fs ~sys ~data_dir ~refresh ()
           in
           let package_exists name =
             List.exists (fun dir -> Sys.file_exists (dir / name)) packages_dirs
@@ -1325,7 +1325,7 @@ let plan_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
     let extra_deps, url_project =
@@ -1342,14 +1342,14 @@ let plan_cmd =
     let project_overlays = project_overlays @ url_project.overlays in
     let with_repos = project_overlays @ with_repos in
     let all_extras =
-      merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:project_extras
+      merge_extras ~cli:(cli_extra_repos ~fs ~sys with_repos) ~project:project_extras
     in
-    let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
+    let extra_pkg_dirs = Oi.Repo.ensure_extra ~fs ~data_dir ~refresh all_extras in
     let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh project_pins in
     let packages_dirs =
       Stdlib.Option.to_list pin_dir
       @ extra_pkg_dirs
-      @ get_packages_dirs ~sys ~data_dir ()
+      @ get_packages_dirs ~fs ~sys ~data_dir ()
     in
     let extra_constraints = Oi.Script.constraints extra_deps in
     let extra_names =
@@ -1432,14 +1432,14 @@ let env_cmd =
         (* Fall back to a minimal compiler-only prefix, optionally
            extended with CLI extras + with-deps. *)
         init_opam_root ~fs ~data_dir;
-        ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+        ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
         let conf = make_conf ~platform in
         let extra_cli, url_project =
           materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
         in
         let extras =
           merge_extras
-            ~cli:(cli_extra_repos ~sys (with_repos @ url_project.overlays))
+            ~cli:(cli_extra_repos ~fs ~sys (with_repos @ url_project.overlays))
             ~project:url_project.extra_repos
         in
         let extra_constraints = Oi.Script.constraints extra_cli in
@@ -1727,7 +1727,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
     else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
   in
   init_opam_root ~fs ~data_dir;
-  ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+  ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
   let project = Oi.Project.load ~fs cwd in
   let extra_cli, url_project =
     materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
@@ -1743,7 +1743,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
       (String.concat ", " (project.overlays @ url_project.overlays));
   let with_repos = project.overlays @ url_project.overlays @ with_repos in
   let all_extras =
-    merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+    merge_extras ~cli:(cli_extra_repos ~fs ~sys with_repos)
       ~project:(project.extra_repos @ url_project.extra_repos)
   in
   if all_extras <> [] then
@@ -2563,6 +2563,40 @@ let registry_index_cmd =
 
 (* -- registry ------------------------------------------------------------ *)
 
+(* Remove a sqlite scratch file together with its WAL/SHM siblings.
+   sqlite in WAL journal_mode leaves [-wal] and [-shm] files next to
+   the main [.db] on close, and plain [Sys.remove] on just the [.db]
+   leaves orphans behind — visible in the published sources/ tree. *)
+let remove_sqlite_scratch path =
+  List.iter
+    (fun p -> try Sys.remove p with Sys_error _ -> ())
+    [ path; path ^ "-wal"; path ^ "-shm"; path ^ "-journal" ]
+
+(* Collapse any WAL/SHM sidecars next to [path] into the main database.
+   Runs [PRAGMA journal_mode=DELETE], which checkpoints outstanding WAL
+   pages into the main file and removes the [-wal]/[-shm] files. Used
+   at the tail of [registry export] so the published index.db files
+   are self-contained — rsync'ing the sources/ tree doesn't need to
+   copy or create WAL siblings on the remote. *)
+let finalize_sqlite_for_publish path =
+  if Sys.file_exists path then begin
+    (try
+       let db = Sqlite3.db_open path in
+       Fun.protect
+         ~finally:(fun () -> ignore (Sqlite3.db_close db))
+         (fun () ->
+           ignore (Sqlite3.exec db "PRAGMA journal_mode=DELETE"))
+     with _ -> ());
+    (* sqlite's WAL→DELETE transition truncates the [-wal] but may
+       leave the zero-byte [-shm] sidecar behind. At this point both
+       are orphans — the main db owns no WAL state — so unlink any
+       leftovers directly. *)
+    List.iter
+      (fun suffix ->
+        try Sys.remove (path ^ suffix) with Sys_error _ -> ())
+      [ "-wal"; "-shm"; "-journal" ]
+  end
+
 (* Fetch [registry]/<rel> to [dst] via curl. Returns true on success,
    false otherwise (404, network error, empty response). The caller
    decides how to react (typically: skip the remote merge). *)
@@ -2607,7 +2641,7 @@ let do_registry_export ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
         (try D10.Index.merge_remote db ~remote_path:scratch
          with Failure msg ->
            Logs.warn (fun m -> m "Failed to merge remote layer index: %s" msg));
-        try Sys.remove scratch with Sys_error _ -> ()
+        remove_sqlite_scratch scratch
       end
       else
         Logs.info (fun m ->
@@ -2616,6 +2650,7 @@ let do_registry_export ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
     end;
     let nl, nb, _ = D10.Index.stats db ~os_key in
     D10.Index.close db;
+    finalize_sqlite_for_publish index_path;
     Fmt.pr "  %s: %d layers, %d binaries@." os_key nl nb
   end;
   (* Sources are OS-independent — publish them once at the registry
@@ -2629,16 +2664,17 @@ let do_registry_export ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
     if fetch_remote_to ~sys ~fs ~registry ~rel:"sources/index.db" ~dst:scratch
     then begin
       let index_path = output / "sources" / "index.db" in
-      (try Oi.Source_mirror.merge_remote ~index_path ~remote_path:scratch
+      (try Oi.Source_mirror.merge_remote ~fs ~index_path ~remote_path:scratch
        with Failure msg ->
          Logs.warn (fun m -> m "Failed to merge remote sources index: %s" msg));
-      try Sys.remove scratch with Sys_error _ -> ()
+      remove_sqlite_scratch scratch
     end
     else
       Logs.info (fun m ->
           m "No remote sources index at %s/sources/index.db (skipping merge)"
             registry)
   end;
+  finalize_sqlite_for_publish (output / "sources" / "index.db");
   if n_sources > 0 then
     Fmt.pr "  sources: %d blob(s) at %s/sources/@." n_sources output
 
@@ -2831,7 +2867,7 @@ let registry_build_cmd =
       bootstrap env cache_dir
     in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     (* Classify each input into a plain target or an overlay form.
@@ -2856,11 +2892,11 @@ let registry_build_cmd =
     in
     let with_repos = with_repos @ url_project.overlays in
     let cli_extras_records =
-      merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+      merge_extras ~cli:(cli_extra_repos ~fs ~sys with_repos)
         ~project:url_project.extra_repos
     in
     let extra_pkg_dirs =
-      Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras_records
+      Oi.Repo.ensure_extra ~fs ~data_dir ~refresh cli_extras_records
     in
     (* URL-project pins materialize into a synthetic packages/ tree
        the solver consumes ahead of everything else, so the URL's
@@ -2908,7 +2944,7 @@ let registry_build_cmd =
     let packages_dirs =
       Stdlib.Option.to_list pin_dir
       @ extra_pkg_dirs
-      @ get_packages_dirs ~sys ~data_dir ()
+      @ get_packages_dirs ~fs ~sys ~data_dir ()
     in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
@@ -3150,7 +3186,7 @@ let depexts_cmd =
     in
     let cwd_s, _ = resolved_cwd fs in
     init_opam_root ~fs ~data_dir;
-    ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
+    ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let proj = Oi.Project.load ~fs cwd_s in
     let extra_cli, url_project =
       materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
@@ -3166,12 +3202,12 @@ let depexts_cmd =
         (proj.pins @ url_project.pins)
     in
     let all_extras =
-      merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+      merge_extras ~cli:(cli_extra_repos ~fs ~sys with_repos)
         ~project:(proj.extra_repos @ url_project.extra_repos)
     in
-    let extras = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
+    let extras = Oi.Repo.ensure_extra ~fs ~data_dir ~refresh all_extras in
     let packages_dirs =
-      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~sys ~data_dir ()
+      Stdlib.Option.to_list pin_dir @ extras @ get_packages_dirs ~fs ~sys ~data_dir ()
     in
     let conf =
       let c = make_conf ~platform in
@@ -3728,7 +3764,7 @@ let repo_list_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     match Oi.Reporepo.load ~path:reporepo with
     | [] -> Fmt.pr "Reporepo %s is empty.@." reporepo
     | entries ->
@@ -3796,7 +3832,7 @@ let repo_show_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     let entries = Oi.Reporepo.load ~path:reporepo in
     let matches =
       List.filter
@@ -3885,14 +3921,14 @@ let repo_add_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
       | _ -> Some (List.map parse_depend_spec depend_specs)
     in
     let e =
-      Oi.Reporepo.add ~sys ~path:reporepo ~handle ~url ?ref_ ?depends ()
+      Oi.Reporepo.add ~fs ~sys ~path:reporepo ~handle ~url ?ref_ ?depends ()
     in
     Fmt.pr "Added %s.%s@ url=%s@ commit=%s@ at %s@." e.handle e.version
       e.url e.commit e.opam_path;
@@ -3969,13 +4005,13 @@ let repo_bump_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
       | _ -> Some (List.map parse_depend_spec depend_specs)
     in
-    (match Oi.Reporepo.bump ~sys ~path:reporepo ~handle ?url ?ref_ ?depends ()
+    (match Oi.Reporepo.bump ~fs ~sys ~path:reporepo ~handle ?url ?ref_ ?depends ()
      with
     | `Bumped e ->
         Fmt.pr "Bumped %s to %s@ commit=%s@ at %s@." e.handle e.version
@@ -4055,9 +4091,9 @@ let repo_remove_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     let handle, version = parse_handle_version handle_spec in
-    Oi.Reporepo.remove ~path:reporepo ~handle ?version ();
+    Oi.Reporepo.remove ~fs ~path:reporepo ~handle ?version ();
     Fmt.pr "Removed %s%s from %s@." handle
       (match version with None -> " (all versions)" | Some v -> "." ^ v)
       reporepo
@@ -4108,7 +4144,7 @@ let repo_push_cmd =
         ~stderr:(Eio.Stdenv.stderr env)
         ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
     Fmt.pr "%a %s@." Fmt.(styled `Bold string) "reporepo:" reporepo;
     (match push_url with
     | None -> ()

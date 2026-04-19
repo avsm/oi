@@ -68,15 +68,11 @@ let exec db sql =
       Fmt.failwith "source_mirror sqlite: %s: %s\nSQL: %s"
         (Sqlite3.Rc.to_string rc) (Sqlite3.errmsg db) sql
 
-let rec mkdir_p d =
-  if d = "/" || d = "." || d = "" || Sys.file_exists d then ()
-  else begin
-    mkdir_p (Filename.dirname d);
-    try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  end
+let mkdir_p ~fs d =
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / d)
 
 let open_db ~cache =
-  mkdir_p (dir ~cache);
+  mkdir_p ~fs:(Cache.fs cache) (dir ~cache);
   let db = Sqlite3.db_open (db_path ~cache) in
   exec db schema;
   exec db "PRAGMA journal_mode=WAL";
@@ -124,11 +120,11 @@ let dst_is_valid dst =
     true
   with Unix.Unix_error _ -> false
 
-let link_or_copy ~src ~dst =
+let link_or_copy ~fs ~src ~dst =
   let src = resolve_symlink src in
   if dst_is_valid dst then ()
   else begin
-    mkdir_p (Filename.dirname dst);
+    mkdir_p ~fs (Filename.dirname dst);
     (* Clear a stale broken symlink / orphan tmp at [dst] so that
        [rename] below can succeed. [Unix.unlink] works on symlinks
        (including broken ones) and silently no-ops on absent paths. *)
@@ -206,6 +202,7 @@ let record ~sys:_ ~cache ~package ?overlay ~kind ~url ~checksums () =
           let sha256_hash = OpamHash.compute ~kind:`SHA256 src_path in
           let sha256 = OpamHash.contents sha256_hash in
           let size = file_size src_path in
+          let fs = Cache.fs cache in
           with_db ~cache @@ fun db ->
           exec db "BEGIN TRANSACTION";
           exec db
@@ -218,7 +215,7 @@ let record ~sys:_ ~cache ~package ?overlay ~kind ~url ~checksums () =
           List.iter
             (fun ck ->
               let dst = path_of_checksum ~cache ck in
-              link_or_copy ~src:src_path ~dst;
+              link_or_copy ~fs ~src:src_path ~dst;
               let algo = OpamHash.(string_of_kind (kind ck)) in
               let value = OpamHash.contents ck in
               declared := (algo, value) :: !declared;
@@ -231,7 +228,7 @@ let record ~sys:_ ~cache ~package ?overlay ~kind ~url ~checksums () =
           (* Always ensure sha256 path exists, even if caller only passed md5. *)
           if not (List.exists (fun (a, _) -> a = "sha256") !declared) then begin
             let dst = path_of_checksum ~cache sha256_hash in
-            link_or_copy ~src:src_path ~dst;
+            link_or_copy ~fs ~src:src_path ~dst;
             exec db
               (Fmt.str
                  "INSERT OR IGNORE INTO source_checksums (algo, value, sha256) \
@@ -306,7 +303,9 @@ let list ~cache ?package () =
             | "extra" -> `Extra extra_name
             | other -> `Extra other
           in
-          let size = try Int64.of_string size with _ -> 0L in
+          let size =
+            Int64.of_string_opt size |> Stdlib.Option.value ~default:0L
+          in
           out :=
             {
               sha256;
@@ -424,12 +423,16 @@ let verify ~sys:_ ~cache =
    [remote_path], and INSERT OR IGNORE every row from the three mirror
    tables. Foreign keys between the three cascade on delete but not on
    insert — we rely on sha256 PKs/UNIQUEs and ON CONFLICT IGNORE. *)
-let merge_remote ~index_path ~remote_path =
-  mkdir_p (Filename.dirname index_path);
+let merge_remote ~fs ~index_path ~remote_path =
+  mkdir_p ~fs (Filename.dirname index_path);
   let db = Sqlite3.db_open index_path in
   Fun.protect ~finally:(fun () -> close_db db) @@ fun () ->
   exec db schema;
-  exec db "PRAGMA journal_mode=WAL";
+  (* DELETE journal mode (not WAL) so no [-wal]/[-shm] siblings are
+     left next to the published index.db. This is a one-shot batch
+     write published as a single file; WAL's concurrent-reader
+     benefits don't apply. *)
+  exec db "PRAGMA journal_mode=DELETE";
   exec db "PRAGMA synchronous=NORMAL";
   exec db "PRAGMA foreign_keys=ON";
   exec db (Fmt.str "ATTACH DATABASE %s AS remote" (quote remote_path));
@@ -456,12 +459,13 @@ let export ~cache ~dst =
   let src_dir = dir ~cache in
   if not (Sys.file_exists src_dir) then 0
   else
+    let fs = Cache.fs cache in
     let dst_root = Eio.Path.(dst / "sources") in
     let dst_s = Eio.Path.native_exn dst_root in
-    mkdir_p dst_s;
+    mkdir_p ~fs dst_s;
     (* Copy database. *)
     if Sys.file_exists (db_path ~cache) then
-      link_or_copy ~src:(db_path ~cache) ~dst:(dst_s / "index.db");
+      link_or_copy ~fs ~src:(db_path ~cache) ~dst:(dst_s / "index.db");
     (* Walk algo dirs: md5/, sha256/, sha512/. *)
     let algo_dirs = [ "md5"; "sha256"; "sha512" ] in
     let count = ref 0 in
@@ -480,7 +484,7 @@ let export ~cache ~dst =
                     let sp = shard_src / hash in
                     if not (Sys.is_directory sp) then begin
                       let dp = dst_s / algo / shard / hash in
-                      link_or_copy ~src:sp ~dst:dp;
+                      link_or_copy ~fs ~src:sp ~dst:dp;
                       incr count
                     end)
                   files

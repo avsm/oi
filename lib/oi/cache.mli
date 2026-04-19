@@ -10,6 +10,10 @@ val create : root:string -> Eio.Fs.dir_ty Eio.Path.t -> t
 val root : t -> Eio.Fs.dir_ty Eio.Path.t
 val root_s : t -> string
 val dune_root : t -> string
+val fs : t -> Eio.Fs.dir_ty Eio.Path.t
+(** The underlying filesystem capability used to construct the cache; exposed
+    so modules that already thread a [Cache.t] don't need to duplicate the
+    [fs] argument on every internal helper. *)
 
 (** {1 Script run cache} *)
 

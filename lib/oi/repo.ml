@@ -70,21 +70,25 @@ let dir_needs_refresh dir =
     Unix.time () -. st.Unix.st_mtime > refresh_max_age
   with Unix.Unix_error _ -> true
 
+(* -- Sentinel freshness (shared with Pin, Url_project) ------------------ *)
+
+(* A sentinel file proves a cache entry was populated cleanly (partial
+   fetches don't leave one behind). [cache_fresh] is [true] iff the
+   sentinel exists, is younger than [max_age], and the caller didn't
+   ask for a forced refresh. *)
+let cache_fresh ~refresh ~sentinel ~max_age =
+  if refresh then false
+  else if not (Sys.file_exists sentinel) then false
+  else
+    try
+      let age = Unix.time () -. (Unix.stat sentinel).Unix.st_mtime in
+      age <= max_age
+    with Unix.Unix_error _ -> false
+
 (* -- Ensure repos are cloned and fresh ----------------------------------- *)
 
-(* Recursive rmdir that doesn't care whether anything is actually
-   there; used to clear stale clones before re-pulling. *)
-let rec rmtree path =
-  try
-    if Sys.is_directory path then begin
-      Sys.readdir path |> Array.iter (fun n -> rmtree (path / n));
-      try Unix.rmdir path with Unix.Unix_error _ -> ()
-    end
-    else try Unix.unlink path with Unix.Unix_error _ -> ()
-  with Sys_error _ -> ()
-
 (* Common clone/pull logic shared by [ensure] and [ensure_extra]. *)
-let ensure_one ~refresh ~label ~url ~dir =
+let ensure_one ~fs ~refresh ~label ~url ~dir =
   let pkg_dir = dir / "packages" in
   if not (Sys.file_exists pkg_dir) then begin
     (* Nothing useful in [dir] even if it exists — a previous clone
@@ -95,7 +99,7 @@ let ensure_one ~refresh ~label ~url ~dir =
     if Sys.file_exists dir then begin
       Log.info (fun m ->
           m "Re-cloning %s (existing clone at %s has no packages/)" label dir);
-      rmtree dir
+      Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / dir)
     end;
     Log.info (fun m -> m "Cloning %s from %s..." label url);
     pull_repo ~label ~url_s:url ~dst:dir;
@@ -111,11 +115,11 @@ let ensure_one ~refresh ~label ~url ~dir =
           m "Failed to update %s: %s" label (Printexc.to_string exn))
   end
 
-let ensure_extra ~data_dir ?(refresh = false) extras =
+let ensure_extra ~fs ~data_dir ?(refresh = false) extras =
   List.map
     (fun (e : Project.extra_repo) ->
       let dir = repo_dir ~data_dir e.name in
-      ensure_one ~refresh ~label:e.name ~url:e.url ~dir;
+      ensure_one ~fs ~refresh ~label:e.name ~url:e.url ~dir;
       dir / "packages")
     extras
 

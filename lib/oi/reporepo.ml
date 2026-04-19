@@ -53,24 +53,18 @@ type root = { handle : string; version : string option }
 
 (* -- File IO helpers ----------------------------------------------------- *)
 
-let rec mkdir_p d =
-  if d = "/" || d = "." || d = "" || Sys.file_exists d then ()
-  else begin
-    mkdir_p (Filename.dirname d);
-    try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  end
+let mkdir_p ~fs d =
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / d)
 
-let write_file path content =
-  mkdir_p (Filename.dirname path);
-  let oc = open_out path in
-  Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
-      output_string oc content)
+let write_file ~fs path content =
+  mkdir_p ~fs (Filename.dirname path);
+  Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / path) content
 
 (* Clone the reporepo from [url] into [path] when [path] isn't already
    a git working copy. Never pulls once the clone exists: the user is
    expected to [cd] in, edit, commit, and push — any auto-pull would
    risk stomping on local commits or unstaged edits. *)
-let ensure_clone ~sys ~path ~url =
+let ensure_clone ~fs ~sys ~path ~url =
   let dot_git = path / ".git" in
   if Sys.file_exists dot_git then ()
   else if
@@ -83,7 +77,7 @@ let ensure_clone ~sys ~path ~url =
        it and retry"
       path
   else begin
-    mkdir_p (Filename.dirname path);
+    mkdir_p ~fs (Filename.dirname path);
     Log.info (fun m -> m "Cloning reporepo from %s to %s" url path);
     try
       Retry.with_attempts ~label:(Fmt.str "git clone %s" url) (fun () ->
@@ -432,7 +426,7 @@ let resolve entries ~roots =
 
 let clone_dir_name (e : entry) = "overlay-" ^ e.handle ^ "-" ^ e.version
 
-let materialize ~sys:_ ~data_dir ?(refresh = false) entries =
+let materialize ~fs ~sys:_ ~data_dir ?(refresh = false) entries =
   List.map
     (fun (e : entry) ->
       let name = clone_dir_name e in
@@ -444,7 +438,7 @@ let materialize ~sys:_ ~data_dir ?(refresh = false) entries =
       let url =
         if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
       in
-      Repo.ensure_one ~refresh ~label:name ~url ~dir;
+      Repo.ensure_one ~fs ~refresh ~label:name ~url ~dir;
       dir / "packages")
     entries
 
@@ -466,9 +460,9 @@ let base_entries () =
         resolve entries ~roots:[ { handle = "relocatable"; version = None } ]
         |> List.rev
 
-let ensure_base ~sys ~data_dir ?(refresh = false) () =
+let ensure_base ~fs ~sys ~data_dir ?(refresh = false) () =
   let path = env_path () in
-  ensure_clone ~sys ~path ~url:(env_url ());
+  ensure_clone ~fs ~sys ~path ~url:(env_url ());
   Log.debug (fun m -> m "ensure_base: reading reporepo %s" path);
   let entries = try load ~path with Error.E _ -> [] in
   match latest entries ~handle:"relocatable" with
@@ -495,7 +489,7 @@ let ensure_base ~sys ~data_dir ?(refresh = false) () =
           let url =
             if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
           in
-          Repo.ensure_one ~refresh ~label:name ~url ~dir;
+          Repo.ensure_one ~fs ~refresh ~label:name ~url ~dir;
           dir / "packages")
         base
 
@@ -547,18 +541,17 @@ let ls_remote_sha ~sys ?ref_ url =
               (fun (sha, r) -> if r = name then Some sha else None)
               refs
           in
-          match
-            Stdlib.Option.(
-              prefer "refs/heads/main" |> fun x ->
-              match x with Some _ -> x | None -> prefer "refs/heads/master")
-          with
+          match prefer "refs/heads/main" with
           | Some sha -> sha
           | None -> (
-              match refs with
-              | (sha, _) :: _ -> sha
-              | [] ->
-                  Error.config_error "git ls-remote %s returned no refs"
-                    url)))
+              match prefer "refs/heads/master" with
+              | Some sha -> sha
+              | None -> (
+                  match refs with
+                  | (sha, _) :: _ -> sha
+                  | [] ->
+                      Error.config_error "git ls-remote %s returned no refs"
+                        url))))
 
 (* -- Today's version ----------------------------------------------------- *)
 
@@ -622,27 +615,27 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name
         ds;
       Buffer.add_string buf "]\n");
   Printf.bprintf buf "x-oi-overlay: true\n";
-  (match ref_ with
-  | Some s -> Printf.bprintf buf "x-oi-ref: %s\n" (escape_string s)
-  | None -> ());
-  (match display_name with
-  | Some s -> Printf.bprintf buf "x-oi-display-name: %s\n" (escape_string s)
-  | None -> ());
-  (match origin_url with
-  | Some s -> Printf.bprintf buf "x-oi-origin-url: %s\n" (escape_string s)
-  | None -> ());
+  Stdlib.Option.iter
+    (fun s -> Printf.bprintf buf "x-oi-ref: %s\n" (escape_string s))
+    ref_;
+  Stdlib.Option.iter
+    (fun s -> Printf.bprintf buf "x-oi-display-name: %s\n" (escape_string s))
+    display_name;
+  Stdlib.Option.iter
+    (fun s -> Printf.bprintf buf "x-oi-origin-url: %s\n" (escape_string s))
+    origin_url;
   Buffer.contents buf
 
-let write_entry ~path ~handle ~version content =
+let write_entry ~fs ~path ~handle ~version content =
   let pkg_dir = path / "packages" / handle / (handle ^ "." ^ version) in
   let opam_path = pkg_dir / "opam" in
-  write_file opam_path content;
+  write_file ~fs opam_path content;
   opam_path
 
-let ensure_repo_marker ~path =
+let ensure_repo_marker ~fs ~path =
   let marker = path / "repo" in
   if not (Sys.file_exists marker) then
-    write_file marker "opam-version: \"2.0\"\n"
+    write_file ~fs marker "opam-version: \"2.0\"\n"
 
 (* -- add / bump / remove ------------------------------------------------ *)
 
@@ -665,7 +658,7 @@ let auto_base_depends entries ~handle =
     in
     List.filter_map Fun.id [ pin "relocatable"; pin "default" ]
 
-let add ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
+let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
     ?origin_url () =
   let entries = load ~path in
   if List.exists (fun (e : entry) -> e.handle = handle) entries then
@@ -684,11 +677,11 @@ let add ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
   let content =
     render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
   in
-  ensure_repo_marker ~path;
-  let opam_path = write_entry ~path ~handle ~version content in
+  ensure_repo_marker ~fs ~path;
+  let opam_path = write_entry ~fs ~path ~handle ~version content in
   { handle; version; url; commit; ref_; depends; opam_path }
 
-let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
+let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends () =
   let entries = load ~path in
   let prev =
     match latest entries ~handle with
@@ -736,17 +729,10 @@ let bump ~sys ~path ~handle ?url ?ref_ ?depends () =
       render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
         ~depends ~display_name:None ~origin_url:None
     in
-    let opam_path = write_entry ~path ~handle ~version content in
+    let opam_path = write_entry ~fs ~path ~handle ~version content in
     `Bumped { handle; version; url; commit; ref_; depends; opam_path }
 
-let rec rmtree_path p =
-  if Sys.file_exists p && Sys.is_directory p then begin
-    Sys.readdir p |> Array.iter (fun e -> rmtree_path (p / e));
-    try Unix.rmdir p with Unix.Unix_error _ -> ()
-  end
-  else try Unix.unlink p with Unix.Unix_error _ -> ()
-
-let remove ~path ~handle ?version () =
+let remove ~fs ~path ~handle ?version () =
   let entries = load ~path in
   let matches =
     List.filter
@@ -761,11 +747,11 @@ let remove ~path ~handle ?version () =
   List.iter
     (fun (e : entry) ->
       let pkg_dir = Filename.dirname e.opam_path in
-      rmtree_path pkg_dir)
+      Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / pkg_dir))
     matches;
   (* If no versions left, remove the handle directory too. *)
   let handle_dir = path / "packages" / handle in
   if
     Sys.file_exists handle_dir
     && Sys.readdir handle_dir |> Array.length = 0
-  then try Unix.rmdir handle_dir with Unix.Unix_error _ -> ()
+  then Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / handle_dir)

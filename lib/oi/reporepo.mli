@@ -50,6 +50,7 @@ val resolve : entry list -> roots:root list -> entry list
     version pins. *)
 
 val materialize :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
   sys:D10.Sysops.t ->
   data_dir:string ->
   ?refresh:bool ->
@@ -72,6 +73,7 @@ val materialize :
     hard-codes upstream URLs. *)
 
 val ensure_base :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
   sys:D10.Sysops.t ->
   data_dir:string ->
   ?refresh:bool ->
@@ -106,7 +108,12 @@ val default_url : string
 (** The upstream git URL the reporepo is cloned from when none is set
     via [$OI_REPOREPO_URL] or a per-command [--reporepo-url] flag. *)
 
-val ensure_clone : sys:D10.Sysops.t -> path:string -> url:string -> unit
+val ensure_clone :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  sys:D10.Sysops.t ->
+  path:string ->
+  url:string ->
+  unit
 (** Ensure a git working copy of [url] exists at [path]. A no-op when
     a [.git] directory is already present; an error when [path]
     exists but isn't empty and isn't a git clone. Never pulls once
@@ -149,6 +156,7 @@ val push :
     so the user sees the actual error. *)
 
 val add :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
   sys:D10.Sysops.t ->
   path:string ->
   handle:string ->
@@ -175,6 +183,7 @@ val add :
     already has entries in the reporepo. *)
 
 val bump :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
   sys:D10.Sysops.t ->
   path:string ->
   handle:string ->
@@ -203,7 +212,12 @@ val bump :
     [`Bumped new_entry]. Raises if [handle] is unknown. *)
 
 val remove :
-  path:string -> handle:string -> ?version:string -> unit -> unit
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  path:string ->
+  handle:string ->
+  ?version:string ->
+  unit ->
+  unit
 (** Delete a specific overlay version, or every version of a handle
     when [version] is omitted. *)
 
