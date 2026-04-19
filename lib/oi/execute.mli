@@ -14,6 +14,7 @@
 
 val run :
   ?cache_urls:OpamUrl.t list ->
+  ?jobs:int ->
   proc_mgr:_ Eio.Process.mgr ->
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   clock:D10.Config.clk ->
@@ -28,4 +29,10 @@ val run :
     [cache_urls] are passed through to [OpamRepository.pull_tree] / [pull_file]
     for every fetch so that opam probes local and/or remote source mirrors (e.g.
     {!Source_mirror.url}, {!Source_mirror.remote_url}) before falling back to
-    the upstream URL. *)
+    the upstream URL.
+
+    [jobs] caps the number of packages built in parallel within a stage. Each
+    in-flight build spawns subprocess pipes plus a recursive tree of compiler
+    processes, so raising this too high exhausts the process's [RLIMIT_NOFILE].
+    Resolution order: explicit [jobs] argument wins, then [OI_BUILD_PARALLELISM]
+    env var, then [min (cpu_count) 4]. *)

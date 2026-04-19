@@ -76,6 +76,23 @@ let with_repos_term =
            *.opam files."
         [ "with-repo" ])
 
+(* Common CLI flag: [-j N] / [--jobs N]. Available on every command that
+   builds — caps concurrent package builds within a stage to bound fd
+   and process pressure. Unset here (= None) defers to
+   [OI_BUILD_PARALLELISM] and then the executor's default. *)
+let jobs_term =
+  Arg.(
+    value
+    & opt (some int) None
+    & info ~docv:"N"
+        ~doc:
+          "Maximum number of packages to build in parallel within a stage. \
+           Each in-flight build spawns a tree of compiler subprocesses, so \
+           raising this too high can exhaust the process file-descriptor \
+           limit (macOS defaults to 256). Overrides \
+           $(b,OI_BUILD_PARALLELISM); default is $(b,min cpu-count 4)."
+        [ "j"; "jobs" ])
+
 (* Common CLI flag: [--with PKG], repeatable. Available on every command
    that solves — adds extra packages (optionally with version
    constraints, e.g. "fmt>=0.9") to the solver's root set so they end up
@@ -555,7 +572,22 @@ let parse_pkg_target s =
 (** Try fetching uncached [Source] layers from [remote]. Returns a new action
     plan with downloaded layers promoted to [Binary]. No-op when [remote] is
     [None] or every layer is already cached. *)
-let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
+(* Cap on concurrent registry layer downloads. Each download spawns a
+   curl subprocess (2 pipe fds + child) plus a tar extractor, so a
+   50-package stage without a cap blows past macOS's default 256-fd
+   rlim. Shares the same resolution as {!Oi.Execute.run}'s [?jobs]:
+   explicit arg wins, then [OI_BUILD_PARALLELISM], then default. *)
+let fetch_parallelism ?jobs () =
+  match jobs with
+  | Some n when n > 0 -> n
+  | _ ->
+      (match Sys.getenv_opt "OI_BUILD_PARALLELISM" with
+       | Some s -> (
+           match int_of_string_opt s with Some n when n > 0 -> n | _ -> 4)
+       | None -> min (Domain.recommended_domain_count ()) 4)
+
+let fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan
+    =
   match remote with
   | None -> build_plan
   | Some r ->
@@ -584,17 +616,16 @@ let fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan =
               m "Fetching %d layer(s) from registry (%d needed)..."
                 (List.length available)
                 (List.length source_hashes));
-          Eio.Fiber.all
-            (List.map
-               (fun hash () ->
-                 let sha256 =
-                   Option.map
-                     (fun (e : D10.Layer.index_entry) -> e.sha256)
-                     (Hashtbl.find_opt index hash)
-                 in
-                 if D10.Layer.pull_remote d10 ~remote:r ~hash ?sha256 () then
-                   Logs.info (fun m -> m "Fetched %s from registry" hash))
-               available);
+          Eio.Fiber.List.iter ~max_fibers:(fetch_parallelism ?jobs ())
+            (fun hash ->
+              let sha256 =
+                Option.map
+                  (fun (e : D10.Layer.index_entry) -> e.sha256)
+                  (Hashtbl.find_opt index hash)
+              in
+              if D10.Layer.pull_remote d10 ~remote:r ~hash ?sha256 () then
+                Logs.info (fun m -> m "Fetched %s from registry" hash))
+            available;
           Oi.Action.plan ctx ~d10 ~packages_dirs pkgs
         end
       end
@@ -619,7 +650,7 @@ let make_conf ~platform:(p : Osrel.t) : Oi.Opam_ctx.conf =
     [dry_run] is true, print the build plan and exit. *)
 let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     ~os_key ?(dry_run = false) ?(extra_repos = []) ?(pins = [])
-    ?(refresh = false) ?project_dir:_ ?remote
+    ?(refresh = false) ?project_dir:_ ?remote ?jobs
     ?(constraints = OpamPackage.Name.Map.empty) names =
   let extra_pkg_dirs = Oi.Repo.ensure_extra ~data_dir ~refresh extra_repos in
   let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh pins in
@@ -652,7 +683,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     exit 0
   end;
   let build_plan =
-    fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan
+    fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan
   in
   let hashes = Oi.Action.layer_hashes build_plan in
   (* Check if the requested packages' layers are cached *)
@@ -673,7 +704,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
       Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
         ~ocaml_version:conf.ocaml_version build_plan
     in
-    Oi.Execute.run ~proc_mgr ~fs
+    Oi.Execute.run ~proc_mgr ~fs ?jobs
       ~clock:(clock :> D10.Config.clk)
       ~sys ~os_key exec_plan;
     (* Invalidate any stale prefix cache *)
@@ -765,7 +796,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
 
 let run_cmd =
   let run () data_dir cache_dir refresh dry_run registry target with_deps
-      with_repos args =
+      with_repos jobs args =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -887,7 +918,7 @@ let run_cmd =
       let layer_hashes =
         solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
           ~os_key ~dry_run ~extra_repos:all_extras ~pins:project_pins ~refresh
-          ~project_dir:cwd_s ?remote ~constraints:extra_constraints names
+          ~project_dir:cwd_s ?remote ?jobs ~constraints:extra_constraints names
       in
       Logs.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
       let prefix =
@@ -957,7 +988,7 @@ let run_cmd =
         else
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
             ~conf ~os_key ~dry_run ~extra_repos:all_extras ~pins:project_pins
-            ~refresh ?remote ~constraints dep_opam_names
+            ~refresh ?remote ?jobs ~constraints dep_opam_names
       in
       if dry_run && dep_opam_names = [] then
         (* No deps to solve, but still in dry-run mode — just exit *)
@@ -1205,7 +1236,7 @@ let run_cmd =
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
       $ dry_run $ registry_term $ target $ with_deps_term $ with_repos_term
-      $ args)
+      $ jobs_term $ args)
 
 (* -- plan ---------------------------------------------------------------- *)
 
@@ -1312,7 +1343,7 @@ let plan_cmd =
 (* -- env ----------------------------------------------------------------- *)
 
 let env_cmd =
-  let run () data_dir cache_dir refresh with_repos with_deps =
+  let run () data_dir cache_dir refresh with_repos with_deps jobs =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -1345,7 +1376,7 @@ let env_cmd =
         in
         let layer_hashes =
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~refresh ~extra_repos:extras
+            ~conf ~os_key ~refresh ~extra_repos:extras ?jobs
             ~constraints:extra_constraints
             (OpamPackage.Name.of_string "ocaml" :: extra_names)
         in
@@ -1391,7 +1422,7 @@ let env_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ with_repos_term $ with_deps_term)
+      $ with_repos_term $ with_deps_term $ jobs_term)
 
 (* -- init ---------------------------------------------------------------- *)
 
@@ -1484,7 +1515,7 @@ let which_cmd =
    narration goes to Logs.info (hidden at default verbosity); otherwise
    it prints to stdout. *)
 let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
-    ?(with_deps = []) ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache
+    ?(with_deps = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache
     ~data_dir ~registry ~cwd () =
   let say fmt =
     if quiet then Fmt.kstr (fun s -> Logs.info (fun m -> m "%s" s)) fmt
@@ -1525,7 +1556,7 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   let layer_hashes =
     solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
       ~os_key ~extra_repos:all_extras ~pins:project.pins ~refresh
-      ~project_dir:cwd ~constraints:extra_constraints ?remote names
+      ~project_dir:cwd ~constraints:extra_constraints ?remote ?jobs names
   in
   let oi_dir = cwd / "_oi" in
   let prefix = oi_dir / "prefix" in
@@ -1562,7 +1593,7 @@ let needs_sync ~cwd ~prefix =
         opam_files
 
 let sync_cmd =
-  let run () data_dir cache_dir refresh registry with_repos with_deps =
+  let run () data_dir cache_dir refresh registry with_repos with_deps jobs =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -1570,7 +1601,7 @@ let sync_cmd =
     in
     let cwd, _ = resolved_cwd fs in
     ignore
-      (do_sync ~refresh ~with_repos ~with_deps ~proc_mgr ~fs ~clock ~sys
+      (do_sync ~refresh ~with_repos ~with_deps ?jobs ~proc_mgr ~fs ~clock ~sys
          ~platform ~os_key ~cache ~data_dir ~registry ~cwd ())
   in
   let info =
@@ -1618,7 +1649,7 @@ let sync_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ registry_term $ with_repos_term $ with_deps_term)
+      $ registry_term $ with_repos_term $ with_deps_term $ jobs_term)
 
 (* -- add ----------------------------------------------------------------- *)
 
@@ -1761,7 +1792,8 @@ let add_cmd =
 (* -- exec ---------------------------------------------------------------- *)
 
 let exec_cmd =
-  let run () data_dir cache_dir refresh registry with_repos with_deps cmd args =
+  let run () data_dir cache_dir refresh registry with_repos with_deps jobs cmd
+      args =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -1775,8 +1807,8 @@ let exec_cmd =
     if forced || needs_sync ~cwd ~prefix then begin
       Logs.info (fun m -> m "Syncing %s before exec" cwd);
       ignore
-        (do_sync ~quiet:true ~refresh ~with_repos ~with_deps ~proc_mgr ~fs
-           ~clock ~sys ~platform ~os_key ~cache ~data_dir ~registry ~cwd ())
+        (do_sync ~quiet:true ~refresh ~with_repos ~with_deps ?jobs ~proc_mgr
+           ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir ~registry ~cwd ())
     end;
     let env_arr =
       Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
@@ -1821,7 +1853,8 @@ let exec_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ registry_term $ with_repos_term $ with_deps_term $ cmd $ args)
+      $ registry_term $ with_repos_term $ with_deps_term $ jobs_term $ cmd
+      $ args)
 
 (* -- config -------------------------------------------------------------- *)
 
@@ -2474,7 +2507,7 @@ let registry_build_cmd =
     List.rev !groups
   in
   let run () data_dir cache_dir refresh dry_run registry with_repos with_deps
-      targets =
+      jobs targets =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -2658,8 +2691,8 @@ let registry_build_cmd =
           in
           if n_build > 0 then begin
             let build_plan =
-              fetch_remote_layers ~remote ~d10 ~packages_dirs ~ctx:group_ctx
-                ~pkgs:sorted_pkgs build_plan
+              fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs
+                ~ctx:group_ctx ~pkgs:sorted_pkgs build_plan
             in
             try
               (* Read-side mirror wiring: opam probes the local mirror
@@ -2679,7 +2712,7 @@ let registry_build_cmd =
                     [ local; Oi.Source_mirror.remote_url ~registry:r ]
                 | _ -> [ local ]
               in
-              Oi.Execute.run ~cache_urls ~proc_mgr ~fs
+              Oi.Execute.run ~cache_urls ?jobs ~proc_mgr ~fs
                 ~clock:(clock :> D10.Config.clk)
                 ~sys ~os_key exec_plan
             with
@@ -2787,7 +2820,8 @@ let registry_build_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ dry_run $ registry_term $ with_repos_term $ with_deps_term $ targets)
+      $ dry_run $ registry_term $ with_repos_term $ with_deps_term $ jobs_term
+      $ targets)
 
 (* -- depexts ------------------------------------------------------------- *)
 

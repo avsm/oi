@@ -12,14 +12,16 @@ let ( / ) = Filename.concat
 
 (* Cap concurrent package builds. Each in-flight build spawns subprocess
    pipes (2 fds per capture) plus transient file descriptors for fetch
-   and patch; large stages would otherwise exhaust macOS's default 256
-   soft [rlim]. Honours [OI_BUILD_PARALLELISM] when set; defaults to
-   [min (cpu_count) 8]. *)
-let build_parallelism =
+   and patch, and each build then recursively spawns compiler processes
+   of its own, so the fd tree fans out fast; large stages would exhaust
+   macOS's default 256 soft [rlim]. Resolution order: explicit [?jobs]
+   argument to {!run} wins, then [OI_BUILD_PARALLELISM] env var, then
+   [min (cpu_count) 4]. *)
+let default_build_parallelism () =
   match Sys.getenv_opt "OI_BUILD_PARALLELISM" with
   | Some s -> (
-      match int_of_string_opt s with Some n when n > 0 -> n | _ -> 8)
-  | None -> min (Domain.recommended_domain_count ()) 8
+      match int_of_string_opt s with Some n when n > 0 -> n | _ -> 4)
+  | None -> min (Domain.recommended_domain_count ()) 4
 
 (* -- Command execution --------------------------------------------------- *)
 
@@ -226,7 +228,12 @@ let install_package ~proc_mgr ~fs (p : Plan.package_plan) =
 
 (* -- Main loop ------------------------------------------------------------ *)
 
-let run ?(cache_urls = []) ~proc_mgr ~fs ~clock ~sys ~os_key plan =
+let run ?(cache_urls = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~os_key plan =
+  let build_parallelism =
+    match jobs with
+    | Some n when n > 0 -> n
+    | _ -> default_build_parallelism ()
+  in
   let d10 : D10.Config.t =
     { sys; fs; clock; root = Eio.Path.(fs / plan.Plan.cache_root); os_key }
   in
