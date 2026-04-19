@@ -146,10 +146,10 @@ let service_name d =
    script finishes with [oi registry export /out]. *)
 let build_export_cmd ~overlays =
   let main_pass =
-    "oi registry build --registry='' $(cat /work/packages.txt)"
+    "oi registry build $(cat /work/packages.txt)"
   in
   let overlay_pass handle =
-    Printf.sprintf "oi registry build --registry='' %s:" handle
+    Printf.sprintf "oi registry build %s:" handle
   in
   let overlay_passes = List.map overlay_pass overlays in
   String.concat " && "
