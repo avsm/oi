@@ -103,9 +103,14 @@ let with_deps_term =
     value & opt_all string []
     & info ~docv:"PKG"
         ~doc:
-          "Additional dependency to include in solving. Accepts a package name \
-           or an opam atom with a version constraint (e.g. --with=fmt>=0.9). \
-           Repeatable."
+          "Additional dependency to include in solving. Accepts a package \
+           name, an opam atom with a version constraint (e.g. \
+           $(b,--with=fmt>=0.9) or $(b,--with=dune.3.20.0)), or a git URL \
+           ($(b,http(s)://), $(b,git+), $(b,git@), $(b,git://), $(b,ssh://)). \
+           URLs are cloned into the local pin cache and every [*.opam] at \
+           the root is pinned as a solver root — so \
+           $(b,oi run --with=https://example.org/merry.git merry) behaves \
+           like a local project. Repeatable."
         [ "with" ])
 
 (* Convert a CLI [--with-repo URL] entry into a [Project.extra_repo] with a
@@ -136,6 +141,18 @@ let is_url_like s =
     (fun p -> String.starts_with ~prefix:p s)
     [ "http://"; "https://"; "git+"; "git://"; "git@"; "file://"; "./"; "/" ]
   || String.contains s '/'
+
+(* Classify every [--with=…] token in one pass: URLs get cloned into
+   the pin cache and produce pins + solver roots; opam package specs
+   come back as already-parsed {!Oi.Script.dep}. Returns
+   [(pkg_deps, url_project)] so callers never need to re-parse or
+   re-classify downstream. *)
+let materialize_with_deps ~fs ~sys ~cache ?refresh with_deps =
+  let urls, pkg_deps = Oi.Url_project.classify_all with_deps in
+  let url_project =
+    Oi.Url_project.materialize ~fs ~sys ~cache ?refresh urls
+  in
+  (pkg_deps, url_project)
 
 (* Resolve a list of overlay handles to a flat list of extra-repo
    entries, including their transitive overlay deps. Later handles in
@@ -764,9 +781,8 @@ let assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes =
 (* -- run ----------------------------------------------------------------- *)
 
 let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
-    script_path with_deps args =
+    script_path cli_deps args =
   let file_deps = Oi.Script.parse_deps_from_file script_path in
-  let cli_deps = List.map Oi.Script.parse_cli_dep with_deps in
   let all_deps = Oi.Script.dedup (file_deps @ cli_deps) in
   if all_deps = [] then
     Oi.Error.msg
@@ -890,7 +906,12 @@ let run_cmd =
               (repos @ [ pin.handle ], deps @ [ pkg_spec ], pins @ [ pin ]))
         (with_repos, [], []) with_deps
     in
-    let extra_deps = List.map Oi.Script.parse_cli_dep with_deps in
+    (* URL-projects in [--with=…]: clone each URL into the pin cache,
+       scan its *.opam files, and merge the contribution as pins +
+       solver roots + overlays + extra_repos. *)
+    let extra_deps, url_project =
+      materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+    in
     let extra_constraints = Oi.Script.constraints extra_deps in
     (* Resolve the cwd once; reused for project-extras loading and the
        script-file existence check below. *)
@@ -904,6 +925,9 @@ let run_cmd =
       | exception Eio.Exn.Io _ -> ([], [], [])
       | p -> (p.extra_repos, p.pins, p.overlays)
     in
+    let project_extras = project_extras @ url_project.extra_repos in
+    let project_pins = project_pins @ url_project.pins in
+    let project_overlays = project_overlays @ url_project.overlays in
     (* Treat [x-reporepo:] handles as if they had been passed via
        [--with-repo]. Project-declared overlays go earlier in the
        list so CLI-supplied ones take priority (first-wins at repos
@@ -1036,7 +1060,7 @@ let run_cmd =
         assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes
       in
       run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache
-        ~data_dir target with_deps args
+        ~data_dir target extra_deps args
     end
     else begin
       (* Include --with deps in every solve *)
@@ -1047,6 +1071,7 @@ let run_cmd =
             if OpamPackage.Name.equal d.name ocaml_name then None
             else Some (Oi.Script.name_s d))
           extra_deps
+        @ url_project.roots
       in
       let solve_assemble_run_with pkg_names =
         solve_assemble_run (pkg_names @ extra_names)
@@ -1290,12 +1315,18 @@ let plan_cmd =
     ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
+    let extra_deps, url_project =
+      materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+    in
     let project_extras, project_pins, project_overlays =
       match Oi.Project.load ~fs cwd_s with
       | exception Sys_error _ -> ([], [], [])
       | exception Eio.Exn.Io _ -> ([], [], [])
       | p -> (p.extra_repos, p.pins, p.overlays)
     in
+    let project_extras = project_extras @ url_project.extra_repos in
+    let project_pins = project_pins @ url_project.pins in
+    let project_overlays = project_overlays @ url_project.overlays in
     let with_repos = project_overlays @ with_repos in
     let all_extras =
       merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:project_extras
@@ -1307,7 +1338,6 @@ let plan_cmd =
       @ extra_pkg_dirs
       @ get_packages_dirs ~sys ~data_dir ()
     in
-    let extra_deps = List.map Oi.Script.parse_cli_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_deps in
     let extra_names =
       List.filter_map
@@ -1316,7 +1346,10 @@ let plan_cmd =
           else Some d.name)
         extra_deps
     in
-    let names = List.map OpamPackage.Name.of_string targets @ extra_names in
+    let url_names = List.map OpamPackage.Name.of_string url_project.roots in
+    let names =
+      List.map OpamPackage.Name.of_string targets @ extra_names @ url_names
+    in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let pkgs =
@@ -1403,8 +1436,14 @@ let env_cmd =
         init_opam_root ~fs ~data_dir;
         ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
         let conf = make_conf ~platform in
-        let extras = cli_extra_repos ~sys with_repos in
-        let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
+        let extra_cli, url_project =
+          materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+        in
+        let extras =
+          merge_extras
+            ~cli:(cli_extra_repos ~sys (with_repos @ url_project.overlays))
+            ~project:url_project.extra_repos
+        in
         let extra_constraints = Oi.Script.constraints extra_cli in
         let extra_names =
           List.filter_map
@@ -1412,10 +1451,12 @@ let env_cmd =
               if OpamPackage.Name.to_string d.name = "ocaml" then None
               else Some d.name)
             extra_cli
+          @ List.map OpamPackage.Name.of_string url_project.roots
         in
         let layer_hashes =
           solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
-            ~conf ~os_key ~refresh ~extra_repos:extras ?jobs
+            ~conf ~os_key ~refresh ~extra_repos:extras
+            ~pins:url_project.pins ?jobs
             ~constraints:extra_constraints
             (OpamPackage.Name.of_string "ocaml" :: extra_names)
         in
@@ -1705,16 +1746,22 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   init_opam_root ~fs ~data_dir;
   ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
   let project = Oi.Project.load ~fs cwd in
+  let extra_cli, url_project =
+    materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+  in
   let deps = project.deps in
-  if deps = [] && with_deps = [] then
+  if deps = [] && extra_cli = [] && url_project.roots = [] then
     Oi.Error.config_error "No .opam files found in %s." cwd;
   say "Dependencies from opam files: %s" (String.concat ", " deps);
-  if project.overlays <> [] then
+  if url_project.roots <> [] then
+    say "URL-supplied packages: %s" (String.concat ", " url_project.roots);
+  if project.overlays <> [] || url_project.overlays <> [] then
     say "Project overlays (from x-reporepo): %s"
-      (String.concat ", " project.overlays);
-  let with_repos = project.overlays @ with_repos in
+      (String.concat ", " (project.overlays @ url_project.overlays));
+  let with_repos = project.overlays @ url_project.overlays @ with_repos in
   let all_extras =
-    merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:project.extra_repos
+    merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+      ~project:(project.extra_repos @ url_project.extra_repos)
   in
   if all_extras <> [] then
     say "Extra repositories: %s"
@@ -1724,7 +1771,6 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
             all_extras));
   let conf = make_conf ~platform in
   let remote = remote_of_registry registry in
-  let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
   let extra_constraints = Oi.Script.constraints extra_cli in
   let extra_names =
     List.filter_map
@@ -1733,11 +1779,16 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
         else Some d.name)
       extra_cli
   in
-  let names = List.map OpamPackage.Name.of_string deps @ extra_names in
+  let url_names = List.map OpamPackage.Name.of_string url_project.roots in
+  let names =
+    List.map OpamPackage.Name.of_string deps @ extra_names @ url_names
+  in
   let layer_hashes =
     solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
-      ~os_key ~extra_repos:all_extras ~pins:project.pins ~refresh
-      ~project_dir:cwd ~constraints:extra_constraints ?remote ?jobs names
+      ~os_key ~extra_repos:all_extras
+      ~pins:(project.pins @ url_project.pins)
+      ~refresh ~project_dir:cwd ~constraints:extra_constraints ?remote ?jobs
+      names
   in
   let oi_dir = cwd / "_oi" in
   let prefix = oi_dir / "prefix" in
@@ -2738,9 +2789,23 @@ let registry_build_cmd =
       in
       with_repos @ handles
     in
-    let cli_extras_records = cli_extra_repos ~sys with_repos in
+    let extra_cli, url_project =
+      materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+    in
+    let with_repos = with_repos @ url_project.overlays in
+    let cli_extras_records =
+      merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+        ~project:url_project.extra_repos
+    in
     let extra_pkg_dirs =
       Oi.Repo.ensure_extra ~data_dir ~refresh cli_extras_records
+    in
+    (* URL-project pins materialize into a synthetic packages/ tree
+       the solver consumes ahead of everything else, so the URL's
+       dev-version of each local package wins over any stable version
+       from the opam-repository. *)
+    let pin_dir =
+      Oi.Pin.materialize ~fs ~sys ~cache ~refresh url_project.pins
     in
     (* Expand [handle:] into every package the overlay's clone
        provides. List just the top-level names under the overlay's
@@ -2776,16 +2841,19 @@ let registry_build_cmd =
               ps)
         parsed
     in
-    if targets = [] then
+    if targets = [] && url_project.roots = [] then
       Oi.Error.config_error "no targets to build";
-    let packages_dirs = extra_pkg_dirs @ get_packages_dirs ~sys ~data_dir () in
+    let packages_dirs =
+      Stdlib.Option.to_list pin_dir
+      @ extra_pkg_dirs
+      @ get_packages_dirs ~sys ~data_dir ()
+    in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
     (* [--with] adds extra packages to every target's root set plus any
        version constraints they carry. *)
-    let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
     let base_constraints = Oi.Script.constraints extra_cli in
     let extra_names =
       List.filter_map
@@ -2793,7 +2861,9 @@ let registry_build_cmd =
           if OpamPackage.Name.to_string d.name = "ocaml" then None
           else Some d.name)
         extra_cli
+      @ List.map OpamPackage.Name.of_string url_project.roots
     in
+    let targets = targets @ url_project.roots in
     (* 1. Solve each target independently *)
     let n_solve_failed = ref 0 in
     let solutions =
@@ -3046,15 +3116,22 @@ let depexts_cmd =
     init_opam_root ~fs ~data_dir;
     ignore (get_packages_dirs ~sys ~data_dir ~refresh ());
     let proj = Oi.Project.load ~fs cwd_s in
-    if proj.deps = [] && with_deps = [] then
+    let extra_cli, url_project =
+      materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
+    in
+    if proj.deps = [] && extra_cli = [] && url_project.roots = [] then
       Oi.Error.config_error
         "No dependencies declared in %s (need at least one *.opam with \
          non-local depends, or use --with)"
         cwd_s;
-    let with_repos = proj.overlays @ with_repos in
-    let pin_dir = Oi.Pin.materialize ~fs ~sys ~cache ~refresh proj.pins in
+    let with_repos = proj.overlays @ url_project.overlays @ with_repos in
+    let pin_dir =
+      Oi.Pin.materialize ~fs ~sys ~cache ~refresh
+        (proj.pins @ url_project.pins)
+    in
     let all_extras =
-      merge_extras ~cli:(cli_extra_repos ~sys with_repos) ~project:proj.extra_repos
+      merge_extras ~cli:(cli_extra_repos ~sys with_repos)
+        ~project:(proj.extra_repos @ url_project.extra_repos)
     in
     let extras = Oi.Repo.ensure_extra ~data_dir ~refresh all_extras in
     let packages_dirs =
@@ -3066,7 +3143,6 @@ let depexts_cmd =
     in
     let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
-    let extra_cli = List.map Oi.Script.parse_cli_dep with_deps in
     let extra_constraints = Oi.Script.constraints extra_cli in
     let extra_names =
       List.filter_map
@@ -3074,6 +3150,7 @@ let depexts_cmd =
           if OpamPackage.Name.to_string d.name = "ocaml" then None
           else Some d.name)
         extra_cli
+      @ List.map OpamPackage.Name.of_string url_project.roots
     in
     let names = List.map OpamPackage.Name.of_string proj.deps @ extra_names in
     let solved =
