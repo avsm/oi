@@ -589,6 +589,15 @@ let resolved_cwd fs =
   let s = Unix.realpath "." in
   (s, Eio.Path.(fs / s))
 
+(* Detect a project-local [_oi/tools/] that {!install_tools} has written
+   under [cwd]. Returns [Some path] only when [tools/bin/] is populated,
+   so callers that prepend it to PATH don't add a dangling directory. *)
+let tools_dir_for ~cwd =
+  let tools = cwd / "_oi" / "tools" in
+  match Sys.is_directory (tools / "bin") with
+  | true -> Some tools
+  | false | (exception Sys_error _) -> None
+
 (* Parse a CLI target as either "name", "name.version", or an opam atom
    like "name>=1.0" / "name=1.0". Returns the bare name and an optional
    version constraint for the solver. *)
@@ -772,7 +781,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
       (run_exec proc_mgr
          ~env:
            (Oi.Prefix.make_env ~prefix
-              ~dune_cache_root:(Oi.Cache.dune_root cache))
+              ~dune_cache_root:(Oi.Cache.dune_root cache) ())
          (cached_bin :: args))
   else begin
     let packages_dirs = get_packages_dirs ~sys ~data_dir () in
@@ -809,7 +818,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / build_dir);
     Oi.Script.generate_project ~script:script_path ~deps:all_deps ~dir:build_dir;
     let build_env =
-      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache) ()
     in
     Eio.Process.run proc_mgr ~env:build_env
       [ "/bin/sh"; "-c"; Fmt.str "cd %s && dune build main.exe 2>&1" build_dir ];
@@ -962,7 +971,7 @@ let run_cmd =
         Logs.info (fun m -> m "Found binary, executing");
         exit
           (run_exec proc_mgr
-             ~env:(Oi.Prefix.make_env ~prefix ~dune_cache_root)
+             ~env:(Oi.Prefix.make_env ~prefix ~dune_cache_root ())
              (bin :: args))
       end
       else begin
@@ -1417,10 +1426,16 @@ let env_cmd =
     let current_path =
       try Sys.getenv "PATH" with Not_found -> "/usr/bin:/bin"
     in
+    let tools = tools_dir_for ~cwd:cwd_s in
+    let path_prefix =
+      match tools with
+      | None -> prefix / "bin"
+      | Some t -> (t / "bin") ^ ":" ^ (prefix / "bin")
+    in
     List.iter
       (fun (k, v) ->
         let v =
-          if k = "PATH" then (prefix / "bin") ^ ":" ^ current_path else v
+          if k = "PATH" then path_prefix ^ ":" ^ current_path else v
         in
         Fmt.pr "export %s=\"%s\"@." k v)
       vars
@@ -1574,6 +1589,105 @@ let which_cmd =
   Cmd.v info
     Term.(const run $ log_term $ cache_dir_term $ registry_term $ long $ pattern)
 
+(* -- tool installation --------------------------------------------------- *)
+
+let short_hash h = String.sub h 0 (min 12 (String.length h))
+
+let warn_tool spec fmt =
+  Fmt.kstr
+    (fun s ->
+      Fmt.epr "%a tool %s: %s@."
+        Fmt.(styled `Yellow string)
+        "WARN" (spec : Oi.Tool.spec).name s)
+    fmt
+
+(* Return the layer hash whose [layer.json] declares package name
+   [want_name] (any version). Tools get assembled from only their own
+   leaf layer — the transitive deps (ocaml, dune, ocamlfind…) are
+   already present in the shared d10 cache but are not needed at
+   runtime by a native-compiled tool binary, so we leave them out of
+   [_oi/tools/] to keep it small and focused. *)
+let leaf_hash_for ~fs ~cache ~os_key ~want_name hashes =
+  let layers_dir = Oi.Cache.root_s cache / "layers" / os_key in
+  let leaf hash =
+    match
+      D10.Layer.load_meta Eio.Path.(fs / layers_dir / hash / "layer.json")
+    with
+    | Some m -> (
+        match OpamPackage.of_string_opt m.package with
+        | Some p
+          when OpamPackage.Name.to_string (OpamPackage.name p) = want_name ->
+            Some hash
+        | _ -> None)
+    | None -> None
+  in
+  List.find_map leaf hashes
+
+(* Solve and install every probed dev tool into [cwd/_oi/tools/]. Each
+   tool is its own independent solve so its dep closure never leaks
+   into the main project's OCAMLLIB / OCAMLPATH. A tool that fails to
+   solve (e.g. pinned to an older ocaml) warns and is skipped; other
+   tools still install. Returns the assembled path if at least one
+   tool made it in, or [None] if nothing to install. *)
+let install_tools ?(quiet = false) ?refresh ?jobs ~proc_mgr ~fs ~clock ~sys
+    ~cache ~data_dir ~conf ~os_key ~extra_repos ~pins ?remote ~cwd () =
+  let say fmt =
+    if quiet then Fmt.kstr (fun s -> Logs.info (fun m -> m "%s" s)) fmt
+    else Fmt.kstr (fun s -> Fmt.pr "%s@." s) fmt
+  in
+  let install_one (r : Oi.Tool.result) =
+    let spec = r.spec in
+    let name = OpamPackage.Name.of_string spec.name in
+    let constraints =
+      match r.version with
+      | None -> OpamPackage.Name.Map.empty
+      | Some v ->
+          OpamPackage.Name.Map.singleton name
+            (`Eq, OpamPackage.Version.of_string v)
+    in
+    try
+      let hashes =
+        solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir
+          ~conf ~os_key ~extra_repos ~pins ?refresh ?remote ?jobs
+          ~constraints [ name ]
+      in
+      match leaf_hash_for ~fs ~cache ~os_key ~want_name:spec.name hashes with
+      | None ->
+          warn_tool spec "layer for leaf package not found";
+          None
+      | Some h ->
+          say "Tool %s: %d dep(s) built, leaf layer %s" spec.name
+            (List.length hashes - 1) (short_hash h);
+          Some h
+    with
+    | Oi.Error.E e ->
+        warn_tool spec "%a" Oi.Error.pp e;
+        None
+    | exn ->
+        warn_tool spec "%s" (Printexc.to_string exn);
+        None
+  in
+  match Oi.Tool.(hits (probe ~fs cwd)) with
+  | [] ->
+      say "No dev tools to install";
+      None
+  | hits -> (
+      let leaves = List.filter_map install_one hits in
+      match leaves with
+      | [] -> None
+      | _ ->
+          let tools_dir = cwd / "_oi" / "tools" in
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / tools_dir);
+          Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+            Eio.Path.(fs / tools_dir);
+          let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
+          let unique = List.sort_uniq String.compare leaves in
+          D10.Prefix.assemble d10 ~layer_hashes:unique
+            ~dst:Eio.Path.(fs / tools_dir);
+          say "Tools assembled at %s (%d tool(s), %d leaf layer(s))" tools_dir
+            (List.length leaves) (List.length unique);
+          Some tools_dir)
+
 (* -- sync ---------------------------------------------------------------- *)
 
 (* Run a full sync in [cwd]: solve the deps declared in *.opam files,
@@ -1631,9 +1745,14 @@ let do_sync ?(quiet = false) ?(refresh = false) ?(with_repos = [])
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / oi_dir);
   let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   D10.Prefix.assemble d10 ~layer_hashes ~dst:Eio.Path.(fs / prefix);
+  let tools =
+    install_tools ~quiet ?refresh:(Some refresh) ?jobs ~proc_mgr ~fs ~clock
+      ~sys ~cache ~data_dir ~conf ~os_key ~extra_repos:all_extras
+      ~pins:project.pins ?remote ~cwd ()
+  in
   let envrc_path = Eio.Path.(fs / cwd / ".envrc") in
   let dune_cache_root = Oi.Cache.dune_root cache in
-  let envrc = Oi.Prefix.envrc_content ~prefix ~dune_cache_root in
+  let envrc = Oi.Prefix.envrc_content ~prefix ?tools ~dune_cache_root () in
   (try Eio.Path.unlink envrc_path with Eio.Exn.Io _ -> ());
   Eio.Path.save ~create:(`Exclusive 0o644) envrc_path envrc;
   say "Wrote .envrc (run 'direnv allow' to activate)";
@@ -1777,8 +1896,10 @@ let add_cmd =
     (* Phase 3: regenerate *.opam via dune build inside the assembled
        prefix — dune itself comes from [_oi/prefix/bin]. *)
     let prefix = cwd / "_oi" / "prefix" in
+    let tools = tools_dir_for ~cwd in
     let env =
-      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+      Oi.Prefix.make_env ~prefix ?tools
+        ~dune_cache_root:(Oi.Cache.dune_root cache) ()
     in
     Fmt.pr "Running dune build to regenerate *.opam...@.";
     ( Eio.Switch.run @@ fun sw ->
@@ -1877,8 +1998,10 @@ let exec_cmd =
         (do_sync ~quiet:true ~refresh ~with_repos ~with_deps ?jobs ~proc_mgr
            ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir ~registry ~cwd ())
     end;
+    let tools = tools_dir_for ~cwd in
     let env_arr =
-      Oi.Prefix.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+      Oi.Prefix.make_env ~prefix ?tools
+        ~dune_cache_root:(Oi.Cache.dune_root cache) ()
     in
     exit (run_exec proc_mgr ~env:env_arr (cmd :: args))
   in
@@ -1999,7 +2122,21 @@ let config_cmd =
         if p.overlays <> [] then begin
           Fmt.pr "@.Project overlays (x-reporepo):@.";
           List.iter (fun h -> Fmt.pr "  %s@." h) p.overlays
-        end
+        end;
+        (* Dev tools: run the probe registry against cwd and print one
+           row per tool. Shown in every project (even one with no
+           hits), so it's obvious when merlin / odoc would end up in
+           [_oi/tools/] after the next sync. *)
+        let tool_results = Oi.Tool.probe ~fs cwd_s in
+        Fmt.pr "@.Dev tools:@.";
+        List.iter
+          (fun (r : Oi.Tool.result) ->
+            let mark =
+              if r.hit then Fmt.str "%a" Fmt.(styled `Green string) "hit"
+              else Fmt.str "%a" Fmt.(styled `Faint string) "miss"
+            in
+            Fmt.pr "  %-18s %-4s %s@." r.spec.name mark r.detail)
+          tool_results
   in
   let info =
     Cmd.info "config"
@@ -3445,8 +3582,34 @@ let print_entry_oneline (e : Oi.Reporepo.entry) =
   let short = String.sub e.commit 0 (min 7 (String.length e.commit)) in
   Fmt.pr "%-24s  %-16s  %-8s  %s@." e.handle e.version short e.url
 
+(* Upstream tip status for a reporepo entry, computed by re-running
+   [git ls-remote] against its URL + ref. *)
+type upstream_status =
+  | Fresh  (** Pinned commit matches the upstream tip. *)
+  | Stale of string  (** Upstream tip differs; carries its 40-char sha. *)
+  | Unknown  (** [git ls-remote] failed (offline, auth, moved URL…). *)
+
+let short_sha s = String.sub s 0 (min 7 (String.length s))
+
+let check_upstream ~sys (e : Oi.Reporepo.entry) =
+  match Oi.Reporepo.ls_remote_sha ~sys ?ref_:e.ref_ e.url with
+  | tip when tip = e.commit -> Fresh
+  | tip -> Stale tip
+  | exception _ -> Unknown
+
+let print_entry_with_upstream (e : Oi.Reporepo.entry) status =
+  let tag =
+    match status with
+    | Fresh -> Fmt.str "%a" Fmt.(styled `Green string) "up-to-date"
+    | Unknown -> Fmt.str "%a" Fmt.(styled `Yellow string) "unreachable"
+    | Stale tip ->
+        Fmt.str "%a (%s)" Fmt.(styled `Red string) "stale" (short_sha tip)
+  in
+  Fmt.pr "%-24s  %-16s  %-8s  %-28s  %s@." e.handle e.version
+    (short_sha e.commit) tag e.url
+
 let repo_list_cmd =
-  let run () reporepo reporepo_url =
+  let run () reporepo reporepo_url no_check =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
@@ -3458,24 +3621,38 @@ let repo_list_cmd =
         ~proc_mgr ~fs ()
     in
     Oi.Reporepo.ensure_clone ~sys ~path:reporepo ~url:reporepo_url;
-    let entries = Oi.Reporepo.load ~path:reporepo in
-    if entries = [] then
-      Fmt.pr "Reporepo %s is empty.@." reporepo
-    else begin
-      Fmt.pr "Reporepo: %s@.@." reporepo;
-      (* Show the highest version per handle. *)
-      let handles =
-        entries
-        |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
-        |> List.sort_uniq String.compare
-      in
-      List.iter
-        (fun h ->
-          match Oi.Reporepo.latest entries ~handle:h with
-          | Some e -> print_entry_oneline e
-          | None -> ())
-        handles
-    end
+    match Oi.Reporepo.load ~path:reporepo with
+    | [] -> Fmt.pr "Reporepo %s is empty.@." reporepo
+    | entries ->
+        Fmt.pr "Reporepo: %s@.@." reporepo;
+        let latest_entries =
+          entries
+          |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
+          |> List.sort_uniq String.compare
+          |> List.filter_map (fun handle ->
+                 Oi.Reporepo.latest entries ~handle)
+        in
+        if no_check then List.iter print_entry_oneline latest_entries
+        else begin
+          (* Parallel [git ls-remote] per entry. Four at a time keeps
+             the pipe/fd footprint small without making a 30-entry
+             reporepo serial. Failures downgrade to [Unknown] — a
+             flaky network must not make [oi repo list] unusable. *)
+          let indexed = List.mapi (fun i e -> (i, e)) latest_entries in
+          let statuses = Array.make (List.length indexed) Unknown in
+          Eio.Fiber.List.iter ~max_fibers:4
+            (fun (i, e) -> statuses.(i) <- check_upstream ~sys e)
+            indexed;
+          List.iteri
+            (fun i e -> print_entry_with_upstream e statuses.(i))
+            latest_entries
+        end
+  in
+  let no_check =
+    Arg.(
+      value & flag
+      & info ~doc:"Skip the per-entry [git ls-remote] tip check."
+          [ "no-check" ])
   in
   let info =
     Cmd.info "list"
@@ -3484,14 +3661,27 @@ let repo_list_cmd =
         [
           `S Manpage.s_description;
           `P
-            "One line per handle, showing the current pinned commit and \
-             upstream URL. Start here if you want to know what package \
-             collections $(b,oi) will look at when you run $(b,oi run) \
-             or $(b,oi sync) without explicit overrides.";
+            "One line per handle, showing the current pinned commit, how \
+             it compares to the live upstream tip, and the upstream URL. \
+             Start here if you want to know what package collections \
+             $(b,oi) will look at when you run $(b,oi run) or $(b,oi \
+             sync) without explicit overrides.";
+          `P
+            "$(b,oi) re-runs $(b,git ls-remote) per entry (capped at four \
+             in parallel) and flags each row as $(b,up-to-date) if the \
+             pinned commit equals the upstream tip, $(b,stale) (with the \
+             live tip's short sha) if it's behind, or $(b,unreachable) \
+             when the remote refuses. Pass $(b,--no-check) to skip the \
+             network round-trip when you're offline or in a hurry.";
+          `P
+            "A stale row is actionable: $(b,oi repo bump <handle>) \
+             inside the reporepo's working copy rolls the pin forward \
+             and writes a new $(b,YYYYMMDD.N) overlay entry.";
         ]
   in
   Cmd.v info
-    Term.(const run $ log_term $ reporepo_term $ reporepo_url_term)
+    Term.(
+      const run $ log_term $ reporepo_term $ reporepo_url_term $ no_check)
 
 let repo_show_cmd =
   let run () reporepo reporepo_url handle =
