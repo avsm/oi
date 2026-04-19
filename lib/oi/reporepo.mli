@@ -112,6 +112,42 @@ val ensure_clone : sys:D10.Sysops.t -> path:string -> url:string -> unit
     exists but isn't empty and isn't a git clone. Never pulls once
     the clone exists — the user owns the working copy. *)
 
+val set_push_url : sys:D10.Sysops.t -> path:string -> string -> unit
+(** [set_push_url ~sys ~path url] persistently sets the push URL of
+    the [origin] remote in the working copy at [path] (via
+    [git remote set-url --push origin URL]). The fetch URL is left
+    alone, so subsequent pulls keep using whatever [oi] cloned from. *)
+
+type push_step =
+  | Step_commit of { files : string list }
+  | Step_pull of { commits : int }
+  | Step_push of { commits : int }
+      (** Per-step outcome for {!push}, in execution order. The integer
+          counts are 0 for "no-op" steps (clean tree, branch already up
+          to date, nothing to push). *)
+
+type push_outcome = push_step list
+
+val push :
+  ?on_step_start:(int -> string -> unit) ->
+  sys:D10.Sysops.t ->
+  path:string ->
+  unit ->
+  push_outcome
+(** [push ?on_step_start ~sys ~path ()] integrates local reporepo
+    edits with upstream in three steps: stage and commit any
+    uncommitted changes (typical after [oi repo bump]), [git pull
+    --rebase] to bring in upstream history, then [git push] if the
+    local branch is now ahead of its upstream. Returns one {!push_step}
+    per phase so the caller can print a clean per-step summary.
+
+    [on_step_start n title] is invoked just before phase [n]
+    (1-indexed) starts, so a CLI can print a header above the git
+    command's streamed output. Raises if [path] isn't a git working
+    copy or if any underlying git command fails (e.g. rebase
+    conflict) — git's own stderr is streamed to the parent terminal
+    so the user sees the actual error. *)
+
 val add :
   sys:D10.Sysops.t ->
   path:string ->

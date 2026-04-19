@@ -26,24 +26,27 @@ let pull_repo ~label ~url_s ~dst =
     (val OpamRepository.find_backend_by_kind url.OpamUrl.backend
         : OpamRepositoryBackend.S)
   in
-  let result =
-    B.fetch_repo_update repo_name dst_dir url |> OpamProcess.Job.run
-  in
-  match result with
-  | OpamRepositoryBackend.Update_full tmp_dir ->
-      (* Full fetch: move contents from temp dir to destination *)
-      if
-        OpamFilename.Dir.to_string tmp_dir <> OpamFilename.Dir.to_string dst_dir
-      then begin
-        OpamFilename.rmdir dst_dir;
-        OpamFilename.move_dir ~src:tmp_dir ~dst:dst_dir
-      end
-  | OpamRepositoryBackend.Update_patch _ ->
-      (* Incremental update: already applied by the backend *)
-      B.repo_update_complete dst_dir url |> OpamProcess.Job.run
-  | OpamRepositoryBackend.Update_empty -> ()
-  | OpamRepositoryBackend.Update_err exn ->
-      Fmt.failwith "Failed to fetch repo %s: %s" label (Printexc.to_string exn)
+  Retry.with_attempts ~label:(Fmt.str "fetch %s (%s)" label url_s) (fun () ->
+      let result =
+        B.fetch_repo_update repo_name dst_dir url |> OpamProcess.Job.run
+      in
+      match result with
+      | OpamRepositoryBackend.Update_full tmp_dir ->
+          (* Full fetch: move contents from temp dir to destination *)
+          if
+            OpamFilename.Dir.to_string tmp_dir
+            <> OpamFilename.Dir.to_string dst_dir
+          then begin
+            OpamFilename.rmdir dst_dir;
+            OpamFilename.move_dir ~src:tmp_dir ~dst:dst_dir
+          end
+      | OpamRepositoryBackend.Update_patch _ ->
+          (* Incremental update: already applied by the backend *)
+          B.repo_update_complete dst_dir url |> OpamProcess.Job.run
+      | OpamRepositoryBackend.Update_empty -> ()
+      | OpamRepositoryBackend.Update_err exn ->
+          Fmt.failwith "Failed to fetch repo %s: %s" label
+            (Printexc.to_string exn))
 
 (* Bump the mtime of [dir] to "now" after a successful pull, so the age
    check in [dir_needs_refresh] sees a fresh timestamp. *)

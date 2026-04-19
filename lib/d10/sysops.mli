@@ -13,9 +13,17 @@
 type t
 (** System operations context with pre-resolved tool paths. *)
 
-val create : proc_mgr:_ Eio.Process.mgr -> fs:Eio.Fs.dir_ty Eio.Path.t -> t
-(** [create ~proc_mgr ~fs] detects tool paths (tar variant) by probing the
-    system via [which]. Call once at startup. *)
+val create :
+  ?stdout:_ Eio.Flow.sink ->
+  ?stderr:_ Eio.Flow.sink ->
+  proc_mgr:_ Eio.Process.mgr ->
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  unit ->
+  t
+(** [create ?stdout ?stderr ~proc_mgr ~fs ()] detects tool paths (tar
+    variant) by probing the system via [which]. Pass the parent's
+    [stdout] and [stderr] to enable {!Cmd.run_inherit}, which streams
+    subprocess output to the user's terminal. Call once at startup. *)
 
 (** {1 File queries} *)
 
@@ -56,10 +64,18 @@ end
 module Cmd : sig
   val run : t -> string list -> unit
   (** [run t args] executes [args] as a subprocess, raising [Failure] on
-      non-zero exit. *)
+      non-zero exit. Stdout and stderr are captured silently. *)
 
   val run_out : t -> string list -> string
   (** [run_out t args] executes [args] and returns its trimmed stdout. *)
+
+  val run_inherit : t -> string list -> unit
+  (** Like {!run} but the subprocess inherits the parent's stdout and
+      stderr so any progress or error output is shown to the user as
+      the command runs. The failure message is short ("git exited 128")
+      because git's own output already explained the problem. Requires
+      [t] to have been created with [~stdout] / [~stderr]; falls back
+      silently to {!run} when they aren't set. *)
 end
 
 (** {1 Git operations} *)

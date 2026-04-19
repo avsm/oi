@@ -163,12 +163,12 @@ let docker_compose_yaml ?(overlays = []) ~distros ~registry_host_path () =
   out
     "# Each per-distro service runs `oi registry build` + `oi registry \
      export`,\n\
-     # writing the per-os_key tree + per-overlay subtrees into the shared \
-     bind\n\
-     # mount. The `merge-all` service waits for every distro to finish and \
-     then\n\
-     # unions the contributions into `ALL/<os_key>/`, which is what clients\n\
-     # point at. Compose exits once every service has finished.\n";
+     # writing the per-os_key archives, sqlite index, and OINDEX.txt into \
+     the\n\
+     # shared bind mount. Each os_key has only one producer container, so \
+     no\n\
+     # cross-service merge is needed. Compose exits once every service has\n\
+     # finished.\n";
   out "services:\n";
   let cmd = build_export_cmd ~overlays in
   List.iter
@@ -203,24 +203,7 @@ let docker_compose_yaml ?(overlays = []) ~distros ~registry_host_path () =
         "    command: [\"sh\", \"-c\", \"cp /usr/local/bin/oi \
          /out/oi-linux-$$(uname -m)\"]\n";
       Printf.ksprintf out "    volumes:\n";
-      Printf.ksprintf out "      - %s:/out\n" registry_host_path;
-      (* Final merge-all pass: runs once every distro service has
-         completed successfully, so the union [ALL/] tree is always
-         up-to-date with whatever the distros actually produced this
-         run. Re-uses the alpine image since it already has a
-         statically-linked [oi] binary; [depends_on] with
-         [service_completed_successfully] is standard compose v2. *)
-      Printf.ksprintf out "  merge-all:\n";
-      Printf.ksprintf out "    image: %s\n" alpine_img;
-      Printf.ksprintf out "    command: [\"oi\", \"registry\", \"merge-all\", \"/out\"]\n";
-      Printf.ksprintf out "    volumes:\n";
-      Printf.ksprintf out "      - %s:/out\n" registry_host_path;
-      Printf.ksprintf out "    depends_on:\n";
-      List.iter
-        (fun d ->
-          Printf.ksprintf out "      %s:\n" (service_name d);
-          Printf.ksprintf out "        condition: service_completed_successfully\n")
-        distros);
+      Printf.ksprintf out "      - %s:/out\n" registry_host_path);
   Buffer.contents buf
 
 (* -- Package-list parsing ----------------------------------------------- *)

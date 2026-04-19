@@ -98,19 +98,3 @@ val merge_remote : db -> remote_path:string -> unit
     into [db]. Only layers whose hash does not already exist in [db] are
     inserted (local entries take precedence). Associated deps, binaries, and
     files for new layers are also imported. *)
-
-(** {1 Per-overlay extraction} *)
-
-val export_overlay :
-  src_path:string ->
-  dst_path:string ->
-  overlay_handle:string ->
-  overlay_version:string ->
-  os_key:string ->
-  unit
-(** [export_overlay ~src_path ~dst_path ~overlay_handle ~overlay_version
-    ~os_key] writes an index database at [dst_path] containing only the
-    rows tagged with the given overlay handle/version for [os_key]. The
-    source database at [src_path] is copied then pruned, so the output
-    schema is always a self-contained, freshly-vacuumed DB ready to be
-    served alongside its overlay's archives. *)

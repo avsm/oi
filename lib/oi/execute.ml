@@ -124,15 +124,17 @@ let fetch_source ?(cache_urls = []) (p : Plan.package_plan) =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
         Log.info (fun m -> m "Fetching %s from %s" p.pkg src.url);
-        let result =
-          OpamRepository.pull_tree p.pkg ~cache_dir ~cache_urls dst_dir
-            checksums [ url ]
-          |> OpamProcess.Job.run
-        in
-        match result with
-        | OpamTypes.Result _ | OpamTypes.Up_to_date _ -> ()
-        | OpamTypes.Not_available (_, msg) ->
-            Fmt.failwith "Failed to fetch %s: %s" p.pkg msg
+        Retry.with_attempts ~label:(Fmt.str "fetch %s (%s)" p.pkg src.url)
+          (fun () ->
+            let result =
+              OpamRepository.pull_tree p.pkg ~cache_dir ~cache_urls dst_dir
+                checksums [ url ]
+              |> OpamProcess.Job.run
+            in
+            match result with
+            | OpamTypes.Result _ | OpamTypes.Up_to_date _ -> ()
+            | OpamTypes.Not_available (_, msg) ->
+                Fmt.failwith "Failed to fetch %s: %s" p.pkg msg)
       end
 
 let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
@@ -146,15 +148,23 @@ let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
         let cache_dir =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
-        let result =
-          OpamRepository.pull_file name ~cache_dir ~cache_urls ~silent_hits:true
-            dst_file checksums [ url ]
-          |> OpamProcess.Job.run
-        in
-        match result with
-        | OpamTypes.Result () | OpamTypes.Up_to_date () -> ()
-        | OpamTypes.Not_available (_, msg) ->
-            Log.warn (fun m -> m "Failed to fetch extra source %s: %s" name msg)
+        try
+          Retry.with_attempts
+            ~label:(Fmt.str "fetch extra source %s (%s)" name src.url) (fun () ->
+              let result =
+                OpamRepository.pull_file name ~cache_dir ~cache_urls
+                  ~silent_hits:true dst_file checksums [ url ]
+                |> OpamProcess.Job.run
+              in
+              match result with
+              | OpamTypes.Result () | OpamTypes.Up_to_date () -> ()
+              | OpamTypes.Not_available (_, msg) ->
+                  Fmt.failwith "%s" msg)
+        with Failure msg ->
+          (* Match the previous semantics: extra sources are
+             best-effort, so a hard failure (after retries) downgrades
+             to a warning rather than aborting the whole build. *)
+          Log.warn (fun m -> m "Failed to fetch extra source %s: %s" name msg)
       end)
     p.extra_sources
 

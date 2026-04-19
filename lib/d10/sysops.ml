@@ -12,6 +12,8 @@ type pm = [ `Generic ] Eio.Process.mgr_ty Eio.Resource.t
 type t = {
   proc_mgr : pm;
   fs : Eio.Fs.dir_ty Eio.Path.t; [@warning "-69"]
+  stdout : Eio.Flow.sink_ty Eio.Resource.t option;
+  stderr : Eio.Flow.sink_ty Eio.Resource.t option;
   tools : tools;
 }
 
@@ -56,8 +58,16 @@ let resolve_tools t =
   let tar = if has_cmd t "gtar" then "gtar" else "tar" in
   { tar }
 
-let create ~proc_mgr ~fs =
-  let t_partial = { proc_mgr :> pm; fs; tools = { tar = "tar" } } in
+let create ?stdout ?stderr ~proc_mgr ~fs () =
+  let stdout =
+    Option.map (fun s -> (s :> Eio.Flow.sink_ty Eio.Resource.t)) stdout
+  in
+  let stderr =
+    Option.map (fun s -> (s :> Eio.Flow.sink_ty Eio.Resource.t)) stderr
+  in
+  let t_partial =
+    { proc_mgr :> pm; fs; stdout; stderr; tools = { tar = "tar" } }
+  in
   let tools = resolve_tools t_partial in
   { t_partial with tools }
 
@@ -86,9 +96,31 @@ let link_tree t ~src ~dst =
 
 (* -- Low-level command execution ----------------------------------------- *)
 
+(* Run [cmd] with stdout/stderr inherited from the parent terminal so
+   any progress or error output the subprocess writes is shown to the
+   user as it happens. Used for interactive-feeling commands like git
+   pull/push where hiding the subprocess output would leave the user
+   guessing. Falls back to [run_quiet] when no stdout/stderr resources
+   were registered on [t]. *)
+let run_inherit t cmd =
+  Log.debug (fun m -> m "$ %s" (String.concat " " cmd));
+  match (t.stdout, t.stderr) with
+  | None, _ | _, None -> run_quiet t cmd
+  | Some stdout, Some stderr -> (
+      Eio.Switch.run @@ fun sw ->
+      let child =
+        Eio.Process.spawn ~sw t.proc_mgr ~stdout ~stderr cmd
+      in
+      match Eio.Process.await child with
+      | `Exited 0 -> ()
+      | `Exited n -> Fmt.failwith "%s exited %d" (List.hd cmd) n
+      | `Signaled n ->
+          Fmt.failwith "%s killed by signal %d" (List.hd cmd) n)
+
 module Cmd = struct
   let run t cmd = run_quiet t cmd
   let run_out t cmd = run_capture t cmd
+  let run_inherit t cmd = run_inherit t cmd
 end
 
 (* -- Archive operations -------------------------------------------------- *)

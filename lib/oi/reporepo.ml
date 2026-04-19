@@ -85,11 +85,123 @@ let ensure_clone ~sys ~path ~url =
   else begin
     mkdir_p (Filename.dirname path);
     Log.info (fun m -> m "Cloning reporepo from %s to %s" url path);
-    try D10.Sysops.Cmd.run sys [ "git"; "clone"; url; path ]
+    try
+      Retry.with_attempts ~label:(Fmt.str "git clone %s" url) (fun () ->
+          D10.Sysops.Cmd.run sys [ "git"; "clone"; url; path ])
     with _ ->
       Error.config_error "failed to clone reporepo from %s into %s" url
         path
   end
+
+(* -- Sync (pull/commit/push) -------------------------------------------- *)
+
+(* Internal git plumbing without progress (used for queries like
+   [rev-parse]). *)
+let git_at ~sys ~path args =
+  D10.Sysops.Cmd.run sys ("git" :: "-C" :: path :: args)
+
+let git_at_out ~sys ~path args =
+  D10.Sysops.Cmd.run_out sys ("git" :: "-C" :: path :: args)
+
+(* Git for user-facing operations (pull, push, commit). Streams stdout
+   and stderr through to the parent terminal so the user sees the same
+   output [git] would print on the command line — including the actual
+   error message on failure. *)
+let git_at_inherit ~sys ~path args =
+  D10.Sysops.Cmd.run_inherit sys ("git" :: "-C" :: path :: args)
+
+let assert_clone path =
+  if not (Sys.file_exists (path / ".git")) then
+    Error.config_error
+      "reporepo at %s is not a git working copy — run an [oi repo] \
+       subcommand first to bootstrap the clone"
+      path
+
+let set_push_url ~sys ~path url =
+  assert_clone path;
+  git_at ~sys ~path [ "remote"; "set-url"; "--push"; "origin"; url ]
+
+type push_step =
+  | Step_commit of { files : string list }
+      (** Captured by the auto-commit; empty when the tree was already clean. *)
+  | Step_pull of { commits : int }
+      (** Number of upstream commits brought in by the rebase (0 = up to date). *)
+  | Step_push of { commits : int }
+      (** Number of local commits sent upstream (0 = nothing to push). *)
+
+type push_outcome = push_step list
+
+(* Count commits in [base..head] (linear distance). Returns 0 when
+   either revision is unknown (e.g. no upstream tracking branch). *)
+let commit_count ~sys ~path ~base ~head =
+  if base = "" || head = "" || base = head then 0
+  else
+    try int_of_string (git_at_out ~sys ~path [ "rev-list"; "--count"; base ^ ".." ^ head ])
+    with _ -> 0
+
+let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
+  assert_clone path;
+  (* 1. Auto-commit any local edits (typically from [oi repo bump] or
+        manual edits) so they're a real commit before we rebase on
+        upstream. Doing this first means any rebase conflicts manifest
+        as commit-vs-commit conflicts (easier to drop into a shell to
+        resolve) rather than dirty-tree-vs-stash conflicts. *)
+  let porcelain = git_at_out ~sys ~path [ "status"; "--porcelain" ] in
+  let dirty_paths =
+    porcelain |> String.split_on_char '\n'
+    |> List.filter_map (fun line ->
+           let line = String.trim line in
+           if line = "" || String.length line < 4 then None
+           else Some (String.sub line 3 (String.length line - 3)))
+  in
+  on_step_start 1 "commit local changes";
+  let commit_step =
+    if dirty_paths = [] then Step_commit { files = [] }
+    else begin
+      git_at ~sys ~path [ "add"; "-A" ];
+      let summary =
+        if List.length dirty_paths = 1 then List.hd dirty_paths
+        else Fmt.str "%d files" (List.length dirty_paths)
+      in
+      let msg =
+        Fmt.str
+          "oi repo push: local edits (%s)\n\nAuto-committed by `oi repo \
+           push`. Files:\n%s"
+          summary
+          (String.concat "\n" (List.map (fun p -> "  " ^ p) dirty_paths))
+      in
+      git_at_inherit ~sys ~path [ "commit"; "-m"; msg ];
+      Step_commit { files = dirty_paths }
+    end
+  in
+  (* 2. Bring in upstream commits. [--rebase] keeps history linear and
+        avoids merge bubbles in what is meant to read as a chronological
+        log of pinned overlay versions. *)
+  on_step_start 2 "pull --rebase from upstream";
+  let head_before = git_at_out ~sys ~path [ "rev-parse"; "HEAD" ] in
+  git_at_inherit ~sys ~path [ "pull"; "--rebase" ];
+  let head_after = git_at_out ~sys ~path [ "rev-parse"; "HEAD" ] in
+  let pull_step =
+    Step_pull { commits = commit_count ~sys ~path ~base:head_before ~head:head_after }
+  in
+  (* 3. Push to whatever remote/branch the current branch tracks. The
+        push URL may have been overridden via [set_push_url] earlier in
+        this run, but that's a local-config concern; [git push] picks it
+        up automatically. *)
+  on_step_start 3 "push to origin";
+  let push_step =
+    let local = git_at_out ~sys ~path [ "rev-parse"; "@" ] in
+    let remote =
+      try git_at_out ~sys ~path [ "rev-parse"; "@{u}" ] with _ -> ""
+    in
+    let ahead = commit_count ~sys ~path ~base:remote ~head:local in
+    if ahead = 0 then Step_push { commits = 0 }
+    else begin
+      git_at_inherit ~sys ~path [ "push" ];
+      Step_push { commits = ahead }
+    end
+  in
+  [ commit_step; pull_step; push_step ]
 
 (* -- Loading ------------------------------------------------------------- *)
 
@@ -405,7 +517,9 @@ let parse_ls_remote_output out =
            | _ -> None)
 
 let try_ls_remote ~sys url args =
-  try D10.Sysops.Cmd.run_out sys ("git" :: "ls-remote" :: url :: args)
+  try
+    Retry.with_attempts ~label:(Fmt.str "git ls-remote %s" url) (fun () ->
+        D10.Sysops.Cmd.run_out sys ("git" :: "ls-remote" :: url :: args))
   with exn ->
     Error.config_error "git ls-remote %s failed: %s" url (Printexc.to_string exn)
 
