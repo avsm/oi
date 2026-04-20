@@ -1803,7 +1803,9 @@ let needs_sync ~cwd ~prefix =
       let opam_files =
         try
           Sys.readdir cwd |> Array.to_list
-          |> List.filter (fun f -> Filename.check_suffix f ".opam")
+          |> List.filter (fun f ->
+              Filename.check_suffix f ".opam"
+              && Filename.chop_suffix f ".opam" <> "")
         with Sys_error _ -> []
       in
       List.exists

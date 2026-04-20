@@ -46,11 +46,21 @@ let run_capture t cmd =
   Log.debug (fun m -> m "%s" out);
   out
 
+(* Spawn [which NAME] with both stdout and stderr routed into a
+   throwaway buffer. Nix's [which] writes "no NAME in PATH" to stderr
+   on miss; [Eio.Process.parse_out] only captures stdout, so without
+   the buffered stderr sink that line leaks to the CLI's own stderr. *)
 let has_cmd t name =
-  try
-    ignore (run_capture t [ "which"; name ]);
-    true
-  with _ -> false
+  Eio.Switch.run @@ fun sw ->
+  let buf = Buffer.create 64 in
+  let sink = Eio.Flow.buffer_sink buf in
+  let child =
+    Eio.Process.spawn ~sw t.proc_mgr ~stdout:sink ~stderr:sink
+      [ "which"; name ]
+  in
+  match Eio.Process.await child with
+  | `Exited 0 -> true
+  | `Exited _ | `Signaled _ -> false
 
 (* -- Initialisation ------------------------------------------------------ *)
 

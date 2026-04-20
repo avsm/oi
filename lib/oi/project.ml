@@ -199,7 +199,10 @@ let merge_overlays (handles : string list) : string list =
 let load ~fs dir =
   let files =
     Eio.Path.read_dir Eio.Path.(fs / dir)
-    |> List.filter (fun f -> Filename.check_suffix f ".opam")
+    (* Require a name before the suffix so the bare dotfile [.opam]
+       (opam's own root, when scanning from [$HOME]) is skipped. *)
+    |> List.filter (fun f ->
+        Filename.check_suffix f ".opam" && Filename.chop_suffix f ".opam" <> "")
     |> List.sort String.compare
   in
   let local_packages =

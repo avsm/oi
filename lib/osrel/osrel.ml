@@ -4,6 +4,22 @@ let cmd ~proc_mgr argv =
     |> String.trim |> Option.some
   with _ -> None
 
+(* Spawn with both streams into a throwaway buffer: Nix's [which] writes
+   "no NAME in PATH" to stderr on miss, and [parse_out] only captures
+   stdout, so the failing probe would otherwise leak a line to the
+   caller's stderr. *)
+let has_cmd ~proc_mgr name =
+  Eio.Switch.run @@ fun sw ->
+  let buf = Buffer.create 64 in
+  let sink = Eio.Flow.buffer_sink buf in
+  let child =
+    Eio.Process.spawn ~sw proc_mgr ~stdout:sink ~stderr:sink
+      [ "which"; name ]
+  in
+  match Eio.Process.await child with
+  | `Exited 0 -> true
+  | `Exited _ | `Signaled _ -> false
+
 let exists ~fs path =
   try
     ignore (Eio.Path.stat ~follow:true Eio.Path.(fs / path));
@@ -153,8 +169,8 @@ module OS = struct
       | None -> `Other "linux"
 
   let detect_macos ~proc_mgr =
-    if Option.is_some (cmd ~proc_mgr [ "which"; "brew" ]) then `Homebrew
-    else if Option.is_some (cmd ~proc_mgr [ "which"; "port" ]) then `MacPorts
+    if has_cmd ~proc_mgr "brew" then `Homebrew
+    else if has_cmd ~proc_mgr "port" then `MacPorts
     else `None
 
   let detect_version ~proc_mgr ~os_release kind =
