@@ -45,8 +45,11 @@ jobs:
 
       - name: Build with oi
         run: |
-          oi sync
-          oi exec dune build
+          oi sync -v
+
+      - name: Build with oi
+        run: |
+          oi exec -- dune build --profile=release
 
       - name: Do a registry build
         run: |
