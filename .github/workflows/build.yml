@@ -14,7 +14,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ocaml-version: ["5.4.0"]
         operating-system: [macos-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.operating-system }}
@@ -23,23 +22,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Restore Dune cache
+      - name: Restore Oi cache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.cache
-          key: dune-cache-${{ matrix.operating-system }}
+          key: oi-cache-${{ matrix.operating-system }}
           restore-keys: |
-            dune-cache-${{ matrix.operating-system }}-
+            oi-cache-${{ matrix.operating-system }}-
 
-      - name: Use OCaml ${{ matrix.ocaml-version }}
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: ${{ matrix.ocaml-version }}
-          opam-repositories: |
-            default: https://github.com/ocaml/opam-repository.git
+      - name: Install oi (macOS)
+        if: runner.os == 'macOS'
+        run: brew install avsm/ocaml/oi
 
-      - name: opam deps
-        run: opam exec -- opam install --deps-only .
+      - name: Install oi (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          arch=$(uname -m)
+          curl -fsSL -o "$HOME/.local/bin/oi" "https://oi.ci.dev/oi-linux-${arch}"
+          chmod +x "$HOME/.local/bin/oi"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Dune build
-        run: opam exec -- dune build --profile=release @install
+      - name: Build with oi
+        run: |
+          oi sync
+          oi exec dune build
+
+      - name: Do a registry build
+        run: |
+          oi exec -- oi registry build @avsm
+
+
