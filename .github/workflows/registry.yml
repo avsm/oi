@@ -45,11 +45,11 @@ jobs:
           restore-keys: |
             oi-registry-linux-amd64-
 
-      - name: Install oi (static Linux binary)
+      - name: Install oi from latest release
         run: |
           mkdir -p "$HOME/.local/bin"
-          arch=$(uname -m)
-          curl -fsSL -o "$HOME/.local/bin/oi" "https://oi.ci.dev/oi-linux-${arch}"
+          curl -fsSL -o "$HOME/.local/bin/oi" \
+            "https://github.com/${{ github.repository }}/releases/latest/download/oi-linux-$(uname -m)"
           chmod +x "$HOME/.local/bin/oi"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -95,11 +95,11 @@ jobs:
           restore-keys: |
             oi-registry-linux-arm64-
 
-      - name: Install oi (static Linux binary)
+      - name: Install oi from latest release
         run: |
           mkdir -p "$HOME/.local/bin"
-          arch=$(uname -m)
-          curl -fsSL -o "$HOME/.local/bin/oi" "https://oi.ci.dev/oi-linux-${arch}"
+          curl -fsSL -o "$HOME/.local/bin/oi" \
+            "https://github.com/${{ github.repository }}/releases/latest/download/oi-linux-$(uname -m)"
           chmod +x "$HOME/.local/bin/oi"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -146,8 +146,13 @@ jobs:
           restore-keys: |
             oi-registry-${{ matrix.os }}-
 
-      - name: Install oi (Homebrew tap)
-        run: brew install avsm/ocaml/oi
+      - name: Install oi from latest release
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/oi" \
+            "https://github.com/${{ github.repository }}/releases/latest/download/oi-macos-arm64"
+          chmod +x "$HOME/.local/bin/oi"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Bootstrap reporepo
         run: oi repo list

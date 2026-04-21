@@ -30,19 +30,19 @@ jobs:
           restore-keys: |
             oi-cache-${{ matrix.operating-system }}-
 
-      - name: Install oi (macOS)
-        if: runner.os == 'macOS'
-        run: brew install avsm/ocaml/oi
-
-      - name: Install oi (Linux)
-        if: runner.os == 'Linux'
+      - name: Install oi from latest release
         run: |
           mkdir -p "$HOME/.local/bin"
-          arch=$(uname -m)
-          curl -fsSL -o "$HOME/.local/bin/oi" "https://oi.ci.dev/oi-linux-${arch}"
+          case "${{ runner.os }}" in
+            macOS) asset="oi-macos-arm64" ;;
+            Linux) asset="oi-linux-$(uname -m)" ;;
+            *) echo "unsupported: ${{ runner.os }}"; exit 1 ;;
+          esac
+          curl -fsSL -o "$HOME/.local/bin/oi" \
+            "https://github.com/${{ github.repository }}/releases/latest/download/${asset}"
           chmod +x "$HOME/.local/bin/oi"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          oi config
+          "$HOME/.local/bin/oi" config
 
       - name: Build with oi
         run: |
