@@ -2902,9 +2902,17 @@ let registry_build_cmd =
       end
     in
     let targets = targets @ reporepo_targets in
-    if targets = [] then
-      Oi.Error.config_error
-        "no targets to build (pass PKG arguments or --all)";
+    if targets = [] then begin
+      if all then
+        Oi.Error.config_error
+          "--all matched no overlays with x-root-packages in %s. Declare \
+           root packages for an overlay with 'oi repo set-roots HANDLE \
+           PKG...'"
+          (reporepo_path ())
+      else
+        Oi.Error.config_error
+          "no targets to build (pass PKG arguments or --all)"
+    end;
     (* Classify each input into a plain target or an overlay form.
        Overlay forms collect handles to thread through [with_repos]
        so the later [cli_extra_repos] run clones them up front. The

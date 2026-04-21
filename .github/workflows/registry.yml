@@ -68,6 +68,7 @@ jobs:
         run: |
           mkdir -p "$REGISTRY_LOCAL"
           docker compose up --build --abort-on-container-exit
+          find "$REGISTRY_LOCAL" -type f
 
       - name: Rsync to ${{ vars.REGISTRY_RSYNC_DEST }}
         if: vars.REGISTRY_RSYNC_DEST != ''
@@ -114,6 +115,7 @@ jobs:
         run: |
           mkdir -p "$REGISTRY_LOCAL"
           docker compose up --build --abort-on-container-exit
+          find "$REGISTRY_LOCAL" -type f
 
       - name: Rsync to ${{ vars.REGISTRY_RSYNC_DEST }}
         if: vars.REGISTRY_RSYNC_DEST != ''
@@ -157,6 +159,7 @@ jobs:
         run: |
           mkdir -p "$REGISTRY_LOCAL"
           oi registry export "$REGISTRY_LOCAL"
+          find "$REGISTRY_LOCAL" -type f
 
       - name: Rsync to ${{ vars.REGISTRY_RSYNC_DEST }}
         if: vars.REGISTRY_RSYNC_DEST != ''

@@ -1,0 +1,68 @@
+name: Release binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux static (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    container:
+      image: ocaml/opam:alpine-3.23-ocaml-5.4
+      options: --user opam
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build depexts
+        run: |
+          sudo apk add --no-cache build-base m4 perl pkgconf git curl bash patch \
+            gmp-dev sqlite-dev sqlite-static openssl-dev openssl-libs-static \
+            zlib-dev zlib-static
+
+      - name: Build static oi
+        run: |
+          git config --global --add safe.directory "$PWD"
+          opam install -y --deps-only .
+          opam exec -- dune build --profile=static bin/main.exe
+          mkdir -p dist
+          cp _build/default/bin/main.exe dist/oi-linux-${{ matrix.arch }}
+          chmod 755 dist/oi-linux-${{ matrix.arch }}
+          strip dist/oi-linux-${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oi-linux-${{ matrix.arch }}
+          path: dist/oi-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS release (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4.1"
+
+      - name: Build release oi
+        run: |
+          opam install -y --deps-only .
+          opam exec -- dune build --profile=release bin/main.exe
+          mkdir -p dist
+          cp _build/default/bin/main.exe dist/oi-macos-arm64
+          chmod 755 dist/oi-macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oi-macos-arm64
+          path: dist/oi-macos-arm64
+          if-no-files-found: error
