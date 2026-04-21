@@ -30,11 +30,10 @@ jobs:
           WORKDIR /home/opam/src
           COPY --chown=opam:opam . /home/opam/src
           ENV OPAMYES=true OPAMCONFIRMLEVEL=unsafe-yes
-          RUN opam install -y --deps-only .
-          RUN opam exec -- dune build --profile=static bin/main.exe
+          RUN opam-2.5 install -y --deps-only .
+          RUN opam-2.5 exec -- dune build --profile=static
           USER root
-          RUN strip _build/default/bin/main.exe \
-              && install -m 0755 _build/default/bin/main.exe /oi
+          RUN install -m 0755 _build/default/bin/main.exe /oi
           FROM scratch
           COPY --from=builder /oi /oi
           EOF
