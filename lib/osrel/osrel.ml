@@ -13,8 +13,7 @@ let has_cmd ~proc_mgr name =
   let buf = Buffer.create 64 in
   let sink = Eio.Flow.buffer_sink buf in
   let child =
-    Eio.Process.spawn ~sw proc_mgr ~stdout:sink ~stderr:sink
-      [ "which"; name ]
+    Eio.Process.spawn ~sw proc_mgr ~stdout:sink ~stderr:sink [ "which"; name ]
   in
   match Eio.Process.await child with
   | `Exited 0 -> true

@@ -117,8 +117,7 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
      into the solver set at sync/build time. *)
   let raw_overlays =
     match
-      OpamStd.String.Map.find_opt "x-reporepo"
-        (OpamFile.OPAM.extensions opam)
+      OpamStd.String.Map.find_opt "x-reporepo" (OpamFile.OPAM.extensions opam)
     with
     | None -> []
     | Some v -> (
@@ -139,9 +138,9 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
    when two entries share a [key] but disagree. [equal] defaults to physical
    equality, suitable for the plain-string dedup case (overlays). *)
 let dedup_with_conflict_check (type a) ~(key : a -> string)
-    ?(equal : (a -> a -> bool) = ( == ))
-    ?(on_conflict : (prev:a -> curr:a -> string -> unit) option) (items : a list)
-    : a list =
+    ?(equal : a -> a -> bool = ( == ))
+    ?(on_conflict : (prev:a -> curr:a -> string -> unit) option)
+    (items : a list) : a list =
   let seen : (string, a) Hashtbl.t = Hashtbl.create 8 in
   let ordered = ref [] in
   List.iter
@@ -153,9 +152,7 @@ let dedup_with_conflict_check (type a) ~(key : a -> string)
           ordered := entry :: !ordered
       | Some prev when equal prev entry -> ()
       | Some prev -> (
-          match on_conflict with
-          | Some f -> f ~prev ~curr:entry k
-          | None -> ()))
+          match on_conflict with Some f -> f ~prev ~curr:entry k | None -> ()))
     items;
   List.rev !ordered
 

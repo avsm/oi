@@ -120,11 +120,11 @@ let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
             let source =
               OpamFile.OPAM.url opam
               |> Stdlib.Option.map (fun urlf ->
-                let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
-                let checksums =
-                  List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
-                in
-                { url; checksums })
+                  let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
+                  let checksums =
+                    List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
+                  in
+                  { url; checksums })
             in
             let extra_sources =
               List.map

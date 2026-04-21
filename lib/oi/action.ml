@@ -56,11 +56,60 @@ let plan ctx ?d10 ~packages_dirs pkgs =
             OpamPackage.Name.Set.empty deps
         in
         Hashtbl.replace transitive_deps name trans;
+        (* Order must match day10's here:
+           build the sub-DAG of pkg's transitive closure keyed by pkg with each
+           entry's transitive-dep set as its value, iteratively peel leaves
+           (alphabetical within each level via OpamPackage.Map ordering),
+           reverse so the root comes first, then drop the root (pkg itself).
+           Anything else produces a different layer_hash than day10. *)
         let all_dep_pkgs =
-          OpamPackage.Name.Set.elements trans
-          |> List.filter_map (fun n ->
-              OpamPackage.Name.Map.find_opt n nodes
-              |> Stdlib.Option.map (fun node -> node.pkg))
+          let pkg_of_name n =
+            OpamPackage.Name.Map.find_opt n nodes
+            |> Stdlib.Option.map (fun node -> node.pkg)
+          in
+          let names_to_pkg_set s =
+            OpamPackage.Name.Set.elements s
+            |> List.filter_map pkg_of_name
+            |> OpamPackage.Set.of_list
+          in
+          let dag =
+            OpamPackage.Name.Set.fold
+              (fun dep_name acc ->
+                match pkg_of_name dep_name with
+                | None -> acc
+                | Some dep_pkg ->
+                    let dep_trans =
+                      Hashtbl.find_opt transitive_deps dep_name
+                      |> Stdlib.Option.value ~default:OpamPackage.Name.Set.empty
+                    in
+                    OpamPackage.Map.add dep_pkg (names_to_pkg_set dep_trans) acc)
+              trans OpamPackage.Map.empty
+          in
+          let dag = OpamPackage.Map.add pkg (names_to_pkg_set trans) dag in
+          let rec topo_sort m =
+            if OpamPackage.Map.is_empty m then []
+            else
+              let installable, remainder =
+                OpamPackage.Map.partition
+                  (fun _ deps -> OpamPackage.Set.is_empty deps)
+                  m
+              in
+              if OpamPackage.Map.is_empty installable then []
+              else
+                let installable_list =
+                  OpamPackage.Map.bindings installable |> List.map fst
+                in
+                let remainder =
+                  OpamPackage.Map.map
+                    (fun deps ->
+                      List.fold_left
+                        (fun acc p -> OpamPackage.Set.remove p acc)
+                        deps installable_list)
+                    remainder
+                in
+                installable_list @ topo_sort remainder
+          in
+          match topo_sort dag |> List.rev with [] -> [] | _ :: rest -> rest
         in
         let layer_hash = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
         let method_ =

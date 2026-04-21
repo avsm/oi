@@ -55,8 +55,7 @@ let has_cmd t name =
   let buf = Buffer.create 64 in
   let sink = Eio.Flow.buffer_sink buf in
   let child =
-    Eio.Process.spawn ~sw t.proc_mgr ~stdout:sink ~stderr:sink
-      [ "which"; name ]
+    Eio.Process.spawn ~sw t.proc_mgr ~stdout:sink ~stderr:sink [ "which"; name ]
   in
   match Eio.Process.await child with
   | `Exited 0 -> true
@@ -118,14 +117,11 @@ let run_inherit t cmd =
   | None, _ | _, None -> run_quiet t cmd
   | Some stdout, Some stderr -> (
       Eio.Switch.run @@ fun sw ->
-      let child =
-        Eio.Process.spawn ~sw t.proc_mgr ~stdout ~stderr cmd
-      in
+      let child = Eio.Process.spawn ~sw t.proc_mgr ~stdout ~stderr cmd in
       match Eio.Process.await child with
       | `Exited 0 -> ()
       | `Exited n -> Fmt.failwith "%s exited %d" (List.hd cmd) n
-      | `Signaled n ->
-          Fmt.failwith "%s killed by signal %d" (List.hd cmd) n)
+      | `Signaled n -> Fmt.failwith "%s killed by signal %d" (List.hd cmd) n)
 
 module Cmd = struct
   let run t cmd = run_quiet t cmd

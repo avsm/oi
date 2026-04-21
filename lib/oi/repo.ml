@@ -12,7 +12,6 @@ let log_src = Logs.Src.create "oi.repo"
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let ( / ) = Filename.concat
-
 let refresh_max_age = 86_400.0
 
 (* -- Repo pull using opam libraries -------------------------------------- *)
@@ -122,4 +121,3 @@ let ensure_extra ~fs ~data_dir ?(refresh = false) extras =
       ensure_one ~fs ~refresh ~label:e.name ~url:e.url ~dir;
       dir / "packages")
     extras
-

@@ -36,9 +36,9 @@ type package_plan = {
   build_dir : string;
   prefix : string;
   overlay_handle : string option;
-      (** Reporepo overlay handle that contributed this package's opam
-          file (e.g. ["default"], ["avsm"]), or [None] when the package
-          came from a non-overlay source like a pin-depends tree. *)
+      (** Reporepo overlay handle that contributed this package's opam file
+          (e.g. ["default"], ["avsm"]), or [None] when the package came from a
+          non-overlay source like a pin-depends tree. *)
   overlay_version : string option;
       (** Reporepo overlay version (e.g. ["20260418.6"]). Present iff
           [overlay_handle] is. *)
@@ -62,9 +62,9 @@ val create :
   ocaml_version:string ->
   Action.t ->
   t
-(** [packages_dirs] is the same list passed to the solver, used to
-    attribute each package to its source directory so the resulting
-    plan (and any layer built from it) can be tagged with the overlay
-    that contributed the opam file. *)
+(** [packages_dirs] is the same list passed to the solver, used to attribute
+    each package to its source directory so the resulting plan (and any layer
+    built from it) can be tagged with the overlay that contributed the opam
+    file. *)
 
 val pp : t Fmt.t

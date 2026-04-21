@@ -90,10 +90,7 @@ val export : cache:Cache.t -> dst:Eio.Fs.dir_ty Eio.Path.t -> int
     registry export. Returns the number of blobs exported. *)
 
 val merge_remote :
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  index_path:string ->
-  remote_path:string ->
-  unit
+  fs:Eio.Fs.dir_ty Eio.Path.t -> index_path:string -> remote_path:string -> unit
 (** [merge_remote ~fs ~index_path ~remote_path] opens the sqlite index at
     [index_path] (creating it if absent) and INSERT OR IGNOREs every row from
     [remote_path] (another source-mirror index) into it. Safe to run before

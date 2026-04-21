@@ -16,8 +16,8 @@ let with_attempts ~label ?(max_attempts = 3) ?(initial_delay_s = 1.0) f =
         result
     | exception exn when attempt < max_attempts ->
         Log.warn (fun m ->
-            m "%s failed (attempt %d/%d): %s — retrying in %.1fs" label
-              attempt max_attempts (Printexc.to_string exn) delay);
+            m "%s failed (attempt %d/%d): %s — retrying in %.1fs" label attempt
+              max_attempts (Printexc.to_string exn) delay);
         Unix.sleepf delay;
         loop (attempt + 1) (delay *. 2.0)
   in

@@ -4,26 +4,41 @@
 
 let ( / ) = Filename.concat
 
+(* Find the first packages_dir in which [<dir>/<name>/<name.version>/opam] exists,
+   read it, and hash its effective_part. Returns [None] only if no dir has the file;
+   [hash] below treats that as fatal, mirroring day10's [Option.get]. *)
 let hash_opam_file packages_dirs pkg =
   let name_s = OpamPackage.Name.to_string (OpamPackage.name pkg) in
   let pkg_s = OpamPackage.to_string pkg in
-  let path =
-    List.find_map
-      (fun dir ->
-        let p = dir / name_s / pkg_s / "opam" in
-        if Sys.file_exists p then Some p else None)
-      packages_dirs
-  in
-  match path with
-  | Some p ->
-      OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw p))
-      |> OpamFile.OPAM.effective_part |> OpamFile.OPAM.write_to_string
-      |> OpamHash.compute_from_string |> OpamHash.to_string
-  | None -> Digest.string (OpamPackage.to_string pkg) |> Digest.to_hex
+  List.find_map
+    (fun dir ->
+      let p = dir / name_s / pkg_s / "opam" in
+      if Sys.file_exists p then
+        Some
+          (OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw p))
+          |> OpamFile.OPAM.effective_part |> OpamFile.OPAM.write_to_string
+          |> OpamHash.compute_from_string |> OpamHash.to_string)
+      else None)
+    packages_dirs
 
 let hash ~packages_dirs pkgs =
-  let hashes = List.map (hash_opam_file packages_dirs) pkgs in
-  String.concat " " hashes |> Digest.string |> Digest.to_hex
+  let hashes =
+    List.map
+      (fun pkg ->
+        match hash_opam_file packages_dirs pkg with
+        | Some h -> h
+        | None ->
+            Fmt.failwith "layer_hash: no opam file for %s in packages_dirs [%s]"
+              (OpamPackage.to_string pkg)
+              (String.concat "; " packages_dirs))
+      pkgs
+  in
+  let concat = String.concat " " hashes in
+  if Sys.getenv_opt "DAY10_DEBUG_HASH" <> None then
+    Printf.eprintf "layer_hash input: [%s] -> %S\n%!"
+      (String.concat "," (List.map OpamPackage.to_string pkgs))
+      concat;
+  Digest.string concat |> Digest.to_hex
 
 type meta = {
   package : string;
@@ -38,8 +53,8 @@ type meta = {
 let meta_jsont : meta Jsont.t =
   let open Jsont in
   Object.map ~kind:"layer meta"
-    (fun package exit_status deps hashes created overlay_handle
-         overlay_version ->
+    (fun
+      package exit_status deps hashes created overlay_handle overlay_version ->
       {
         package;
         exit_status;
@@ -55,8 +70,7 @@ let meta_jsont : meta Jsont.t =
   |> Object.mem "hashes" (list string) ~dec_absent:[] ~enc:(fun i -> i.hashes)
   |> Object.mem "created" number ~enc:(fun i -> i.created)
   |> Object.opt_mem "overlay_handle" string ~enc:(fun i -> i.overlay_handle)
-  |> Object.opt_mem "overlay_version" string
-       ~enc:(fun i -> i.overlay_version)
+  |> Object.opt_mem "overlay_version" string ~enc:(fun i -> i.overlay_version)
   |> Object.finish
 
 let save_meta path meta =

@@ -22,9 +22,9 @@ type t = {
       (** Union of [pin-depends:] entries across all *.opam, in declared order.
       *)
   overlays : string list;
-      (** Union of [x-reporepo:] entries across all *.opam. Each element is
-          a reporepo handle (e.g. ["avsm"]); {!Oi.Reporepo} resolves them
-          at sync time. Deduplicated, declared-order preserved. *)
+      (** Union of [x-reporepo:] entries across all *.opam. Each element is a
+          reporepo handle (e.g. ["avsm"]); {!Oi.Reporepo} resolves them at sync
+          time. Deduplicated, declared-order preserved. *)
 }
 
 val load : fs:Eio.Fs.dir_ty Eio.Path.t -> string -> t

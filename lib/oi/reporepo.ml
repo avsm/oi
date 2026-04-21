@@ -68,13 +68,12 @@ let ensure_clone ~fs ~sys ~path ~url =
   let dot_git = path / ".git" in
   if Sys.file_exists dot_git then ()
   else if
-    Sys.file_exists path
-    && Sys.is_directory path
+    Sys.file_exists path && Sys.is_directory path
     && Array.length (Sys.readdir path) > 0
   then
     Error.config_error
-      "reporepo path %s exists but is not a git clone; move or remove \
-       it and retry"
+      "reporepo path %s exists but is not a git clone; move or remove it and \
+       retry"
       path
   else begin
     mkdir_p ~fs (Filename.dirname path);
@@ -83,8 +82,7 @@ let ensure_clone ~fs ~sys ~path ~url =
       Retry.with_attempts ~label:(Fmt.str "git clone %s" url) (fun () ->
           D10.Sysops.Cmd.run sys [ "git"; "clone"; url; path ])
     with _ ->
-      Error.config_error "failed to clone reporepo from %s into %s" url
-        path
+      Error.config_error "failed to clone reporepo from %s into %s" url path
   end
 
 (* -- Sync (pull/commit/push) -------------------------------------------- *)
@@ -107,8 +105,8 @@ let git_at_inherit ~sys ~path args =
 let assert_clone path =
   if not (Sys.file_exists (path / ".git")) then
     Error.config_error
-      "reporepo at %s is not a git working copy — run an [oi repo] \
-       subcommand first to bootstrap the clone"
+      "reporepo at %s is not a git working copy — run an [oi repo] subcommand \
+       first to bootstrap the clone"
       path
 
 let set_push_url ~sys ~path url =
@@ -119,7 +117,8 @@ type push_step =
   | Step_commit of { files : string list }
       (** Captured by the auto-commit; empty when the tree was already clean. *)
   | Step_pull of { commits : int }
-      (** Number of upstream commits brought in by the rebase (0 = up to date). *)
+      (** Number of upstream commits brought in by the rebase (0 = up to date).
+      *)
   | Step_push of { commits : int }
       (** Number of local commits sent upstream (0 = nothing to push). *)
 
@@ -130,7 +129,9 @@ type push_outcome = push_step list
 let commit_count ~sys ~path ~base ~head =
   if base = "" || head = "" || base = head then 0
   else
-    try int_of_string (git_at_out ~sys ~path [ "rev-list"; "--count"; base ^ ".." ^ head ])
+    try
+      int_of_string
+        (git_at_out ~sys ~path [ "rev-list"; "--count"; base ^ ".." ^ head ])
     with _ -> 0
 
 let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
@@ -144,9 +145,9 @@ let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
   let dirty_paths =
     porcelain |> String.split_on_char '\n'
     |> List.filter_map (fun line ->
-           let line = String.trim line in
-           if line = "" || String.length line < 4 then None
-           else Some (String.sub line 3 (String.length line - 3)))
+        let line = String.trim line in
+        if line = "" || String.length line < 4 then None
+        else Some (String.sub line 3 (String.length line - 3)))
   in
   on_step_start 1 "commit local changes";
   let commit_step =
@@ -159,8 +160,9 @@ let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
       in
       let msg =
         Fmt.str
-          "oi repo push: local edits (%s)\n\nAuto-committed by `oi repo \
-           push`. Files:\n%s"
+          "oi repo push: local edits (%s)\n\n\
+           Auto-committed by `oi repo push`. Files:\n\
+           %s"
           summary
           (String.concat "\n" (List.map (fun p -> "  " ^ p) dirty_paths))
       in
@@ -176,7 +178,8 @@ let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
   git_at_inherit ~sys ~path [ "pull"; "--rebase" ];
   let head_after = git_at_out ~sys ~path [ "rev-parse"; "HEAD" ] in
   let pull_step =
-    Step_pull { commits = commit_count ~sys ~path ~base:head_before ~head:head_after }
+    Step_pull
+      { commits = commit_count ~sys ~path ~base:head_before ~head:head_after }
   in
   (* 3. Push to whatever remote/branch the current branch tracks. The
         push URL may have been overridden via [set_push_url] earlier in
@@ -202,8 +205,7 @@ let push ?(on_step_start = fun _ _ -> ()) ~sys ~path () =
 let split_url_commit s =
   match String.index_opt s '#' with
   | None -> (s, "")
-  | Some i ->
-      (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1))
+  | Some i -> (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1))
 
 let is_overlay_extension extensions =
   match OpamStd.String.Map.find_opt "x-oi-overlay" extensions with
@@ -231,9 +233,7 @@ let pin_version_of_condition cond =
       match (acc, foc) with
       | Some _, _ -> acc
       | None, OpamTypes.Constraint (`Eq, filter) -> (
-          match filter with
-          | OpamTypes.FString v -> Some v
-          | _ -> None)
+          match filter with OpamTypes.FString v -> Some v | _ -> None)
       | None, _ -> None)
     None cond
 
@@ -241,9 +241,8 @@ let parse_depends_formula formula =
   let out = ref [] in
   OpamFormula.iter
     (fun (name, cond) ->
-      out
-      := (OpamPackage.Name.to_string name, pin_version_of_condition cond)
-         :: !out)
+      out :=
+        (OpamPackage.Name.to_string name, pin_version_of_condition cond) :: !out)
     formula;
   List.rev !out
 
@@ -285,8 +284,7 @@ let parse_entry_file path : entry option =
   with
   | Error.E _ as e -> raise e
   | exn ->
-      Log.warn (fun m ->
-          m "Skipping %s: %s" path (Printexc.to_string exn));
+      Log.warn (fun m -> m "Skipping %s: %s" path (Printexc.to_string exn));
       None
 
 let load ~path =
@@ -296,15 +294,15 @@ let load ~path =
     let handles = Sys.readdir packages_dir |> Array.to_list in
     List.sort String.compare handles
     |> List.concat_map (fun h ->
-           let handle_dir = packages_dir / h in
-           if not (Sys.is_directory handle_dir) then []
-           else
-             let versions = Sys.readdir handle_dir |> Array.to_list in
-             List.sort String.compare versions
-             |> List.filter_map (fun v ->
-                    let opam_path = handle_dir / v / "opam" in
-                    if Sys.file_exists opam_path then parse_entry_file opam_path
-                    else None))
+        let handle_dir = packages_dir / h in
+        if not (Sys.is_directory handle_dir) then []
+        else
+          let versions = Sys.readdir handle_dir |> Array.to_list in
+          List.sort String.compare versions
+          |> List.filter_map (fun v ->
+              let opam_path = handle_dir / v / "opam" in
+              if Sys.file_exists opam_path then parse_entry_file opam_path
+              else None))
 
 (* -- Version ordering --------------------------------------------------- *)
 
@@ -317,8 +315,10 @@ let latest entries ~handle =
   entries
   |> List.filter (fun (e : entry) -> e.handle = handle)
   |> List.sort (fun (a : entry) (b : entry) ->
-         version_compare b.version a.version)
-  |> function x :: _ -> Some x | [] -> None
+      version_compare b.version a.version)
+  |> function
+  | x :: _ -> Some x
+  | [] -> None
 
 let find entries ~handle ~version =
   List.find_opt
@@ -331,9 +331,7 @@ let find entries ~handle ~version =
    downstream callers rely on it for priority placement. *)
 let topo_sort entries =
   let by_handle = Hashtbl.create 16 in
-  List.iter
-    (fun (e : entry) -> Hashtbl.replace by_handle e.handle e)
-    entries;
+  List.iter (fun (e : entry) -> Hashtbl.replace by_handle e.handle e) entries;
   let visited = Hashtbl.create 16 in
   let out_rev = ref [] in
   let rec visit (e : entry) =
@@ -382,18 +380,13 @@ let resolve entries ~roots =
        [None] uniformly. If a future overlay does consult variables
        the solver will raise and we'll revisit. *)
     let env _ = None in
-    let ctx =
-      Opam_0install.Dir_context.create ~constraints ~env packages_dir
-    in
+    let ctx = Opam_0install.Dir_context.create ~constraints ~env packages_dir in
     let names =
-      List.map
-        (fun (r : root) -> OpamPackage.Name.of_string r.handle)
-        roots
+      List.map (fun (r : root) -> OpamPackage.Name.of_string r.handle) roots
     in
     Log.debug (fun m ->
         m "0install solve over %s for roots: %s" packages_dir
-          (String.concat ", "
-             (List.map OpamPackage.Name.to_string names)));
+          (String.concat ", " (List.map OpamPackage.Name.to_string names)));
     match Solver.solve ctx names with
     | Error diag ->
         Error.config_error "overlay resolution failed: %s"
@@ -417,8 +410,7 @@ let resolve entries ~roots =
               else e.commit
             in
             Log.debug (fun m ->
-                m "  resolved %s.%s@%s via %s" e.handle e.version short
-                  e.url))
+                m "  resolved %s.%s@%s via %s" e.handle e.version short e.url))
           sorted;
         sorted
 
@@ -435,9 +427,7 @@ let materialize ~fs ~sys:_ ~data_dir ?(refresh = false) entries =
          reproducible. The upstream URL may be any backend opam
          understands; the [#<sha>] suffix is respected by the git
          backend. *)
-      let url =
-        if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
-      in
+      let url = if e.commit = "" then e.url else e.url ^ "#" ^ e.commit in
       Repo.ensure_one ~fs ~refresh ~label:name ~url ~dir;
       dir / "packages")
     entries
@@ -479,16 +469,12 @@ let ensure_base ~fs ~sys ~data_dir ?(refresh = false) () =
       Log.debug (fun m ->
           m "base overlays (highest priority first): %s"
             (String.concat ", "
-               (List.map
-                  (fun (e : entry) -> e.handle ^ "." ^ e.version)
-                  base)));
+               (List.map (fun (e : entry) -> e.handle ^ "." ^ e.version) base)));
       List.map
         (fun (e : entry) ->
           let name = clone_dir_name e in
           let dir = data_dir / "repos" / name in
-          let url =
-            if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
-          in
+          let url = if e.commit = "" then e.url else e.url ^ "#" ^ e.commit in
           Repo.ensure_one ~fs ~refresh ~label:name ~url ~dir;
           dir / "packages")
         base
@@ -502,20 +488,21 @@ let ensure_base ~fs ~sys ~data_dir ?(refresh = false) () =
 let parse_ls_remote_output out =
   String.split_on_char '\n' out
   |> List.filter_map (fun line ->
-         let line = String.trim line in
-         if line = "" then None
-         else
-           match String.split_on_char '\t' line with
-           | sha :: ref_name :: _ when String.length sha = 40 ->
-               Some (sha, ref_name)
-           | _ -> None)
+      let line = String.trim line in
+      if line = "" then None
+      else
+        match String.split_on_char '\t' line with
+        | sha :: ref_name :: _ when String.length sha = 40 ->
+            Some (sha, ref_name)
+        | _ -> None)
 
 let try_ls_remote ~sys url args =
   try
     Retry.with_attempts ~label:(Fmt.str "git ls-remote %s" url) (fun () ->
         D10.Sysops.Cmd.run_out sys ("git" :: "ls-remote" :: url :: args))
   with exn ->
-    Error.config_error "git ls-remote %s failed: %s" url (Printexc.to_string exn)
+    Error.config_error "git ls-remote %s failed: %s" url
+      (Printexc.to_string exn)
 
 (* Resolve a git URL + optional ref to a 40-char commit sha.
    When [ref_] is [None] we try [HEAD], then fall back to
@@ -527,8 +514,7 @@ let ls_remote_sha ~sys ?ref_ url =
       let out = try_ls_remote ~sys url [ r ] in
       match parse_ls_remote_output out with
       | (sha, _) :: _ -> sha
-      | [] ->
-          Error.config_error "git ls-remote %s %s: ref not found" url r)
+      | [] -> Error.config_error "git ls-remote %s %s: ref not found" url r)
   | None -> (
       let head = try_ls_remote ~sys url [ "HEAD" ] in
       match parse_ls_remote_output head with
@@ -550,8 +536,8 @@ let ls_remote_sha ~sys ?ref_ url =
                   match refs with
                   | (sha, _) :: _ -> sha
                   | [] ->
-                      Error.config_error "git ls-remote %s returned no refs"
-                        url))))
+                      Error.config_error "git ls-remote %s returned no refs" url
+                  ))))
 
 (* -- Today's version ----------------------------------------------------- *)
 
@@ -567,13 +553,13 @@ let next_version entries ~handle =
     entries
     |> List.filter (fun (e : entry) -> e.handle = handle)
     |> List.filter_map (fun (e : entry) ->
-           if String.starts_with ~prefix e.version then
-             let suffix =
-               String.sub e.version (String.length prefix)
-                 (String.length e.version - String.length prefix)
-             in
-             int_of_string_opt suffix
-           else None)
+        if String.starts_with ~prefix e.version then
+          let suffix =
+            String.sub e.version (String.length prefix)
+              (String.length e.version - String.length prefix)
+          in
+          int_of_string_opt suffix
+        else None)
     |> List.fold_left max (-1)
   in
   Fmt.str "%s.%d" today (max_seq + 1)
@@ -594,8 +580,8 @@ let escape_string s =
   Buffer.add_char buf '"';
   Buffer.contents buf
 
-let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name
-    ~origin_url =
+let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
+    =
   let buf = Buffer.create 512 in
   Printf.bprintf buf "opam-version: \"2.0\"\n";
   Printf.bprintf buf "synopsis: %s\n" (escape_string synopsis);
@@ -639,8 +625,7 @@ let ensure_repo_marker ~fs ~path =
 
 (* -- add / bump / remove ------------------------------------------------ *)
 
-let default_synopsis handle =
-  "Overlay: " ^ handle ^ " — pinned opam repository"
+let default_synopsis handle = "Overlay: " ^ handle ^ " — pinned opam repository"
 
 (* Every non-base overlay carries [relocatable]/[default] deps pinned
    to whatever the reporepo currently has at its latest versions.
@@ -663,17 +648,17 @@ let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
   let entries = load ~path in
   if List.exists (fun (e : entry) -> e.handle = handle) entries then
     Error.config_error
-      "overlay %s already exists in reporepo; use 'oi repo bump' to add a \
-       new version"
+      "overlay %s already exists in reporepo; use 'oi repo bump' to add a new \
+       version"
       handle;
   let depends =
-    match depends with
-    | Some d -> d
-    | None -> auto_base_depends entries ~handle
+    match depends with Some d -> d | None -> auto_base_depends entries ~handle
   in
   let commit = ls_remote_sha ~sys ?ref_ url in
   let version = today_yyyymmdd () ^ ".0" in
-  let synopsis = Stdlib.Option.value synopsis ~default:(default_synopsis handle) in
+  let synopsis =
+    Stdlib.Option.value synopsis ~default:(default_synopsis handle)
+  in
   let content =
     render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
   in
@@ -751,7 +736,5 @@ let remove ~fs ~path ~handle ?version () =
     matches;
   (* If no versions left, remove the handle directory too. *)
   let handle_dir = path / "packages" / handle in
-  if
-    Sys.file_exists handle_dir
-    && Sys.readdir handle_dir |> Array.length = 0
+  if Sys.file_exists handle_dir && Sys.readdir handle_dir |> Array.length = 0
   then Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / handle_dir)

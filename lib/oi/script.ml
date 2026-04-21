@@ -18,10 +18,7 @@ let split_at_relop s =
   let n = String.length s in
   let rec loop i =
     if i >= n then None
-    else
-      match s.[i] with
-      | '<' | '>' | '=' | '!' -> Some i
-      | _ -> loop (i + 1)
+    else match s.[i] with '<' | '>' | '=' | '!' -> Some i | _ -> loop (i + 1)
   in
   match loop 0 with
   | None -> (s, "")
@@ -85,7 +82,8 @@ let parse_deps_from_file ~fs path =
   let line =
     Eio.Path.with_open_in Eio.Path.(fs / path) @@ fun flow ->
     let buf = Eio.Buf_read.of_flow ~max_size:8192 flow in
-    try Eio.Buf_read.line buf with End_of_file | Eio.Buf_read.Buffer_limit_exceeded -> ""
+    try Eio.Buf_read.line buf
+    with End_of_file | Eio.Buf_read.Buffer_limit_exceeded -> ""
   in
   parse_deps_from_line line
 

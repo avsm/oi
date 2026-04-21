@@ -4,11 +4,7 @@
 
 let ( / ) = Filename.concat
 
-type trigger =
-  | Always
-  | Ocamlformat_file
-  | Dune_project_using of string
-
+type trigger = Always | Ocamlformat_file | Dune_project_using of string
 type spec = { name : string; binary : string; trigger : trigger }
 
 let registry =
@@ -29,9 +25,7 @@ type result = {
 
 let hit spec ?version detail = { spec; hit = true; version; detail }
 let miss spec detail = { spec; hit = false; version = None; detail }
-
-let read_file path =
-  In_channel.with_open_text path In_channel.input_all
+let read_file path = In_channel.with_open_text path In_channel.input_all
 
 let is_regular_file ~fs path =
   match Eio.Path.kind ~follow:true Eio.Path.(fs / path) with
@@ -64,7 +58,8 @@ let probe_ocamlformat ~fs dir spec =
   if not (is_regular_file ~fs path) then miss spec ".ocamlformat: missing"
   else
     match parse_ocamlformat_version path with
-    | Some ver -> hit spec ~version:ver (Fmt.str ".ocamlformat: version = %s" ver)
+    | Some ver ->
+        hit spec ~version:ver (Fmt.str ".ocamlformat: version = %s" ver)
     | None -> miss spec ".ocamlformat: no 'version = ...' line"
 
 (* -- dune-project (using ...) probe ---------------------------------------- *)

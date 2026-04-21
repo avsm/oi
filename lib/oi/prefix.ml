@@ -36,17 +36,15 @@ let envrc_content ~prefix ?tools ~dune_cache_root () =
       Fmt.str "OI_CACHE=$(expand_path %s)" dune_cache_root;
     ]
     @ (match tools with
-       | None -> []
-       | Some t -> [ Fmt.str "OI_TOOLS=$(expand_path %s)" t ])
+      | None -> []
+      | Some t -> [ Fmt.str "OI_TOOLS=$(expand_path %s)" t ])
     @ [ "" ]
   in
   (* Tools bin goes first so dev binaries shadow stale host copies; the
      project prefix follows so the main deps' binaries win over system
      PATH. *)
   let path_adds =
-    (match tools with
-     | None -> []
-     | Some _ -> [ "PATH_add \"$OI_TOOLS/bin\"" ])
+    (match tools with None -> [] | Some _ -> [ "PATH_add \"$OI_TOOLS/bin\"" ])
     @ [ "PATH_add \"$OI_PREFIX/bin\"" ]
   in
   String.concat "\n"
@@ -76,14 +74,11 @@ let make_env ~prefix ?tools ~dune_cache_root () =
     Unix.environment () |> Array.to_list
     |> List.filter (fun s -> not (List.exists (has_prefix s) dominated))
   in
-  let tools_bin =
-    Option.map (fun t -> canonical t / "bin") tools
-  in
+  let tools_bin = Option.map (fun t -> canonical t / "bin") tools in
   let path_entry =
     match tools_bin with
     | None -> "PATH=" ^ (prefix / "bin") ^ ":" ^ current_path
-    | Some tb ->
-        "PATH=" ^ tb ^ ":" ^ (prefix / "bin") ^ ":" ^ current_path
+    | Some tb -> "PATH=" ^ tb ^ ":" ^ (prefix / "bin") ^ ":" ^ current_path
   in
   let env_pairs = path_entry :: List.map (fun (k, v) -> k ^ "=" ^ v) vars in
   Array.of_list (env_pairs @ base)

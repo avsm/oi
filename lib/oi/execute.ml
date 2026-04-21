@@ -150,7 +150,8 @@ let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
         in
         try
           Retry.with_attempts
-            ~label:(Fmt.str "fetch extra source %s (%s)" name src.url) (fun () ->
+            ~label:(Fmt.str "fetch extra source %s (%s)" name src.url)
+            (fun () ->
               let result =
                 OpamRepository.pull_file name ~cache_dir ~cache_urls
                   ~silent_hits:true dst_file checksums [ url ]
@@ -158,8 +159,7 @@ let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
               in
               match result with
               | OpamTypes.Result () | OpamTypes.Up_to_date () -> ()
-              | OpamTypes.Not_available (_, msg) ->
-                  Fmt.failwith "%s" msg)
+              | OpamTypes.Not_available (_, msg) -> Fmt.failwith "%s" msg)
         with Failure msg ->
           (* Match the previous semantics: extra sources are
              best-effort, so a hard failure (after retries) downgrades
@@ -228,9 +228,7 @@ let install_package ~proc_mgr ~fs (p : Plan.package_plan) =
 
 let run ?(cache_urls = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~os_key plan =
   let build_parallelism =
-    match jobs with
-    | Some n when n > 0 -> n
-    | _ -> default_build_parallelism ()
+    match jobs with Some n when n > 0 -> n | _ -> default_build_parallelism ()
   in
   let d10 : D10.Config.t =
     { sys; fs; clock; root = Eio.Path.(fs / plan.Plan.cache_root); os_key }

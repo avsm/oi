@@ -28,10 +28,8 @@ let with_d10 cache_dir env f =
   let fs = Eio.Stdenv.fs env in
   let clock = Eio.Stdenv.clock env in
   let sys =
-    D10.Sysops.create
-      ~stdout:(Eio.Stdenv.stdout env)
-      ~stderr:(Eio.Stdenv.stderr env)
-      ~proc_mgr ~fs ()
+    D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
+      ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
   in
   let platform = Osrel.detect ~proc_mgr ~fs in
   let os_key = D10.Os_key.(to_string (of_platform platform)) in

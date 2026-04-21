@@ -167,10 +167,7 @@ let rebuild (c : Config.t) db =
         | None -> ()
         | Some info ->
             let name, version = parse_pkg_string info.package in
-            let null_or_quote = function
-              | None -> "NULL"
-              | Some s -> quote s
-            in
+            let null_or_quote = function None -> "NULL" | Some s -> quote s in
             exec db
               (Fmt.str
                  "INSERT OR REPLACE INTO layers (hash, os_key, arch, os, \
@@ -430,4 +427,3 @@ let merge_remote db ~remote_path =
      IN (SELECT hash FROM _new_hashes)";
   exec db "DROP TABLE _new_hashes";
   exec db "DETACH DATABASE remote"
-

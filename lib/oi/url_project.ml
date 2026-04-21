@@ -31,8 +31,7 @@ let classify s = if is_url s then Url s else Dep (Script.parse_cli_dep s)
 
 let classify_all tokens =
   List.partition_map
-    (fun s ->
-      match classify s with Url u -> Left u | Dep d -> Right d)
+    (fun s -> match classify s with Url u -> Left u | Dep d -> Right d)
     tokens
 
 (* Promote a plain http(s) URL to [git+https://…] so [OpamUrl.parse]
@@ -63,8 +62,7 @@ let fetch ~fs ~cache ~refresh url =
   if Repo.cache_fresh ~refresh ~sentinel ~max_age:Repo.refresh_max_age then
     src_dir
   else begin
-    Log.info (fun m ->
-        m "Cloning URL project %s" (OpamUrl.to_string url));
+    Log.info (fun m -> m "Cloning URL project %s" (OpamUrl.to_string url));
     if Sys.file_exists src_dir then
       Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / src_dir);
     let dst = OpamFilename.Dir.of_string src_dir in
@@ -73,8 +71,7 @@ let fetch ~fs ~cache ~refresh url =
       OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
     in
     let result =
-      OpamRepository.pull_tree (OpamUrl.to_string url) ~cache_dir dst []
-        [ url ]
+      OpamRepository.pull_tree (OpamUrl.to_string url) ~cache_dir dst [] [ url ]
       |> OpamProcess.Job.run
     in
     match result with
@@ -84,8 +81,8 @@ let fetch ~fs ~cache ~refresh url =
           "";
         src_dir
     | OpamTypes.Not_available (_, msg) ->
-        Error.config_error "--with=%s: fetch failed: %s"
-          (OpamUrl.to_string url) msg
+        Error.config_error "--with=%s: fetch failed: %s" (OpamUrl.to_string url)
+          msg
   end
 
 (* Build a synthetic [Project.pin] for a local package [name] declared

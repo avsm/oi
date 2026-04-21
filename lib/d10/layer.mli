@@ -41,13 +41,11 @@ type meta = {
   hashes : string list;  (** Layer hashes of direct dependencies. *)
   created : float;  (** Unix timestamp of layer creation. *)
   overlay_handle : string option;
-      (** Reporepo overlay handle that contributed this package's opam
-          file, or [None] for legacy builds and pin-depends-only
-          packages. *)
+      (** Reporepo overlay handle that contributed this package's opam file, or
+          [None] for legacy builds and pin-depends-only packages. *)
   overlay_version : string option;
-      (** Reporepo overlay version (e.g. ["20260418.6"]) when
-          [overlay_handle] is set. Pins the layer to a specific
-          reporepo snapshot. *)
+      (** Reporepo overlay version (e.g. ["20260418.6"]) when [overlay_handle]
+          is set. Pins the layer to a specific reporepo snapshot. *)
 }
 
 val save_meta : _ Eio.Path.t -> meta -> unit
@@ -95,8 +93,8 @@ val store :
     creates a layer at [<root>/layers/<os_key>/<hash>/]. Each file in [files]
     (relative paths within [prefix]) is hardlinked into [fs/]. Symlinks are
     preserved by recreating them with the same target. Writes [layer.json] with
-    the provided metadata. [overlay_handle] / [overlay_version] are persisted
-    so later indexing knows which reporepo entry contributed this package. *)
+    the provided metadata. [overlay_handle] / [overlay_version] are persisted so
+    later indexing knows which reporepo entry contributed this package. *)
 
 val restore : Config.t -> hash:string -> prefix:string -> unit
 (** [restore c ~hash ~prefix] hardlinks the layer's [fs/] tree into [prefix] via

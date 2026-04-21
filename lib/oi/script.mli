@@ -8,20 +8,19 @@
     generates a temporary dune project, installs dependencies, builds, and runs
     the script. Built binaries are cached by script hash under {!Cache.runs}.
 
-    Dependency strings accept an opam package name plus an optional
-    version constraint ([pkg>=1.0]) and an optional findlib sub-library
-    ([pkg.sub] or [pkg.sub>=1.0]). The opam solver sees the stem before
-    the first dot — e.g. [ppx_deriving.show>=1.0] resolves against the
-    [ppx_deriving] opam package at [>= 1.0] — while the generated dune
-    stanza uses the full findlib name. *)
+    Dependency strings accept an opam package name plus an optional version
+    constraint ([pkg>=1.0]) and an optional findlib sub-library ([pkg.sub] or
+    [pkg.sub>=1.0]). The opam solver sees the stem before the first dot — e.g.
+    [ppx_deriving.show>=1.0] resolves against the [ppx_deriving] opam package at
+    [>= 1.0] — while the generated dune stanza uses the full findlib name. *)
 
 type dep = {
   name : OpamPackage.Name.t;
       (** Opam package name — the stem before the first [.]. *)
   findlib_name : string;
-      (** Findlib library reference, including any [.sub] suffix. Equal
-          to [OpamPackage.Name.to_string name] when no sub-library was
-          specified. *)
+      (** Findlib library reference, including any [.sub] suffix. Equal to
+          [OpamPackage.Name.to_string name] when no sub-library was specified.
+      *)
   constraint_ : OpamFormula.version_constraint option;
 }
 (** A dependency parsed from the opam attribute or --with flag. *)
@@ -34,16 +33,15 @@ val parse_deps_from_file : fs:Eio.Fs.dir_ty Eio.Path.t -> string -> dep list
 val parse_dep : string -> dep
 (** [parse_dep s] parses a script-style dep spec (from [[\@\@\@opam ...]]) into
     a dep. A [.] is treated as a findlib sub-library separator — e.g.
-    [ppx_deriving.show>=1.0] yields opam package [ppx_deriving] at
-    [>= 1.0] with findlib library [ppx_deriving.show]. For CLI [--with=]
-    inputs use {!parse_cli_dep}, which treats [.] as an opam version
-    shorthand instead. *)
+    [ppx_deriving.show>=1.0] yields opam package [ppx_deriving] at [>= 1.0] with
+    findlib library [ppx_deriving.show]. For CLI [--with=] inputs use
+    {!parse_cli_dep}, which treats [.] as an opam version shorthand instead. *)
 
 val parse_cli_dep : string -> dep
-(** [parse_cli_dep s] parses a CLI-style dep spec into a dep. A [.]
-    after the package name is interpreted as opam's [pkg.version]
-    shorthand — [dune.3.20.0] means [dune = 3.20.0]. There is no findlib
-    syntax at the CLI; [findlib_name] is always the plain package name. *)
+(** [parse_cli_dep s] parses a CLI-style dep spec into a dep. A [.] after the
+    package name is interpreted as opam's [pkg.version] shorthand —
+    [dune.3.20.0] means [dune = 3.20.0]. There is no findlib syntax at the CLI;
+    [findlib_name] is always the plain package name. *)
 
 val name_s : dep -> string
 (** [name_s d] is the package name as a string. *)
