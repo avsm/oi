@@ -42,10 +42,12 @@ jobs:
           curl -fsSL -o "$HOME/.local/bin/oi" "https://oi.ci.dev/oi-linux-${arch}"
           chmod +x "$HOME/.local/bin/oi"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          oi config
 
       - name: Build with oi
         run: |
           oi sync -v
+          oi config
 
       - name: Build with oi
         run: |
