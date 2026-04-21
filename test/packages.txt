@@ -39,3 +39,10 @@ ctypes
 ctypes-foreign
 cmarkit
 ppx_jane
+bytesrw
+jsont
+dockerfile-opam
+opam-solver
+logs
+progress
+opam-client
