@@ -142,14 +142,14 @@ let service_name d =
    main build against the package list in /work/packages.txt; one
    subsequent pass per requested overlay handle builds *every*
    package the overlay contributes via the [oi registry build
-   HANDLE:] shorthand, so no per-package iteration is needed. The
+   @HANDLE] shorthand, so no per-package iteration is needed. The
    script finishes with [oi registry export /out]. *)
 let build_export_cmd ~overlays =
   let main_pass =
     "oi registry build $(cat /work/packages.txt)"
   in
   let overlay_pass handle =
-    Printf.sprintf "oi registry build %s:" handle
+    Printf.sprintf "oi registry build @%s" handle
   in
   let overlay_passes = List.map overlay_pass overlays in
   String.concat " && "

@@ -26,3 +26,11 @@ are exercised by hand against real remotes; cram doesn't cover them
 because dune's build sandbox places a stub `.git` file that git
 ls-remote then trips over when it walks ancestor dirs looking for
 repo context.
+
+`@handle` prefix syntax: `@handle/pkg` pins `pkg` to the overlay's
+version; `@handle` alone (for `oi registry build`) means every
+package the overlay contributes. `oi run` rejects the bare `@handle`
+form because there's no package to run.
+
+  $ oi run @avsm 2>&1 | tail -1
+  error: overlay handle "avsm" given without a package (use '@avsm/PKG')

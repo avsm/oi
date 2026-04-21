@@ -36,10 +36,9 @@ val docker_compose_yaml :
     compose file whose services each run [oi registry build] over the packages
     list followed by [oi registry export]. One extra build pass is scheduled
     per [overlay] handle — for each [H], the service also runs
-    [oi registry build H:], which builds every package that overlay [H]
-    contributes (layers are tagged with [H.<version>]). A final [merge-all]
-    service depends on every distro finishing and unions the per-overlay
-    subtrees into [ALL/<os_key>/]. *)
+    [oi registry build @H], which builds every package that overlay [H]
+    contributes. Layers are tagged with the overlay's handle and version in the
+    per-distro sqlite index so clients can scope queries to a specific overlay. *)
 
 val parse_packages_file : string -> string list
 (** Read a packages file at [path]: strip [#] comments and blank lines, return

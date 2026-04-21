@@ -191,11 +191,11 @@ let cli_extra_repos ~fs ~sys tokens =
   overlay_extras_of_handles ~fs ~sys handles
   @ List.map cli_extra_repo_of_url urls
 
-(* A ([handle:pkg...]) shortcut parsed out of a TARGET or [--with] token,
-   once the handle has been routed into [with_repos] and the package
-   spec is ready for the solver. Carries the handle alongside the
-   package name and any user-supplied constraint so we can later pin
-   the package to whatever version the named overlay ships. *)
+(* A ([@handle/pkg...]) shortcut parsed out of a TARGET or [--with]
+   token, once the handle has been routed into [with_repos] and the
+   package spec is ready for the solver. Carries the handle alongside
+   the package name and any user-supplied constraint so we can later
+   pin the package to whatever version the named overlay ships. *)
 type handle_pin = {
   handle : string;
   pkg : OpamPackage.Name.t;
@@ -238,56 +238,63 @@ let latest_version_in_dirs ~pkg dirs =
              else a)
            (List.hd versions) (List.tl versions))
 
-(* Kinds of "$(b,handle:)-prefixed target" a registry build accepts:
+(* Kinds of "$(b,@handle)-prefixed target" a registry build accepts:
    a plain target, an overlay-scoped package, or "everything the
    overlay ships". [oi run] only accepts the first two; [oi registry
-   build] additionally understands [handle:] alone as "all of it". *)
+   build] additionally understands [@handle] alone as "all of it". *)
 type build_target =
   | Plain_target of string
   | Overlay_pkg of string * string  (* (handle, pkg_spec) *)
   | Overlay_all of string  (* handle alone, expand to every overlay pkg *)
 
-let parse_build_target s =
-  let is_handle_char = function
-    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
-    | _ -> false
-  in
-  match String.index_opt s ':' with
-  | None | Some 0 -> Plain_target s
-  | Some i ->
-      let prefix = String.sub s 0 i in
-      let rest = String.sub s (i + 1) (String.length s - i - 1) in
-      if not (String.for_all is_handle_char prefix) then Plain_target s
-      else if String.length rest >= 2 && String.sub rest 0 2 = "//" then
-        Plain_target s
-      else if rest = "" then Overlay_all prefix
-      else Overlay_pkg (prefix, rest)
+let is_handle_char = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
+  | _ -> false
 
-(* Detect a "handle:pkg[constr]" prefix on a run [TARGET] or a
+let parse_build_target s =
+  if String.length s < 2 || s.[0] <> '@' then Plain_target s
+  else
+    let rest = String.sub s 1 (String.length s - 1) in
+    match String.index_opt rest '/' with
+    | None ->
+        if String.for_all is_handle_char rest && rest <> "" then
+          Overlay_all rest
+        else Plain_target s
+    | Some i ->
+        let handle = String.sub rest 0 i in
+        let pkg = String.sub rest (i + 1) (String.length rest - i - 1) in
+        if String.for_all is_handle_char handle && handle <> "" && pkg <> ""
+        then Overlay_pkg (handle, pkg)
+        else Plain_target s
+
+(* Detect an [@handle/pkg[constr]] prefix on a run [TARGET] or a
    [--with] token. Returns [(handle, stripped_spec)] or [None] if
-   no prefix. Raises [Error.config_error] when the handle is present
-   but the package part is empty. Distinguishes handle prefixes from
-   URL schemes by rejecting anything followed by [//]. *)
+   there's no [@] prefix. Raises [Error.config_error] when the
+   handle is present but the package part is empty. *)
 let split_handle_prefix s =
-  let is_handle_char = function
-    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
-    | _ -> false
-  in
-  match String.index_opt s ':' with
-  | None | Some 0 -> None
-  | Some i ->
-      let prefix = String.sub s 0 i in
-      let rest = String.sub s (i + 1) (String.length s - i - 1) in
-      if not (String.for_all is_handle_char prefix) then None
-      else if String.length rest >= 2 && String.sub rest 0 2 = "//" then None
-      else if rest = "" then
-        Oi.Error.config_error
-          "overlay handle %S given without a package (use '%s:PKG')" prefix
-          prefix
-      else begin
-        log_overlay "detected handle shortcut: %s -> target=%s" prefix rest;
-        Some (prefix, rest)
-      end
+  if String.length s < 2 || s.[0] <> '@' then None
+  else
+    let rest = String.sub s 1 (String.length s - 1) in
+    match String.index_opt rest '/' with
+    | None ->
+        if String.for_all is_handle_char rest && rest <> "" then
+          Oi.Error.config_error
+            "overlay handle %S given without a package (use '@%s/PKG')" rest
+            rest
+        else None
+    | Some i ->
+        let handle = String.sub rest 0 i in
+        let pkg_spec = String.sub rest (i + 1) (String.length rest - i - 1) in
+        if not (String.for_all is_handle_char handle) || handle = "" then None
+        else if pkg_spec = "" then
+          Oi.Error.config_error
+            "overlay handle %S given without a package (use '@%s/PKG')" handle
+            handle
+        else begin
+          log_overlay "detected handle shortcut: %s -> target=%s" handle
+            pkg_spec;
+          Some (handle, pkg_spec)
+        end
 
 (* Merge CLI [--with-repo] URLs and project-declared extras. Project
    extras win on a name collision (CLI URLs are synthesised names and
@@ -902,16 +909,16 @@ let run_cmd =
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
-    (* [TARGET] accepts a "handle:pkg[constraint]" shortcut that pulls
-       the corresponding overlay (and its transitive overlays) into
-       the solver set. The prefix is stripped; the remainder is
-       treated as a package (not a binary), so [samoht:irmin] solves
+    (* [TARGET] accepts a "@handle/pkg[constraint]" shortcut that
+       pulls the corresponding overlay (and its transitive overlays)
+       into the solver set. The prefix is stripped; the remainder is
+       treated as a package (not a binary), so [@samoht/irmin] solves
        and installs the [irmin] package from samoht's overlay rather
        than going through the binary-name index. The bare package
        name becomes the [TARGET] used for the final [bin/<name>]
        lookup; any version constraint is passed to the solver via
        [--with]. *)
-    (* Pull [handle:pkg] out of a spec string and collect it as a
+    (* Pull [@handle/pkg] out of a spec string and collect it as a
        pin. Shared between the TARGET and the [--with] fold below so
        both inputs accept the same shortcut syntax. *)
     let extract_handle_pin spec =
@@ -935,8 +942,9 @@ let run_cmd =
             Some pin )
     in
     (* [--with] tokens accept the same shortcut syntax. The opam atom
-       parser rejects "avsm:owntracks-cli" directly because colons
-       aren't valid in package names, so we split before handing off. *)
+       parser rejects "@avsm/owntracks-cli" directly because [@] and
+       [/] aren't valid in package names, so we split before handing
+       off. *)
     let with_repos, with_deps, with_pins =
       List.fold_left
         (fun (repos, deps, pins) w ->
@@ -975,7 +983,7 @@ let run_cmd =
     let with_repos = project_overlays @ with_repos in
     let cli_extras = cli_extra_repos ~fs ~sys with_repos in
     let all_extras = merge_extras ~cli:cli_extras ~project:project_extras in
-    (* Pin each [handle:pkg] (from TARGET or [--with]) to whatever
+    (* Pin each [@handle/pkg] (from TARGET or [--with]) to whatever
        version the overlay ships, so a dev-tagged version (e.g.
        [2.0.0~dev]) that would otherwise sort below a stable repo's
        version still wins when the user explicitly asked for it. The
@@ -1121,7 +1129,7 @@ let run_cmd =
       let from_with =
         if extra_names <> [] then solve_assemble_run extra_names else false
       in
-      (* When a handle shortcut was used (e.g. [samoht:irmin]), the user
+      (* When a handle shortcut was used (e.g. [@samoht/irmin]), the user
          has explicitly named the source of truth for the target
          package. Never silently fall through to the layer-index
          lookup — that would quietly substitute a different package
@@ -1255,15 +1263,15 @@ let run_cmd =
             \  oi run --with=crockford roguedoi";
           `S "OVERLAYS";
           `P
-            "Prefix a target or a $(b,--with) value with a reporepo \
-             handle and a colon to pin the named package to whatever \
+            "Prefix a target or a $(b,--with) value with \
+             $(i,@handle/) to pin the named package to whatever \
              version that overlay ships. Stack handles to compose \
              overlays. Add $(b,x-reporepo: [\"handle\"]) in an opam \
              file to make it automatic.";
           `Pre
-            "  oi run avsm:owntracks\n\
-            \  oi run samoht:irmin\n\
-            \  oi run --with=avsm:crockford roguedoi";
+            "  oi run @avsm/owntracks\n\
+            \  oi run @samoht/irmin\n\
+            \  oi run --with=@avsm/crockford roguedoi";
           `S "GIT URLS";
           `P
             "$(b,--with=URL) clones the repository and pins every \
@@ -2907,7 +2915,7 @@ let registry_build_cmd =
     let pin_dir =
       Oi.Pin.materialize ~fs ~sys ~cache ~refresh url_project.pins
     in
-    (* Expand [handle:] into every package the overlay's clone
+    (* Expand [@handle] into every package the overlay's clone
        provides. List just the top-level names under the overlay's
        [packages/] dir — the solver will pick specific versions. *)
     let overlay_packages handle =
@@ -3156,11 +3164,11 @@ let registry_build_cmd =
             ( "$(b,PKG)",
               "Opam package name." );
           `I
-            ( "$(b,HANDLE:PKG)",
+            ( "$(b,@HANDLE/PKG)",
               "Build $(b,PKG) pinned to the version $(b,HANDLE)'s \
                overlay ships." );
           `I
-            ( "$(b,HANDLE:)",
+            ( "$(b,@HANDLE)",
               "Build every package in $(b,HANDLE)'s overlay." );
           `S "OPTIONS";
           `P
@@ -3385,11 +3393,11 @@ let registry_docker_cmd =
           ~doc:
             "Add an extra build pass that builds every package the \
              named reporepo overlay contributes (i.e. invokes $(b,oi \
-             registry build HANDLE:)). May be repeated. Produces \
-             layers tagged with $(b,HANDLE.<version>) so the \
-             per-overlay subtree of the resulting registry is \
-             populated. Without this flag the distro services run \
-             the main build pass only.")
+             registry build @HANDLE)). May be repeated. Produces \
+             layers tagged with the overlay's handle and version so \
+             clients can scope to it via the registry's sqlite \
+             index. Without this flag the distro services run the \
+             main build pass only.")
   in
   let info =
     Cmd.info "docker"
@@ -3413,7 +3421,7 @@ let registry_docker_cmd =
              override so the same image can be re-used against \
              different overlay sets. Each distro service runs $(b,oi \
              registry build) for the main list, plus one $(b,oi \
-             registry build HANDLE:) pass per $(b,--overlay) handle \
+             registry build @HANDLE) pass per $(b,--overlay) handle \
              (which builds every package the overlay contributes), \
              and finishes with $(b,oi registry export /out). The \
              resulting tree at $(b,./registry/<os_key>/) carries one \
@@ -4261,7 +4269,7 @@ let repo_cmd =
              and any personal overlays you've opted in to.";
           `P
             "On the command line, handles can be used as shortcuts: \
-             $(b,oi run avsm:irmin) uses the version of $(b,irmin) \
+             $(b,oi run @avsm/irmin) uses the version of $(b,irmin) \
              from avsm's overlay; $(b,oi run --with-repo=avsm ...) \
              pulls the overlay in without naming a specific package. \
              Inside an opam file, $(b,x-reporepo: [\"avsm\"]) has the \
@@ -4300,7 +4308,7 @@ let repo_cmd =
             \  oi repo list\n\n\
             \  # Pin someone's overlay, compose it into the solver\n\
             \  oi repo add handle https://example.com/pkgs.git\n\
-            \  oi run handle:some-tool\n\n\
+            \  oi run @handle/some-tool\n\n\
             \  # Pull upstream changes into the overlay we track\n\
             \  oi repo bump handle\n\n\
             \  # Publish our edits back to the reporepo upstream\n\
@@ -4374,10 +4382,10 @@ let () =
              $(i,handle). The $(i,reporepo) is the directory of \
              overlays $(b,oi) knows about. See $(b,oi repo --help) \
              to manage it. Prefix any target or $(b,--with) value \
-             with $(i,handle:) to pull from that overlay:";
+             with $(i,@handle/) to pull from that overlay:";
           `Pre
-            "  oi run avsm:owntracks\n\
-            \  oi run --with=avsm:crockford roguedoi";
+            "  oi run @avsm/owntracks\n\
+            \  oi run --with=@avsm/crockford roguedoi";
           `P "Find which package ships a binary:";
           `Pre "  oi which dune\n  oi which 'ocaml*'";
           `P "Preview without doing:";
