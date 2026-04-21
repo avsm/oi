@@ -37,11 +37,12 @@ jobs:
           FROM scratch
           COPY --from=builder /oi /oi
           EOF
-          docker build -f Dockerfile.build -t oi-build:${{ matrix.arch }} .
-          cid=$(docker create oi-build:${{ matrix.arch }})
           mkdir -p dist
-          docker cp "$cid:/oi" dist/oi-linux-${{ matrix.arch }}
-          docker rm "$cid"
+          docker buildx build \
+            -f Dockerfile.build \
+            --output type=local,dest=./bin-out \
+            .
+          install -m 0755 bin-out/oi dist/oi-linux-${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
