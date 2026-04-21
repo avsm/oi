@@ -113,6 +113,13 @@ let reporepo_path () =
   | Some v when v <> "" -> v
   | _ -> Oi.Reporepo.default_path
 
+(* Reporepo clone URL: [OI_REPOREPO_URL] wins, otherwise falls back
+   to [Oi.Reporepo.default_url]. *)
+let reporepo_url () =
+  match Sys.getenv_opt "OI_REPOREPO_URL" with
+  | Some v when v <> "" -> v
+  | _ -> Oi.Reporepo.default_url
+
 (* Format-style debug logger for overlay / reporepo plumbing. *)
 let log_overlay fmt = Fmt.kstr (fun s -> Logs.debug (fun m -> m "%s" s)) fmt
 
@@ -2844,8 +2851,8 @@ let registry_build_cmd =
       solutions;
     List.rev !groups
   in
-  let run () data_dir cache_dir refresh dry_run registry with_repos with_deps
-      jobs targets =
+  let run () data_dir cache_dir refresh dry_run all only skip registry
+      with_repos with_deps jobs targets =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
@@ -2855,6 +2862,49 @@ let registry_build_cmd =
     ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
+    (* When [--all] is set, enumerate every overlay in the reporepo
+       and expand each to its [x-root-packages]. The result is a
+       list of [@handle/pkg] strings that flow into the same target
+       parser as CLI-supplied targets. [--only] restricts the set to
+       named handles; [--skip] excludes them. *)
+    let reporepo_targets =
+      if not all then []
+      else begin
+        let path = reporepo_path () in
+        Oi.Reporepo.ensure_clone ~fs ~sys ~path ~url:(reporepo_url ());
+        let entries = Oi.Reporepo.load ~path in
+        let only_set =
+          if only = [] then None else Some (List.sort_uniq compare only)
+        in
+        let skip_set = List.sort_uniq compare skip in
+        let handles =
+          List.map (fun (e : Oi.Reporepo.entry) -> e.handle) entries
+          |> List.sort_uniq String.compare
+        in
+        List.concat_map
+          (fun h ->
+            let included =
+              (match only_set with None -> true | Some s -> List.mem h s)
+              && not (List.mem h skip_set)
+            in
+            if not included then []
+            else
+              match Oi.Reporepo.latest entries ~handle:h with
+              | None -> []
+              | Some e ->
+                  if e.root_packages = [] then begin
+                    Log.info (fun m ->
+                        m "--all: overlay %s has no x-root-packages, skipping" h);
+                    []
+                  end
+                  else List.map (fun p -> "@" ^ h ^ "/" ^ p) e.root_packages)
+          handles
+      end
+    in
+    let targets = targets @ reporepo_targets in
+    if targets = [] then
+      Oi.Error.config_error
+        "no targets to build (pass PKG arguments or --all)";
     (* Classify each input into a plain target or an overlay form.
        Overlay forms collect handles to thread through [with_repos]
        so the later [cli_extra_repos] run clones them up front. The
@@ -3113,8 +3163,37 @@ let registry_build_cmd =
   in
   let targets =
     Arg.(
-      non_empty & pos_all string []
+      value & pos_all string []
       & info ~docv:"PKG" ~doc:"Opam packages to build layers for" [])
+  in
+  let all =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Build every overlay's $(b,x-root-packages) in the reporepo as \
+             $(b,@HANDLE/PKG). Combine with $(b,--only)/$(b,--skip) to \
+             restrict the handle set. Positional $(b,PKG) arguments are still \
+             honoured and are built in addition to the reporepo-derived list."
+          [ "all" ])
+  in
+  let only =
+    Arg.(
+      value & opt_all string []
+      & info ~docv:"HANDLE"
+          ~doc:
+            "Restrict $(b,--all) to these handles. Repeat for multiple. \
+             Without $(b,--all) this flag has no effect."
+          [ "only" ])
+  in
+  let skip =
+    Arg.(
+      value & opt_all string []
+      & info ~docv:"HANDLE"
+          ~doc:
+            "Exclude these handles from $(b,--all). Repeat for multiple. \
+             Without $(b,--all) this flag has no effect."
+          [ "skip" ])
   in
   let dry_run =
     Arg.(
@@ -3142,17 +3221,32 @@ let registry_build_cmd =
           `I ("$(b,@HANDLE)", "Build every package in $(b,HANDLE)'s overlay.");
           `S "OPTIONS";
           `P
+            "$(b,--all) enumerates every overlay in the reporepo and builds \
+             its $(b,x-root-packages) list as $(b,@HANDLE/PKG). Restrict with \
+             $(b,--only=HANDLE) or exclude with $(b,--skip=HANDLE). This is \
+             the standard way to prime a registry: the reporepo is the single \
+             source of truth for which packages to pre-build.";
+          `P
             "$(b,--with) adds extra packages or URL-supplied projects as build \
              targets.";
           `P "$(b,-j N) caps parallel builds and fetches. Default 4.";
           `P "$(b,-n) / $(b,--dry-run) prints the plan without building.";
+          `S Manpage.s_examples;
+          `Pre
+            "  # Build the reporepo's declared root packages for every \
+             overlay\n\
+            \  oi registry build --all\n\n\
+            \  # Same, but only for the 'avsm' overlay\n\
+            \  oi registry build --all --only=avsm\n\n\
+            \  # Build a one-off package alongside the full reporepo set\n\
+            \  oi registry build --all ocaml-lsp-server";
         ]
   in
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ dry_run $ registry_term $ with_repos_term $ with_deps_term $ jobs_term
-      $ targets)
+      $ dry_run $ all $ only $ skip $ registry_term $ with_repos_term
+      $ with_deps_term $ jobs_term $ targets)
 
 (* -- depexts ------------------------------------------------------------- *)
 
@@ -3283,15 +3377,9 @@ let registry_docker_cmd =
       `Fedora `Latest;
     ]
   in
-  let run () packages_file overlays output_dir src_context =
+  let run () output_dir src_context reporepo_host_path =
     with_error_handling @@ fun () ->
-    let pkgs = Registry_docker.parse_packages_file packages_file in
-    if pkgs = [] then
-      Oi.Error.msg "no packages found in %s (all blank/comment lines)"
-        packages_file;
     (try Unix.mkdir output_dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
-    let pkgs_path = output_dir / "packages.txt" in
-    Registry_docker.write_packages_file pkgs_path pkgs;
     let df_oi = Registry_docker.dockerfile_oi ~src_context in
     let oi_path = output_dir / "Dockerfile.oi" in
     Registry_docker.write_dockerfile oi_path df_oi;
@@ -3300,49 +3388,37 @@ let registry_docker_cmd =
         (fun d ->
           let fname = Registry_docker.one_distro_filename d in
           let path = output_dir / fname in
-          let df =
-            Registry_docker.dockerfile_one_distro ~src_context
-              ~packages_ctx_path:pkgs_path d
-          in
+          let df = Registry_docker.dockerfile_one_distro ~src_context d in
           Registry_docker.write_dockerfile path df;
           (d, path))
         default_distros
     in
     let compose_path = output_dir / "docker-compose.yml" in
     let compose_yaml =
-      Registry_docker.docker_compose_yaml ~overlays ~distros:default_distros
-        ~registry_host_path:"./registry" ()
+      Registry_docker.docker_compose_yaml ~distros:default_distros
+        ~registry_host_path:"./registry"
+        ~reporepo_host_path ()
     in
     Registry_docker.write_file compose_path compose_yaml;
     Fmt.pr "Wrote:@.";
-    Fmt.pr "  %s (%d packages)@." pkgs_path (List.length pkgs);
     Fmt.pr "  %s@." oi_path;
     List.iter (fun (_, path) -> Fmt.pr "  %s@." path) per_distro_paths;
     Fmt.pr "  %s@." compose_path;
     Fmt.pr "@.";
+    Fmt.pr "Reporepo bind-mounted from: %s@." reporepo_host_path;
     Fmt.pr "Static oi release binary:@.";
     Fmt.pr "  docker buildx build -f %s --output type=local,dest=./oi-bin .@."
       oi_path;
     Fmt.pr "Run the registry build + export:@.";
     Fmt.pr "  docker compose up --build   # writes ./registry/<os_key>/@."
   in
-  let packages_file =
-    Arg.(
-      required
-      & pos 0 (some file) None
-      & info ~docv:"FILE"
-          ~doc:
-            "Packages file: one opam target per line ($(b,name), \
-             $(b,name.version), $(b,name>=1.0)). $(b,#) starts a comment."
-          [])
-  in
   let output_dir =
     Arg.(
       value & opt string "."
       & info ~docv:"DIR"
           ~doc:
-            "Directory to write Dockerfile.oi, Dockerfile.registry, and \
-             packages.txt (created if missing)."
+            "Directory to write the Dockerfiles and docker-compose.yml \
+             (created if missing)."
           [ "o"; "output" ])
   in
   let src_context =
@@ -3354,17 +3430,18 @@ let registry_docker_cmd =
              Defaults to the context root."
           [ "src" ])
   in
-  let overlays =
+  let reporepo_host_path =
     Arg.(
-      value & opt_all string []
-      & info [ "overlay" ] ~docv:"HANDLE"
+      value
+      & opt string (Oi.Reporepo.default_path)
+      & info ~docv:"PATH"
           ~doc:
-            "Add an extra build pass that builds every package the named \
-             reporepo overlay contributes (i.e. invokes $(b,oi registry build \
-             @HANDLE)). May be repeated. Produces layers tagged with the \
-             overlay's handle and version so clients can scope to it via the \
-             registry's sqlite index. Without this flag the distro services \
-             run the main build pass only.")
+            "Host path to bind-mount read-only at $(b,/opt/reporepo) inside \
+             every build container. $(b,oi registry build --all) inside the \
+             container reads this reporepo to discover each overlay's \
+             $(b,x-root-packages) list. Defaults to $(b,\\$OI_REPOREPO)/the \
+             XDG reporepo location."
+          [ "reporepo" ])
   in
   let info =
     Cmd.info "docker"
@@ -3379,19 +3456,19 @@ let registry_docker_cmd =
              $(b,oi)), one $(b,Dockerfile.<distro>) per distro (alpine latest, \
              debian stable, ubuntu 22.04/24.04/25.10, fedora latest), and a \
              $(b,docker-compose.yml) that bind-mounts $(b,./registry) onto \
-             $(b,/out) in every service.";
+             $(b,/out) and a local reporepo checkout onto $(b,/opt/reporepo) \
+             in every service.";
           `P
             "The per-distro images are intentionally generic: they install \
-             depexts, copy in a static $(b,oi) binary, and stage \
-             $(b,packages.txt) at $(b,/work/packages.txt). The compose file \
+             depexts and copy in a static $(b,oi) binary. The compose file \
              drives the actual work via a $(b,command:) override so the same \
-             image can be re-used against different overlay sets. Each distro \
-             service runs $(b,oi registry build) for the main list, plus one \
-             $(b,oi registry build @HANDLE) pass per $(b,--overlay) handle \
-             (which builds every package the overlay contributes), and \
-             finishes with $(b,oi registry export /out). The resulting tree at \
-             $(b,./registry/<os_key>/) carries one archive per layer plus a \
-             sqlite $(b,index.db) tagged with each layer's overlay \
+             image can be re-used against different reporepo pins. Each \
+             distro service runs $(b,oi registry build --all) — which reads \
+             every overlay's $(b,x-root-packages) list from the \
+             bind-mounted reporepo and builds each as $(b,@HANDLE/PKG) — and \
+             then finishes with $(b,oi registry export /out). The resulting \
+             tree at $(b,./registry/<os_key>/) carries one archive per layer \
+             plus a sqlite $(b,index.db) tagged with each layer's overlay \
              handle/version, so clients can scope to a specific overlay by \
              querying the index. Run the whole project with:";
           `Pre "  docker compose up --build";
@@ -3402,16 +3479,18 @@ let registry_docker_cmd =
              needed.";
           `S Manpage.s_examples;
           `P
-            "Generate a compose project that builds the main package list plus \
-             everything the $(b,avsm) overlay contributes:";
+            "Generate a compose project backed by the default reporepo on \
+             this machine:";
+          `Pre "  oi registry docker -o ./registry-build";
+          `P "Use a specific reporepo checkout:";
           `Pre
-            "  oi registry docker packages.txt --overlay avsm -o \
+            "  oi registry docker --reporepo=/srv/oi-reporepo -o \
              ./registry-build";
         ]
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ packages_file $ overlays $ output_dir $ src_context)
+      const run $ log_term $ output_dir $ src_context $ reporepo_host_path)
 
 (* -- registry mirror ------------------------------------------------------ *)
 
@@ -3820,6 +3899,11 @@ let repo_show_cmd =
                 | None -> Fmt.pr "    %s@." h
                 | Some ver -> Fmt.pr "    %s = %s@." h ver)
               ds);
+        (match e.root_packages with
+        | [] -> ()
+        | pkgs ->
+            Fmt.pr "  root-packages:@.";
+            List.iter (fun p -> Fmt.pr "    %s@." p) pkgs);
         Fmt.pr "@.")
       matches
   in
@@ -4021,6 +4105,70 @@ let repo_bump_cmd =
     Term.(
       const run $ log_term $ reporepo_term $ reporepo_url_term $ handle $ url
       $ ref_term $ depend_term)
+
+let repo_set_roots_cmd =
+  let run () reporepo reporepo_url handle pkgs =
+    with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let proc_mgr = Eio.Stdenv.process_mgr env in
+    let fs = Eio.Stdenv.fs env in
+    let sys =
+      D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
+        ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
+    in
+    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    match
+      Oi.Reporepo.bump ~fs ~sys ~path:reporepo ~handle ~root_packages:pkgs ()
+    with
+    | `Bumped e ->
+        Fmt.pr "Bumped %s to %s (root-packages: %d entr%s)@." e.handle e.version
+          (List.length e.root_packages)
+          (if List.length e.root_packages = 1 then "y" else "ies")
+    | `Unchanged e ->
+        Fmt.pr "No change: %s.%s already has that root-packages list.@."
+          e.handle e.version
+  in
+  let handle =
+    Arg.(
+      required
+      & pos 0 (some string) None
+      & info ~docv:"HANDLE" ~doc:"Overlay to update" [])
+  in
+  let pkgs =
+    Arg.(
+      value
+      & pos_right 0 string []
+      & info ~docv:"PKG"
+          ~doc:
+            "Package specs to record as the overlay's root packages (the list \
+             that $(b,oi registry build --all) iterates over). Pass no \
+             $(b,PKG) arguments to clear the list."
+          [])
+  in
+  let info =
+    Cmd.info "set-roots"
+      ~doc:"Record which packages should be pre-built for an overlay"
+      ~man:
+        [
+          `S Manpage.s_description;
+          `P
+            "Writes $(b,x-root-packages: [...]) on a new bumped version of \
+             $(b,HANDLE). The recorded list drives $(b,oi registry build \
+             --all), which iterates every overlay in the reporepo and \
+             builds each handle's root packages as $(b,@handle/pkg).";
+          `P
+            "Passing zero $(b,PKG) arguments clears the list. The new version \
+             is stamped $(b,YYYYMMDD.N) exactly like $(b,oi repo bump) — the \
+             previous entry stays around as history.";
+          `S Manpage.s_examples;
+          `Pre
+            "  oi repo set-roots relocatable dune utop merlin\n\
+            \  oi repo set-roots avsm owntracks-cli crockford";
+        ]
+  in
+  Cmd.v info
+    Term.(
+      const run $ log_term $ reporepo_term $ reporepo_url_term $ handle $ pkgs)
 
 let repo_remove_cmd =
   let run () reporepo reporepo_url handle_spec =
@@ -4236,6 +4384,7 @@ let repo_cmd =
       repo_show_cmd;
       repo_add_cmd;
       repo_bump_cmd;
+      repo_set_roots_cmd;
       repo_remove_cmd;
       repo_push_cmd;
     ]

@@ -23,6 +23,12 @@ type entry = {
   depends : (string * string option) list;
       (** Other overlay handles this one depends on, optionally with an exact
           version. *)
+  root_packages : string list;
+      (** Packages to pre-build when priming this overlay into a registry.
+          Stored as [x-root-packages: [ "pkg1" "pkg2" ... ]] in the overlay's
+          opam file. Each entry is a package spec (name, optionally with a
+          version constraint) that {!oi registry build-all} feeds to the
+          solver as [@handle/pkg]. *)
   opam_path : string;  (** Absolute path to the source opam file. *)
 }
 
@@ -153,6 +159,7 @@ val add :
   url:string ->
   ?ref_:string ->
   ?depends:(string * string option) list ->
+  ?root_packages:string list ->
   ?synopsis:string ->
   ?display_name:string ->
   ?origin_url:string ->
@@ -179,6 +186,7 @@ val bump :
   ?url:string ->
   ?ref_:string ->
   ?depends:(string * string option) list ->
+  ?root_packages:string list ->
   unit ->
   [ `Bumped of entry | `Unchanged of entry ]
 (** Consider creating a new version for [handle]. Re-[ls-remote]s either the
@@ -192,10 +200,13 @@ val bump :
     current base set). Base overlays and overlays without any auto-injected base
     pin preserve their previous [depends] list.
 
-    When the resolved [(url, commit, ref_, depends)] matches the previous
-    version exactly, returns [`Unchanged prev] without writing anything.
-    Otherwise writes a new [YYYYMMDD.N] entry (where [N] is the next free
-    sequence on today's date) and returns [`Bumped new_entry]. Raises if
+    When [root_packages] is omitted, the previous version's list is preserved.
+    Pass [~root_packages:[]] to explicitly clear it.
+
+    When the resolved [(url, commit, ref_, depends, root_packages)] matches the
+    previous version exactly, returns [`Unchanged prev] without writing
+    anything. Otherwise writes a new [YYYYMMDD.N] entry (where [N] is the next
+    free sequence on today's date) and returns [`Bumped new_entry]. Raises if
     [handle] is unknown. *)
 
 val remove :

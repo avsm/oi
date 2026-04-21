@@ -46,6 +46,7 @@ type entry = {
   commit : string;
   ref_ : string option;
   depends : (string * string option) list;
+  root_packages : string list;
   opam_path : string;
 }
 
@@ -225,6 +226,29 @@ let read_string_extension extensions name =
       | OpamParserTypes.FullPos.String s -> Some s
       | _ -> None)
 
+(* Read an [x-*] list-of-strings extension. Accepts either a single
+   string (promoted to a singleton list) or a full [[ "a" "b" ]] list.
+   Returns [[]] when absent; raises a config error on malformed
+   values so the user gets a clear message rather than a silent skip. *)
+let read_string_list_extension ~path extensions name =
+  match OpamStd.String.Map.find_opt name extensions with
+  | None -> []
+  | Some v -> (
+      match v.OpamParserTypes.FullPos.pelem with
+      | OpamParserTypes.FullPos.String s -> [ s ]
+      | OpamParserTypes.FullPos.List { pelem = items; _ } ->
+          List.map
+            (fun (it : OpamParserTypes.FullPos.value) ->
+              match it.pelem with
+              | OpamParserTypes.FullPos.String s -> s
+              | _ ->
+                  Error.config_error
+                    "%s: %s must be a list of strings" path name)
+            items
+      | _ ->
+          Error.config_error
+            "%s: %s must be a string or a list of strings" path name)
+
 (* Extract an exact [= "version"] pin from an opam [condition], if
    present. Anything more involved (filters, ranges) renders as [None]. *)
 let pin_version_of_condition cond =
@@ -271,6 +295,11 @@ let parse_entry_file path : entry option =
       let ref_ =
         read_string_extension (OpamFile.OPAM.extensions opam) "x-oi-ref"
       in
+      let root_packages =
+        read_string_list_extension ~path
+          (OpamFile.OPAM.extensions opam)
+          "x-root-packages"
+      in
       Some
         {
           handle;
@@ -279,6 +308,7 @@ let parse_entry_file path : entry option =
           commit;
           ref_;
           depends;
+          root_packages;
           opam_path = path;
         }
   with
@@ -580,8 +610,8 @@ let escape_string s =
   Buffer.add_char buf '"';
   Buffer.contents buf
 
-let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
-    =
+let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~root_packages
+    ~display_name ~origin_url =
   let buf = Buffer.create 512 in
   Printf.bprintf buf "opam-version: \"2.0\"\n";
   Printf.bprintf buf "synopsis: %s\n" (escape_string synopsis);
@@ -610,6 +640,14 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
   Stdlib.Option.iter
     (fun s -> Printf.bprintf buf "x-oi-origin-url: %s\n" (escape_string s))
     origin_url;
+  (match root_packages with
+  | [] -> ()
+  | pkgs ->
+      Buffer.add_string buf "x-root-packages: [\n";
+      List.iter
+        (fun p -> Printf.bprintf buf "  %s\n" (escape_string p))
+        pkgs;
+      Buffer.add_string buf "]\n");
   Buffer.contents buf
 
 let write_entry ~fs ~path ~handle ~version content =
@@ -643,8 +681,8 @@ let auto_base_depends entries ~handle =
     in
     List.filter_map Fun.id [ pin "relocatable"; pin "default" ]
 
-let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
-    ?origin_url () =
+let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?(root_packages = [])
+    ?synopsis ?display_name ?origin_url () =
   let entries = load ~path in
   if List.exists (fun (e : entry) -> e.handle = handle) entries then
     Error.config_error
@@ -660,13 +698,14 @@ let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?synopsis ?display_name
     Stdlib.Option.value synopsis ~default:(default_synopsis handle)
   in
   let content =
-    render_opam ~synopsis ~url ~commit ~ref_ ~depends ~display_name ~origin_url
+    render_opam ~synopsis ~url ~commit ~ref_ ~depends ~root_packages
+      ~display_name ~origin_url
   in
   ensure_repo_marker ~fs ~path;
   let opam_path = write_entry ~fs ~path ~handle ~version content in
-  { handle; version; url; commit; ref_; depends; opam_path }
+  { handle; version; url; commit; ref_; depends; root_packages; opam_path }
 
-let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends () =
+let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends ?root_packages () =
   let entries = load ~path in
   let prev =
     match latest entries ~handle with
@@ -695,6 +734,11 @@ let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends () =
           let auto = auto_base_depends entries ~handle in
           if auto = [] then prev.depends else auto
   in
+  (* When [--root-packages] wasn't passed, carry the previous list through
+     untouched. Explicitly pass [~root_packages:[]] to clear it. *)
+  let root_packages =
+    match root_packages with Some r -> r | None -> prev.root_packages
+  in
   (* Skip the write when the resolved state matches [prev] exactly —
      same URL, commit, branch, and deps. Otherwise we'd accumulate
      identical [YYYYMMDD.N] entries on every scheduled bump. Compare
@@ -704,18 +748,30 @@ let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends () =
     let norm = List.sort compare in
     norm a = norm b
   in
+  let same_roots a b = List.sort compare a = List.sort compare b in
   if
     url = prev.url && commit = prev.commit && ref_ = prev.ref_
     && same_depends depends prev.depends
+    && same_roots root_packages prev.root_packages
   then `Unchanged prev
   else
     let version = next_version entries ~handle in
     let content =
       render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
-        ~depends ~display_name:None ~origin_url:None
+        ~depends ~root_packages ~display_name:None ~origin_url:None
     in
     let opam_path = write_entry ~fs ~path ~handle ~version content in
-    `Bumped { handle; version; url; commit; ref_; depends; opam_path }
+    `Bumped
+      {
+        handle;
+        version;
+        url;
+        commit;
+        ref_;
+        depends;
+        root_packages;
+        opam_path;
+      }
 
 let remove ~fs ~path ~handle ?version () =
   let entries = load ~path in
