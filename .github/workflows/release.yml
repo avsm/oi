@@ -39,7 +39,7 @@ jobs:
               && opam-2.5 update default
           RUN opam-2.5 switch create . \
               --packages "ocaml-option-static,ocaml-option-no-compression,ocaml.5.4.1"
-          RUN opam-2.5 exec -- dune build --profile=release bin/main.exe
+          RUN opam-2.5 exec -- dune build --profile=static bin/main.exe
           USER root
           RUN install -m 0755 _build/default/bin/main.exe /oi
           FROM scratch
