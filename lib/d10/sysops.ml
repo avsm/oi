@@ -67,7 +67,25 @@ let resolve_tools t =
   let tar = if has_cmd t "gtar" then "gtar" else "tar" in
   { tar }
 
+(* Kill every pathway that would make git block on stdin for
+   credentials. Hitting an HTTP 401 or a private git repo from inside
+   [oi] should fail fast (and let [Retry] back off) rather than hang
+   the whole build waiting for a [Username for 'https://github.com':]
+   prompt that'll never come in a non-interactive session. Set via
+   [Unix.putenv] so every child process [Eio.Process.spawn] launches
+   — opam's git backend, direct [git] invocations, and ssh under
+   [git@] URLs — inherits the same muzzle. *)
+let disable_interactive_git () =
+  Unix.putenv "GIT_TERMINAL_PROMPT" "0";
+  (* [GIT_ASKPASS] overrides [core.askPass]; [/bin/true] returns empty
+     credentials so git fails fast instead of blocking. *)
+  Unix.putenv "GIT_ASKPASS" "/bin/true";
+  (* Same story for ssh: don't spawn a GUI askpass helper. *)
+  Unix.putenv "SSH_ASKPASS" "/bin/true";
+  Unix.putenv "SSH_ASKPASS_REQUIRE" "never"
+
 let create ?stdout ?stderr ~proc_mgr ~fs () =
+  disable_interactive_git ();
   let stdout =
     Option.map (fun s -> (s :> Eio.Flow.sink_ty Eio.Resource.t)) stdout
   in
