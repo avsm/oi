@@ -158,7 +158,7 @@ jobs:
         run: oi repo list
 
       - name: oi registry build --all
-        run: oi registry build --all
+        run: oi registry build --refresh --all
 
       - name: oi registry export
         run: |

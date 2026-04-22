@@ -159,7 +159,7 @@ let service_name d =
    list in the image, and the reporepo on the host is the single source
    of truth. The script finishes with [oi registry export /out]. *)
 let build_export_cmd () =
-  "oi registry build --all && oi registry export /out"
+  "oi registry build --refresh --all && oi registry export /out"
 
 let docker_compose_yaml ~distros ~registry_host_path ~reporepo_host_path () =
   let buf = Buffer.create 1024 in
