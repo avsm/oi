@@ -3533,7 +3533,7 @@ let registry_docker_cmd =
       `Fedora `Latest;
     ]
   in
-  let run () output_dir src_context reporepo_host_path =
+  let run () output_dir src_context =
     with_error_handling @@ fun () ->
     (try Unix.mkdir output_dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
     let df_oi = Registry_docker.dockerfile_oi ~src_context in
@@ -3552,8 +3552,7 @@ let registry_docker_cmd =
     let compose_path = output_dir / "docker-compose.yml" in
     let compose_yaml =
       Registry_docker.docker_compose_yaml ~distros:default_distros
-        ~registry_host_path:"./registry"
-        ~reporepo_host_path ()
+        ~registry_host_path:"./registry" ()
     in
     Registry_docker.write_file compose_path compose_yaml;
     Fmt.pr "Wrote:@.";
@@ -3561,7 +3560,6 @@ let registry_docker_cmd =
     List.iter (fun (_, path) -> Fmt.pr "  %s@." path) per_distro_paths;
     Fmt.pr "  %s@." compose_path;
     Fmt.pr "@.";
-    Fmt.pr "Reporepo bind-mounted from: %s@." reporepo_host_path;
     Fmt.pr "Static oi release binary:@.";
     Fmt.pr "  docker buildx build -f %s --output type=local,dest=./oi-bin .@."
       oi_path;
@@ -3586,19 +3584,6 @@ let registry_docker_cmd =
              Defaults to the context root."
           [ "src" ])
   in
-  let reporepo_host_path =
-    Arg.(
-      value
-      & opt string (Oi.Reporepo.default_path)
-      & info ~docv:"PATH"
-          ~doc:
-            "Host path to bind-mount read-only at $(b,/opt/reporepo) inside \
-             every build container. $(b,oi registry build --all) inside the \
-             container reads this reporepo to discover each overlay's \
-             $(b,x-root-packages) list. Defaults to $(b,\\$OI_REPOREPO)/the \
-             XDG reporepo location."
-          [ "reporepo" ])
-  in
   let info =
     Cmd.info "docker"
       ~doc:
@@ -3612,21 +3597,22 @@ let registry_docker_cmd =
              $(b,oi)), one $(b,Dockerfile.<distro>) per distro (alpine latest, \
              debian stable, ubuntu 22.04/24.04/25.10, fedora latest), and a \
              $(b,docker-compose.yml) that bind-mounts $(b,./registry) onto \
-             $(b,/out) and a local reporepo checkout onto $(b,/opt/reporepo) \
-             in every service.";
+             $(b,/out) in every service.";
           `P
             "The per-distro images are intentionally generic: they install \
              depexts and copy in a static $(b,oi) binary. The compose file \
-             drives the actual work via a $(b,command:) override so the same \
-             image can be re-used against different reporepo pins. Each \
-             distro service runs $(b,oi registry build --all) — which reads \
-             every overlay's $(b,x-root-packages) list from the \
-             bind-mounted reporepo and builds each as $(b,@HANDLE/PKG) — and \
-             then finishes with $(b,oi registry export /out). The resulting \
-             tree at $(b,./registry/<os_key>/) carries one archive per layer \
-             plus a sqlite $(b,index.db) tagged with each layer's overlay \
-             handle/version, so clients can scope to a specific overlay by \
-             querying the index. Run the whole project with:";
+             drives the actual work via a $(b,command:) override. Each \
+             container owns its own oi state — on first use it clones the \
+             reporepo from $(b,oi)'s built-in default URL (overridable by \
+             setting $(b,OI_REPOREPO_URL) in the service environment), \
+             iterates every overlay's $(b,x-root-packages) list and builds \
+             each as $(b,@HANDLE/PKG), then finishes with $(b,oi registry \
+             export /out). Containers are independent and safe to run in \
+             parallel. The resulting tree at $(b,./registry/<os_key>/) \
+             carries one archive per layer plus a sqlite $(b,index.db) \
+             tagged with each layer's overlay handle/version, so clients \
+             can scope to a specific overlay by querying the index. Run \
+             the whole project with:";
           `Pre "  docker compose up --build";
           `P
             "$(b,compose up) returns once every distro has finished. The \
@@ -3634,19 +3620,12 @@ let registry_docker_cmd =
              $(b,rsync) onto a registry server — no further $(b,oi) commands \
              needed.";
           `S Manpage.s_examples;
-          `P
-            "Generate a compose project backed by the default reporepo on \
-             this machine:";
+          `P "Generate the compose project in the current directory:";
           `Pre "  oi registry docker -o ./registry-build";
-          `P "Use a specific reporepo checkout:";
-          `Pre
-            "  oi registry docker --reporepo=/srv/oi-reporepo -o \
-             ./registry-build";
         ]
   in
   Cmd.v info
-    Term.(
-      const run $ log_term $ output_dir $ src_context $ reporepo_host_path)
+    Term.(const run $ log_term $ output_dir $ src_context)
 
 (* -- registry mirror ------------------------------------------------------ *)
 
