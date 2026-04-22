@@ -45,8 +45,7 @@ chmod 600 "$known_hosts"
 
 # -aHz: preserve perms/links/times, hardlinks (for layer dedup), compress.
 # --partial: resume half-transferred large tarballs on retry.
-# --mkpath: create any missing path components on the remote.
-rsync -aHz --partial --mkpath \
+rsync -aHz --partial \
   -e "ssh -i $key_path -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
   "$REGISTRY_LOCAL/" "$REGISTRY_RSYNC_DEST/"
 
