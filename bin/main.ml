@@ -2900,12 +2900,14 @@ let registry_build_cmd =
     (* Each CLI-supplied target is its own (singleton) solve group,
        preserving the previous behaviour where [oi registry build a b]
        solved [a] and [b] independently. Reporepo groups may be
-       multi-element (compiler variants etc.). *)
-    let target_groups =
+       multi-element (compiler variants etc.). The tokens are still
+       raw — [@handle]-only entries haven't been fanned out to the
+       overlay's packages yet (we need the clone first). *)
+    let token_groups =
       List.map (fun t -> [ t ]) targets @ reporepo_target_groups
     in
-    let targets = List.concat target_groups in
-    if targets = [] then begin
+    let tokens = List.concat token_groups in
+    if tokens = [] then begin
       if all then
         Oi.Error.config_error
           "--all expanded to nothing in %s (all overlays filtered by \
@@ -2920,7 +2922,7 @@ let registry_build_cmd =
        so the later [cli_extra_repos] run clones them up front. The
        "build everything in this overlay" form is expanded once the
        clones exist. *)
-    let parsed = List.map parse_build_target targets in
+    let parsed = List.map parse_build_target tokens in
     let with_repos =
       let handles =
         List.filter_map
@@ -2977,21 +2979,42 @@ let registry_build_cmd =
        bare package name the later one wins for display purposes; the
        solver still sees them as a single target. *)
     let target_handle : (string, string) Hashtbl.t = Hashtbl.create 16 in
-    let targets =
+    (* Expand each raw group into package-name groups. A group
+       containing just an [@handle] fallback (no [x-root-packages])
+       fans out into one singleton group per package the overlay
+       ships — "build everything in the overlay" isn't a single-solve
+       concept. Groups composed of [@handle/pkg] or plain [pkg] tokens
+       keep their shape so multi-package solve groups (compiler
+       variants) survive intact. *)
+    let target_groups =
       List.concat_map
-        (function
-          | Plain_target t -> [ t ]
-          | Overlay_pkg (h, pkg_spec) ->
-              Hashtbl.replace target_handle pkg_spec h;
-              [ pkg_spec ]
-          | Overlay_all h ->
+        (fun raw_group ->
+          match List.map parse_build_target raw_group with
+          | [ Overlay_all h ] ->
               let ps = overlay_packages h in
               List.iter (fun p -> Hashtbl.replace target_handle p h) ps;
               Log.info (fun m ->
                   m "Overlay %s: %d package(s) to build" h (List.length ps));
-              ps)
-        parsed
+              List.map (fun p -> [ p ]) ps
+          | classified ->
+              let names =
+                List.map
+                  (function
+                    | Plain_target t -> t
+                    | Overlay_pkg (h, pkg_spec) ->
+                        Hashtbl.replace target_handle pkg_spec h;
+                        pkg_spec
+                    | Overlay_all h ->
+                        Oi.Error.config_error
+                          "@%s cannot appear inside a multi-package solve \
+                           group; use @%s/PKG or list packages explicitly"
+                          h h)
+                  classified
+              in
+              [ names ])
+        token_groups
     in
+    let targets = List.concat target_groups in
     (* [--dry-run --all] prints the expanded target list (with handles
        and the latest version each overlay ships) and stops before
        solving. Useful to audit what [--all] would attempt without
