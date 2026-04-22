@@ -155,7 +155,7 @@ let overlay_extras_of_handles ~fs ~sys handles =
       | Some v when v <> "" -> v
       | _ -> Oi.Reporepo.default_url
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path ~url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path ~url;
     log_overlay "resolving handles %s against reporepo %s"
       (String.concat ", " handles)
       path;
@@ -2898,7 +2898,8 @@ let registry_build_cmd =
       if not all then []
       else begin
         let path = reporepo_path () in
-        Oi.Reporepo.ensure_clone ~fs ~sys ~path ~url:(reporepo_url ());
+        Oi.Reporepo.ensure_clone ~fs ~sys ~refresh ~path
+          ~url:(reporepo_url ());
         let entries = Oi.Reporepo.load ~path in
         let only_set =
           if only = [] then None else Some (List.sort_uniq compare only)
@@ -3966,7 +3967,8 @@ let repo_list_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     match Oi.Reporepo.load ~path:reporepo with
     | [] -> Fmt.pr "Reporepo %s is empty.@." reporepo
     | entries ->
@@ -4027,7 +4029,8 @@ let repo_show_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     let entries = Oi.Reporepo.load ~path:reporepo in
     let matches =
       List.filter (fun (e : Oi.Reporepo.entry) -> e.handle = handle) entries
@@ -4112,7 +4115,8 @@ let repo_add_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
@@ -4191,7 +4195,8 @@ let repo_bump_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     let depends =
       match depend_specs with
       | [] -> None
@@ -4271,7 +4276,8 @@ let repo_set_roots_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     match
       Oi.Reporepo.bump ~fs ~sys ~path:reporepo ~handle ~root_packages:pkgs ()
     with
@@ -4335,7 +4341,8 @@ let repo_remove_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     let handle, version = parse_handle_version handle_spec in
     Oi.Reporepo.remove ~fs ~path:reporepo ~handle ?version ();
     Fmt.pr "Removed %s%s from %s@." handle
@@ -4383,7 +4390,8 @@ let repo_push_cmd =
       D10.Sysops.create ~stdout:(Eio.Stdenv.stdout env)
         ~stderr:(Eio.Stdenv.stderr env) ~proc_mgr ~fs ()
     in
-    Oi.Reporepo.ensure_clone ~fs ~sys ~path:reporepo ~url:reporepo_url;
+    Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
+      ~url:reporepo_url;
     Fmt.pr "%a %s@." Fmt.(styled `Bold string) "reporepo:" reporepo;
     (match push_url with
     | None -> ()

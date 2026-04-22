@@ -62,12 +62,29 @@ let write_file ~fs path content =
   Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / path) content
 
 (* Clone the reporepo from [url] into [path] when [path] isn't already
-   a git working copy. Never pulls once the clone exists: the user is
-   expected to [cd] in, edit, commit, and push — any auto-pull would
-   risk stomping on local commits or unstaged edits. *)
-let ensure_clone ~fs ~sys ~path ~url =
+   a git working copy. On an existing clone, only pulls when [refresh]
+   is explicitly set — the user is expected to [cd] in, edit, commit,
+   and push, and an unrequested auto-pull would risk stomping on local
+   commits. With [refresh:true] we [git pull --ff-only] so uncommitted
+   edits or local divergence cause git to abort with a clear error. *)
+let ensure_clone ~fs ~sys ~refresh ~path ~url =
   let dot_git = path / ".git" in
-  if Sys.file_exists dot_git then ()
+  if Sys.file_exists dot_git then begin
+    if refresh then begin
+      Log.info (fun m -> m "Refreshing reporepo at %s" path);
+      try
+        Retry.with_attempts
+          ~label:(Fmt.str "git pull reporepo at %s" path) (fun () ->
+            D10.Sysops.Cmd.run sys
+              [ "git"; "-C"; path; "pull"; "--ff-only" ])
+      with _ ->
+        Log.warn (fun m ->
+            m
+              "Failed to refresh reporepo at %s — continuing with existing \
+               state. Resolve local changes and retry if this matters."
+              path)
+    end
+  end
   else if
     Sys.file_exists path && Sys.is_directory path
     && Array.length (Sys.readdir path) > 0
@@ -482,7 +499,7 @@ let base_entries () =
 
 let ensure_base ~fs ~sys ~data_dir ?(refresh = false) () =
   let path = env_path () in
-  ensure_clone ~fs ~sys ~path ~url:(env_url ());
+  ensure_clone ~fs ~sys ~refresh ~path ~url:(env_url ());
   Log.debug (fun m -> m "ensure_base: reading reporepo %s" path);
   let entries = try load ~path with Error.E _ -> [] in
   match latest entries ~handle:"relocatable" with

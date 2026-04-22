@@ -109,13 +109,16 @@ val default_url : string
 val ensure_clone :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   sys:D10.Sysops.t ->
+  refresh:bool ->
   path:string ->
   url:string ->
   unit
-(** Ensure a git working copy of [url] exists at [path]. A no-op when a [.git]
-    directory is already present; an error when [path] exists but isn't empty
-    and isn't a git clone. Never pulls once the clone exists — the user owns the
-    working copy. *)
+(** Ensure a git working copy of [url] exists at [path]. Errors when [path]
+    exists but isn't empty and isn't a git clone. An existing clone is left
+    alone by default (the user owns the working copy); pass [~refresh:true]
+    to [git pull --ff-only] it — a dirty tree or non-ff divergence causes
+    git to abort with a clear message, and [ensure_clone] logs a warning
+    and continues with the existing state. *)
 
 val set_push_url : sys:D10.Sysops.t -> path:string -> string -> unit
 (** [set_push_url ~sys ~path url] persistently sets the push URL of the [origin]
