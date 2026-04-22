@@ -3396,7 +3396,7 @@ let registry_docker_cmd =
         (fun d ->
           let fname = Registry_docker.one_distro_filename d in
           let path = output_dir / fname in
-          let df = Registry_docker.dockerfile_one_distro ~src_context d in
+          let df = Registry_docker.dockerfile_one_distro d in
           Registry_docker.write_dockerfile path df;
           (d, path))
         default_distros
@@ -4401,7 +4401,7 @@ let repo_cmd =
 
 let () =
   let info =
-    Cmd.info "oi" ~version:"0.3.3"
+    Cmd.info "oi" ~version:"0.3.4"
       ~doc:"A fast, stateless OCaml package manager"
       ~man:
         [

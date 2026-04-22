@@ -32,7 +32,7 @@ let env_path () =
   | Some v when v <> "" -> v
   | _ -> default_path
 
-let default_url = "https://tangled.org/anil.recoil.org/reporepo.git"
+let default_url = "https://git.recoil.org/anil.recoil.org/reporepo"
 
 let env_url () =
   match Sys.getenv_opt "OI_REPOREPO_URL" with

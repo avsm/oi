@@ -30,7 +30,11 @@ jobs:
           restore-keys: |
             oi-cache-${{ matrix.operating-system }}-
 
-      - name: Install oi from latest release
+      - name: Bootstrap oi from latest release
+        # The prebuilt [oi] is the bootstrap: it solves and installs the
+        # project's own dependencies, then invokes [dune build] to compile
+        # the PR/changeset from source. Nothing about the bootstrap binary
+        # ends up in the build output.
         run: |
           mkdir -p "$HOME/.local/bin"
           case "${{ runner.os }}" in
@@ -44,17 +48,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/oi" config
 
-      - name: Build with oi
-        run: |
-          oi sync -v
-          oi config
+      - name: Sync project deps with bootstrap oi
+        run: oi sync -v
 
-      - name: Build with oi
-        run: |
-          oi exec -- dune build --profile=release
+      - name: Build the PR/changeset from source
+        run: oi exec -- dune build --profile=release
 
-      - name: Do a registry build
-        run: |
-          oi exec -- oi registry build @avsm
+      - name: Smoke-test the freshly-built oi
+        run: ./_build/default/bin/main.exe config
 
 

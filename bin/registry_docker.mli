@@ -1,10 +1,11 @@
 (** Dockerfile generation for [oi registry docker].
 
-    Emits a standalone static musl build of [oi] on alpine plus one runnable
-    per-distro image that ships [oi] and the target's depexts. The actual [oi
-    registry build] and [oi registry export] invocations live in
-    [docker-compose.yml] as a [command:] override, so the same image can run
-    against different reporepo pins without rebuilding. *)
+    Emits a standalone static musl build of [oi] on alpine (for CI / manual
+    release builds) plus one runnable per-distro image that curls the latest
+    [oi] binary from the GitHub releases page and ships the target's depexts.
+    The actual [oi registry build] and [oi registry export] invocations live
+    in [docker-compose.yml] as a [command:] override, so the same image can
+    run against different reporepo pins without rebuilding. *)
 
 module Distro = Dockerfile_opam.Distro
 
@@ -13,10 +14,11 @@ val dockerfile_oi : src_context:string -> Dockerfile.t
     musl-linked [oi] binary from the source tree at [src_context] (relative to
     the build context) and exports it as a scratch image at [/oi]. *)
 
-val dockerfile_one_distro : src_context:string -> Distro.t -> Dockerfile.t
-(** Per-distro build image. Stage 0 is the [oi-builder]; the final stage
-    installs depexts and copies the static [oi] binary into place. No [CMD] is
-    set — the compose file drives the build+export steps. *)
+val dockerfile_one_distro : Distro.t -> Dockerfile.t
+(** Per-distro build image. Installs depexts, fetches the latest statically
+    linked [oi-linux-<arch>] from the [oi] GitHub releases page, and sets
+    [/work] as the working directory. No [CMD] is set — the compose file
+    drives the build+export steps. *)
 
 val one_distro_filename : Distro.t -> string
 (** Filename (without directory) for a per-distro Dockerfile, e.g.
@@ -37,11 +39,7 @@ val docker_compose_yaml :
     [OI_REPOREPO=/opt/reporepo], and run
     [oi registry build --all && oi registry export /out]. Layers are tagged
     with their overlay handle and version in the per-distro sqlite index so
-    clients can scope queries to a specific overlay.
-
-    An additional one-shot [oi-binary] service copies the static [oi] binary
-    to [/out/oi-linux-$(uname -m)] so consumers can fetch it alongside the
-    registry layers. *)
+    clients can scope queries to a specific overlay. *)
 
 val write_dockerfile : string -> Dockerfile.t -> unit
 (** Serialise a {!Dockerfile.t} to [path] in Dockerfile syntax. *)
