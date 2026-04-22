@@ -17,7 +17,15 @@ let refresh_max_age = 86_400.0
 (* -- Repo pull using opam libraries -------------------------------------- *)
 
 let pull_repo ~label ~url_s ~dst =
+  (* Every repo [oi] fetches through this path is a git remote — the
+     reporepo overlays all carry a pinned commit sha, and user-supplied
+     [--with-repo=] URLs are git too. [OpamUrl.parse] otherwise treats
+     bare [https://] URLs without a [.git] suffix as an HTTP
+     [index.tar.gz] repo, which 404s for github-hosted overlays. Force
+     the git backend so [pull_repo] works regardless of how the user
+     spelled the URL. *)
   let url = OpamUrl.parse ~handle_suffix:true url_s in
+  let url = { url with OpamUrl.backend = `git } in
   let dst_dir = OpamFilename.Dir.of_string dst in
   OpamFilename.mkdir dst_dir;
   let repo_name = OpamRepositoryName.of_string label in

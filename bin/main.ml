@@ -2731,7 +2731,8 @@ let registry_export_cmd =
    shared a group — two targets under the same solver solution get the same
    "packages / built / cached" figures, which matches how the build itself
    treated them. *)
-let print_build_summary ~targets ~solve_failures ~target_group ~group_results =
+let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
+    ~group_results =
   let module R = struct
     type t =
       | Skipped of string  (** solver failure *)
@@ -2750,10 +2751,15 @@ let print_build_summary ~targets ~solve_failures ~target_group ~group_results =
             | Some (`Ok (p, b, c)) -> R.Ok (p, b, c)
             | Some (`Fail (p, b, c, msg)) -> R.Failed (p, b, c, msg)))
   in
-  let rows = List.map (fun t -> (t, result_for t)) targets in
+  let handle_for t =
+    match Hashtbl.find_opt target_handle t with
+    | Some h -> "@" ^ h
+    | None -> ""
+  in
+  let rows = List.map (fun t -> (t, handle_for t, result_for t)) targets in
   let n_ok, n_failed, n_skipped =
     List.fold_left
-      (fun (o, f, s) (_, r) ->
+      (fun (o, f, s) (_, _, r) ->
         match r with
         | R.Ok _ -> (o + 1, f, s)
         | R.Failed _ -> (o, f + 1, s)
@@ -2780,20 +2786,35 @@ let print_build_summary ~targets ~solve_failures ~target_group ~group_results =
     | R.Skipped msg -> Fmt.str "skipped (%s)" (first_line msg)
   in
   let target_width =
-    List.fold_left (fun w (t, _) -> max w (String.length t)) 12 rows
+    List.fold_left (fun w (t, _, _) -> max w (String.length t)) 12 rows
+  in
+  let handle_width =
+    List.fold_left (fun w (_, h, _) -> max w (String.length h)) 0 rows
+  in
+  let styled_handle h =
+    if h = "" then String.make handle_width ' '
+    else
+      (* [Fmt.str] with styling inflates the visible length with ANSI
+         codes; pad first, then colour. *)
+      let padded = Fmt.str "%-*s" handle_width h in
+      Fmt.str "%a" Fmt.(styled `Cyan string) padded
   in
   Fmt.pr "@.";
   List.iter
-    (fun (target, r) ->
-      Fmt.pr "  %-6s %-*s  %s@." (status_col r) target_width target
-        (detail_col r))
+    (fun (target, handle, r) ->
+      if handle_width = 0 then
+        Fmt.pr "  %-6s %-*s  %s@." (status_col r) target_width target
+          (detail_col r)
+      else
+        Fmt.pr "  %-6s %s  %-*s  %s@." (status_col r) (styled_handle handle)
+          target_width target (detail_col r))
     rows;
   Fmt.pr "@.%d ok, %d failed, %d skipped@." n_ok n_failed n_skipped;
   (* Dump per-target build-failure output at debug level so `-v` still
      shows the reason, without dumping a compiler transcript by
      default. *)
   List.iter
-    (fun (target, r) ->
+    (fun (target, _handle, r) ->
       match r with
       | R.Failed (_, _, _, msg) -> Log.info (fun m -> m "%s: %s" target msg)
       | R.Skipped msg when String.contains msg '\n' ->
@@ -2862,11 +2883,17 @@ let registry_build_cmd =
     ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
-    (* When [--all] is set, enumerate every overlay in the reporepo
-       and expand each to its [x-root-packages]. The result is a
-       list of [@handle/pkg] strings that flow into the same target
-       parser as CLI-supplied targets. [--only] restricts the set to
-       named handles; [--skip] excludes them. *)
+    (* When [--all] is set, walk every overlay in the reporepo and
+       derive targets from each one:
+       - skip [default] (ocaml/opam-repository) — its ~10k packages
+         are never what [--all] should mean;
+       - if the overlay has [x-root-packages], emit one [@handle/pkg]
+         per entry;
+       - otherwise fall back to [@handle], which expands to every
+         package the overlay's clone ships.
+       [--only] restricts to named handles; [--skip] excludes them.
+       [default] can still be included by explicitly listing it via
+       [--only default]. *)
     let reporepo_targets =
       if not all then []
       else begin
@@ -2883,21 +2910,34 @@ let registry_build_cmd =
         in
         List.concat_map
           (fun h ->
-            let included =
-              (match only_set with None -> true | Some s -> List.mem h s)
-              && not (List.mem h skip_set)
+            let default_skipped =
+              h = "default"
+              && (match only_set with None -> true | Some s -> not (List.mem h s))
             in
-            if not included then []
+            if default_skipped then begin
+              Log.info (fun m ->
+                  m "--all: skipping %s (pass --only default to include)" h);
+              []
+            end
             else
-              match Oi.Reporepo.latest entries ~handle:h with
-              | None -> []
-              | Some e ->
-                  if e.root_packages = [] then begin
-                    Log.info (fun m ->
-                        m "--all: overlay %s has no x-root-packages, skipping" h);
-                    []
-                  end
-                  else List.map (fun p -> "@" ^ h ^ "/" ^ p) e.root_packages)
+              let included =
+                (match only_set with None -> true | Some s -> List.mem h s)
+                && not (List.mem h skip_set)
+              in
+              if not included then []
+              else
+                match Oi.Reporepo.latest entries ~handle:h with
+                | None -> []
+                | Some e ->
+                    if e.root_packages = [] then begin
+                      Log.info (fun m ->
+                          m
+                            "--all: overlay %s has no x-root-packages, \
+                             expanding to every package in the overlay"
+                            h);
+                      [ "@" ^ h ]
+                    end
+                    else List.map (fun p -> "@" ^ h ^ "/" ^ p) e.root_packages)
           handles
       end
     in
@@ -2905,9 +2945,8 @@ let registry_build_cmd =
     if targets = [] then begin
       if all then
         Oi.Error.config_error
-          "--all matched no overlays with x-root-packages in %s. Declare \
-           root packages for an overlay with 'oi repo set-roots HANDLE \
-           PKG...'"
+          "--all expanded to nothing in %s (all overlays filtered by \
+           --skip/--only, or the reporepo only contains 'default')"
           (reporepo_path ())
       else
         Oi.Error.config_error
@@ -2969,18 +3008,118 @@ let registry_build_cmd =
           |> List.filter (fun n -> Sys.is_directory (dir / n))
           |> List.sort String.compare
     in
+    (* Remember which handle each target came from so the summary
+       table can render a column for it. Targets from plain PKG
+       arguments have no handle. If two overlays contribute the same
+       bare package name the later one wins for display purposes; the
+       solver still sees them as a single target. *)
+    let target_handle : (string, string) Hashtbl.t = Hashtbl.create 16 in
     let targets =
       List.concat_map
         (function
           | Plain_target t -> [ t ]
-          | Overlay_pkg (_, pkg_spec) -> [ pkg_spec ]
+          | Overlay_pkg (h, pkg_spec) ->
+              Hashtbl.replace target_handle pkg_spec h;
+              [ pkg_spec ]
           | Overlay_all h ->
               let ps = overlay_packages h in
+              List.iter (fun p -> Hashtbl.replace target_handle p h) ps;
               Log.info (fun m ->
                   m "Overlay %s: %d package(s) to build" h (List.length ps));
               ps)
         parsed
     in
+    (* [--dry-run --all] prints the expanded target list (with handles
+       and the latest version each overlay ships) and stops before
+       solving. Useful to audit what [--all] would attempt without
+       paying the solver's cost. Non-[--all] dry-runs keep the existing
+       per-group build-plan tree output downstream. *)
+    if dry_run && all then begin
+      let n = List.length targets in
+      Fmt.pr "@.%a@." Fmt.(styled `Bold string)
+        (Fmt.str "--all would build %d target%s:" n (if n = 1 then "" else "s"));
+      (* Resolve each handle once to its cloned packages/ dir so we can
+         look up the latest version of each package it contributes.
+         Falls back gracefully if the overlay isn't cloned yet. *)
+      let handle_dir = Hashtbl.create 8 in
+      let entries = Oi.Reporepo.load ~path:(reporepo_path ()) in
+      let dir_for_handle h =
+        match Hashtbl.find_opt handle_dir h with
+        | Some v -> v
+        | None ->
+            let v =
+              match Oi.Reporepo.latest entries ~handle:h with
+              | None -> None
+              | Some e ->
+                  let d =
+                    data_dir / "repos"
+                    / ("overlay-" ^ e.handle ^ "-" ^ e.version)
+                    / "packages"
+                  in
+                  if Sys.file_exists d then Some d else None
+            in
+            Hashtbl.replace handle_dir h v;
+            v
+      in
+      let bare_name t =
+        (* Strip version / relop suffixes so [latest_version_in_dirs]
+           can find the package entry. *)
+        let stop = [ '='; '<'; '>'; '.'; '{' ] in
+        let len = String.length t in
+        let rec find i =
+          if i >= len then len
+          else if List.mem t.[i] stop then i
+          else find (i + 1)
+        in
+        String.sub t 0 (find 0)
+      in
+      let version_for t =
+        match Hashtbl.find_opt target_handle t with
+        | None -> None
+        | Some h -> (
+            match dir_for_handle h with
+            | None -> None
+            | Some d -> latest_version_in_dirs ~pkg:(bare_name t) [ d ])
+      in
+      let handle_w =
+        List.fold_left
+          (fun w t ->
+            match Hashtbl.find_opt target_handle t with
+            | Some h -> max w (String.length h + 1)
+            | None -> w)
+          0 targets
+      in
+      let target_w =
+        List.fold_left (fun w t -> max w (String.length t)) 0 targets
+      in
+      List.iter
+        (fun t ->
+          let handle_cell =
+            match Hashtbl.find_opt target_handle t with
+            | Some h ->
+                Fmt.str "%a" Fmt.(styled `Cyan string) ("@" ^ h)
+            | None -> ""
+          in
+          let version_cell =
+            match version_for t with
+            | Some v -> Fmt.str "%a" Fmt.(styled `Faint string) v
+            | None -> ""
+          in
+          (* [handle_w] is used raw as the visible width, even though
+             [handle_cell] has ANSI codes — we pad the plain-text
+             handle, then colourise. *)
+          let handle_plain =
+            match Hashtbl.find_opt target_handle t with
+            | Some h -> "@" ^ h
+            | None -> ""
+          in
+          let handle_pad = String.make (handle_w - String.length handle_plain) ' ' in
+          Fmt.pr "  %s%s  %-*s  %s@." handle_cell handle_pad target_w t
+            version_cell)
+        targets;
+      Fmt.pr "@.";
+      exit 0
+    end;
     if targets = [] && url_project.roots = [] then
       Oi.Error.config_error "no targets to build";
     let packages_dirs =
@@ -3167,7 +3306,8 @@ let registry_build_cmd =
         end)
       groups;
     if not dry_run then
-      print_build_summary ~targets ~solve_failures ~target_group ~group_results
+      print_build_summary ~targets ~target_handle ~solve_failures ~target_group
+        ~group_results
   in
   let targets =
     Arg.(
@@ -3179,10 +3319,17 @@ let registry_build_cmd =
       value & flag
       & info
           ~doc:
-            "Build every overlay's $(b,x-root-packages) in the reporepo as \
-             $(b,@HANDLE/PKG). Combine with $(b,--only)/$(b,--skip) to \
-             restrict the handle set. Positional $(b,PKG) arguments are still \
-             honoured and are built in addition to the reporepo-derived list."
+            "Walk every overlay in the reporepo and derive targets: if an \
+             overlay declares $(b,x-root-packages), build each as \
+             $(b,@HANDLE/PKG); otherwise build every package the overlay \
+             ships (the $(b,@HANDLE) shortcut). The $(b,default) overlay \
+             (ocaml/opam-repository) is excluded because building its ~10k \
+             packages is never what you want. Combine with $(b,--only) / \
+             $(b,--skip) to refine the handle set (pass $(b,--only default) \
+             if you really want to build everything in opam-repository). \
+             Pair with $(b,--dry-run) to preview the target list without \
+             solving. Positional $(b,PKG) arguments are still honoured and \
+             are built in addition to the reporepo-derived list."
           [ "all" ])
   in
   let only =
