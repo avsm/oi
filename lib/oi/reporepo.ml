@@ -46,7 +46,7 @@ type entry = {
   commit : string;
   ref_ : string option;
   depends : (string * string option) list;
-  root_packages : string list;
+  root_packages : string list list;
   opam_path : string;
 }
 
@@ -243,28 +243,38 @@ let read_string_extension extensions name =
       | OpamParserTypes.FullPos.String s -> Some s
       | _ -> None)
 
-(* Read an [x-*] list-of-strings extension. Accepts either a single
-   string (promoted to a singleton list) or a full [[ "a" "b" ]] list.
-   Returns [[]] when absent; raises a config error on malformed
-   values so the user gets a clear message rather than a silent skip. *)
-let read_string_list_extension ~path extensions name =
+(* Read [x-root-packages]: a list where each element is either a bare
+   string (singleton solve group) or a nested list of strings (a
+   multi-package solve group). Returns [string list list] with each
+   inner list being one solve group. A missing field yields [[]]. *)
+let read_root_packages_extension ~path extensions name =
+  let as_string_item (v : OpamParserTypes.FullPos.value) =
+    match v.pelem with
+    | OpamParserTypes.FullPos.String s -> s
+    | _ ->
+        Error.config_error "%s: %s nested item must be a string" path name
+  in
   match OpamStd.String.Map.find_opt name extensions with
   | None -> []
   | Some v -> (
       match v.OpamParserTypes.FullPos.pelem with
-      | OpamParserTypes.FullPos.String s -> [ s ]
+      | OpamParserTypes.FullPos.String s -> [ [ s ] ]
       | OpamParserTypes.FullPos.List { pelem = items; _ } ->
           List.map
             (fun (it : OpamParserTypes.FullPos.value) ->
               match it.pelem with
-              | OpamParserTypes.FullPos.String s -> s
+              | OpamParserTypes.FullPos.String s -> [ s ]
+              | OpamParserTypes.FullPos.List { pelem = sub; _ } ->
+                  List.map as_string_item sub
               | _ ->
                   Error.config_error
-                    "%s: %s must be a list of strings" path name)
+                    "%s: %s item must be a string or a list of strings"
+                    path name)
             items
       | _ ->
           Error.config_error
-            "%s: %s must be a string or a list of strings" path name)
+            "%s: %s must be a string, a list of strings, or a list of lists"
+            path name)
 
 (* Extract an exact [= "version"] pin from an opam [condition], if
    present. Anything more involved (filters, ranges) renders as [None]. *)
@@ -313,7 +323,7 @@ let parse_entry_file path : entry option =
         read_string_extension (OpamFile.OPAM.extensions opam) "x-oi-ref"
       in
       let root_packages =
-        read_string_list_extension ~path
+        read_root_packages_extension ~path
           (OpamFile.OPAM.extensions opam)
           "x-root-packages"
       in
@@ -659,11 +669,20 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~depends ~root_packages
     origin_url;
   (match root_packages with
   | [] -> ()
-  | pkgs ->
+  | groups ->
       Buffer.add_string buf "x-root-packages: [\n";
       List.iter
-        (fun p -> Printf.bprintf buf "  %s\n" (escape_string p))
-        pkgs;
+        (fun group ->
+          match group with
+          | [] -> ()
+          | [ one ] -> Printf.bprintf buf "  %s\n" (escape_string one)
+          | multi ->
+              Buffer.add_string buf "  [";
+              List.iter
+                (fun p -> Printf.bprintf buf " %s" (escape_string p))
+                multi;
+              Buffer.add_string buf " ]\n")
+        groups;
       Buffer.add_string buf "]\n");
   Buffer.contents buf
 

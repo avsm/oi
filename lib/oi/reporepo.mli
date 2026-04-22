@@ -23,12 +23,20 @@ type entry = {
   depends : (string * string option) list;
       (** Other overlay handles this one depends on, optionally with an exact
           version. *)
-  root_packages : string list;
-      (** Packages to pre-build when priming this overlay into a registry.
-          Stored as [x-root-packages: [ "pkg1" "pkg2" ... ]] in the overlay's
-          opam file. Each entry is a package spec (name, optionally with a
-          version constraint) that {!oi registry build-all} feeds to the
-          solver as [@handle/pkg]. *)
+  root_packages : string list list;
+      (** Package sets to pre-build when priming this overlay into a registry.
+          Each outer entry is a $(i,solve group): a list of package specs fed
+          to the solver together, so the resulting layers are cached as a
+          unit. Singleton groups (one package) just pin that one package;
+          multi-package groups pin compiler variants like
+          [["ocaml-option-flambda" "ocaml-option-static" "ocaml"]] which
+          forces the solver to pick an [ocaml] version compatible with both
+          options.
+
+          Stored as [x-root-packages: [...]] in the overlay's opam file.
+          Each top-level entry is either a bare string (singleton group) or
+          a nested list of strings (multi-package group). All package specs
+          are fed to the solver as [@handle/pkg]. *)
   opam_path : string;  (** Absolute path to the source opam file. *)
 }
 
@@ -162,7 +170,7 @@ val add :
   url:string ->
   ?ref_:string ->
   ?depends:(string * string option) list ->
-  ?root_packages:string list ->
+  ?root_packages:string list list ->
   ?synopsis:string ->
   ?display_name:string ->
   ?origin_url:string ->
@@ -189,7 +197,7 @@ val bump :
   ?url:string ->
   ?ref_:string ->
   ?depends:(string * string option) list ->
-  ?root_packages:string list ->
+  ?root_packages:string list list ->
   unit ->
   [ `Bumped of entry | `Unchanged of entry ]
 (** Consider creating a new version for [handle]. Re-[ls-remote]s either the

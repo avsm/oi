@@ -2823,55 +2823,6 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
     rows
 
 let registry_build_cmd =
-  (* Group solutions by layer-hash compatibility. Two solutions are compatible
-     if every package name appearing in both has the same layer hash — this
-     catches version differences AND different dep contexts (e.g. depopts). *)
-  let group_solutions ctx ~packages_dirs solutions =
-    (* Per-package layer hashes, keyed by package name as a string. *)
-    let hash_map_of pkgs =
-      let m = Hashtbl.create 64 in
-      let plan = Oi.Action.plan ctx ~packages_dirs pkgs in
-      List.iter
-        (fun (node : Oi.Action.node) ->
-          Hashtbl.replace m
-            (OpamPackage.Name.to_string (OpamPackage.name node.pkg))
-            node.layer_hash)
-        (Oi.Action.nodes plan);
-      m
-    in
-    let compatible hmap group_hmap =
-      Hashtbl.fold
-        (fun name hash ok ->
-          ok
-          &&
-          match Hashtbl.find_opt group_hmap name with
-          | None -> true
-          | Some h -> String.equal h hash)
-        hmap true
-    in
-    let groups = ref [] in
-    List.iter
-      (fun ((_, pkgs) as solution) ->
-        let hmap = hash_map_of pkgs in
-        let merged = ref false in
-        groups :=
-          List.map
-            (fun (gsols, ghmap) ->
-              if !merged then (gsols, ghmap)
-              else if compatible hmap ghmap then begin
-                merged := true;
-                Hashtbl.iter
-                  (fun n h ->
-                    if not (Hashtbl.mem ghmap n) then Hashtbl.replace ghmap n h)
-                  hmap;
-                (solution :: gsols, ghmap)
-              end
-              else (gsols, ghmap))
-            !groups;
-        if not !merged then groups := ([ solution ], hmap) :: !groups)
-      solutions;
-    List.rev !groups
-  in
   let run () data_dir cache_dir refresh dry_run all only skip registry
       with_repos with_deps jobs targets =
     with_error_handling @@ fun () ->
@@ -2894,7 +2845,7 @@ let registry_build_cmd =
        [--only] restricts to named handles; [--skip] excludes them.
        [default] can still be included by explicitly listing it via
        [--only default]. *)
-    let reporepo_targets =
+    let reporepo_target_groups =
       if not all then []
       else begin
         let path = reporepo_path () in
@@ -2936,13 +2887,24 @@ let registry_build_cmd =
                             "--all: overlay %s has no x-root-packages, \
                              expanding to every package in the overlay"
                             h);
-                      [ "@" ^ h ]
+                      [ [ "@" ^ h ] ]
                     end
-                    else List.map (fun p -> "@" ^ h ^ "/" ^ p) e.root_packages)
+                    else
+                      List.map
+                        (fun group ->
+                          List.map (fun p -> "@" ^ h ^ "/" ^ p) group)
+                        e.root_packages)
           handles
       end
     in
-    let targets = targets @ reporepo_targets in
+    (* Each CLI-supplied target is its own (singleton) solve group,
+       preserving the previous behaviour where [oi registry build a b]
+       solved [a] and [b] independently. Reporepo groups may be
+       multi-element (compiler variants etc.). *)
+    let target_groups =
+      List.map (fun t -> [ t ]) targets @ reporepo_target_groups
+    in
+    let targets = List.concat target_groups in
     if targets = [] then begin
       if all then
         Oi.Error.config_error
@@ -3143,7 +3105,10 @@ let registry_build_cmd =
         extra_cli
       @ List.map OpamPackage.Name.of_string url_project.roots
     in
-    let targets = targets @ url_project.roots in
+    let target_groups =
+      target_groups @ List.map (fun r -> [ r ]) url_project.roots
+    in
+    let targets = List.concat target_groups in
     (* Per-target result tracking; the final summary walks [targets] in
        order and looks each name up here. A target either fails to
        solve (status stored directly), or lands in some group. Groups
@@ -3158,61 +3123,73 @@ let registry_build_cmd =
         Hashtbl.t =
       Hashtbl.create 16
     in
-    (* 1. Solve each target independently. Per-target progress bar so
-       the user sees something when there are many overlay roots. *)
+    (* 1. Solve each solve-group. A group is a list of target strings
+       fed to the solver as a single root set, so variant-forming groups
+       (e.g. [["ocaml-option-flambda"; "ocaml-option-static"; "ocaml"]])
+       solve to a combined plan and cache as a unit. Singleton groups
+       are indistinguishable from the previous per-target solves. *)
     let solutions =
-      let n_targets = List.length targets in
-      let solve_one target =
-        let name, version_constraint = parse_pkg_target target in
+      let n_groups = List.length target_groups in
+      let group_label group = String.concat " " group in
+      let solve_group group =
+        let items = List.map parse_pkg_target group in
+        let names = List.map fst items in
         let constraints =
-          match version_constraint with
-          | None -> base_constraints
-          | Some c -> OpamPackage.Name.Map.add name c base_constraints
+          List.fold_left
+            (fun acc (name, c) ->
+              match c with
+              | None -> acc
+              | Some c -> OpamPackage.Name.Map.add name c acc)
+            base_constraints items
         in
         match
-          Oi.Solve.solve ctx ~packages_dirs ~constraints (name :: extra_names)
+          Oi.Solve.solve ctx ~packages_dirs ~constraints
+            (names @ extra_names)
         with
         | Ok pkgs ->
             Log.info (fun m ->
-                m "Solved %s: %d packages" target (List.length pkgs));
-            Some (target, pkgs)
+                m "Solved %s: %d packages" (group_label group)
+                  (List.length pkgs));
+            Some (group, pkgs)
         | Error msg ->
-            Hashtbl.replace solve_failures target msg;
-            Log.debug (fun m -> m "solve failed: %s: %s" target msg);
+            List.iter (fun t -> Hashtbl.replace solve_failures t msg) group;
+            Log.debug (fun m ->
+                m "solve failed: %s: %s" (group_label group) msg);
             None
       in
-      if n_targets <= 1 then List.filter_map solve_one targets
+      if n_groups <= 1 then List.filter_map solve_group target_groups
       else
         let config = Progress.Config.v ~persistent:false () in
         let bar =
           let open Progress.Line in
           pair ~sep:(const " ")
-            (list [ spinner (); brackets (count_to n_targets) ])
+            (list [ spinner (); brackets (count_to n_groups) ])
             (rpad 40 string)
         in
         let acc = ref [] in
         Progress.with_reporter ~config bar (fun report ->
             List.iter
-              (fun target ->
-                report (0, Fmt.str "solve %s" target);
-                (match solve_one target with
+              (fun group ->
+                let label = group_label group in
+                report (0, Fmt.str "solve %s" label);
+                (match solve_group group with
                 | Some s -> acc := s :: !acc
                 | None -> ());
-                report (1, Fmt.str "solve %s" target))
-              targets);
+                report (1, Fmt.str "solve %s" label))
+              target_groups);
         List.rev !acc
     in
     if solutions = [] then Oi.Error.msg "no packages solved successfully";
-    (* 2. Group compatible solutions *)
-    let groups = group_solutions ctx ~packages_dirs solutions in
+    (* 2. Each solve group becomes its own build group. *)
+    let groups = List.map (fun sol -> ([ sol ], Hashtbl.create 0)) solutions in
     let n_groups = List.length groups in
     Log.info (fun m ->
-        m "%d target(s) in %d compatible group(s)" (List.length solutions)
+        m "%d solve group(s) → %d build group(s)" (List.length solutions)
           n_groups);
     (* 3. Build each group *)
     List.iteri
       (fun gi (group_solutions, _) ->
-        let group_targets_list = List.map fst group_solutions in
+        let group_targets_list = List.concat_map fst group_solutions in
         let group_targets = String.concat ", " group_targets_list in
         List.iter
           (fun t -> Hashtbl.replace target_group t gi)
@@ -4038,9 +4015,16 @@ let repo_show_cmd =
               ds);
         (match e.root_packages with
         | [] -> ()
-        | pkgs ->
+        | groups ->
             Fmt.pr "  root-packages:@.";
-            List.iter (fun p -> Fmt.pr "    %s@." p) pkgs);
+            List.iter
+              (fun group ->
+                match group with
+                | [] -> ()
+                | [ p ] -> Fmt.pr "    %s@." p
+                | multi ->
+                    Fmt.pr "    [%s]@." (String.concat " " multi))
+              groups);
         Fmt.pr "@.")
       matches
   in
@@ -4246,6 +4230,14 @@ let repo_bump_cmd =
       $ ref_term $ depend_term)
 
 let repo_set_roots_cmd =
+  (* Parse a PKG token: a comma-separated list becomes a multi-package
+     solve group; a bare name becomes a singleton group. Empty tokens
+     between commas are dropped. *)
+  let parse_group token =
+    String.split_on_char ',' token
+    |> List.map String.trim
+    |> List.filter (fun s -> s <> "")
+  in
   let run () reporepo reporepo_url handle pkgs =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
@@ -4257,8 +4249,15 @@ let repo_set_roots_cmd =
     in
     Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
       ~url:reporepo_url;
+    let groups =
+      List.filter_map
+        (fun t ->
+          match parse_group t with [] -> None | g -> Some g)
+        pkgs
+    in
     match
-      Oi.Reporepo.bump ~fs ~sys ~path:reporepo ~handle ~root_packages:pkgs ()
+      Oi.Reporepo.bump ~fs ~sys ~path:reporepo ~handle
+        ~root_packages:groups ()
     with
     | `Bumped e ->
         Fmt.pr "Bumped %s to %s (root-packages: %d entr%s)@." e.handle e.version
@@ -4280,9 +4279,14 @@ let repo_set_roots_cmd =
       & pos_right 0 string []
       & info ~docv:"PKG"
           ~doc:
-            "Package specs to record as the overlay's root packages (the list \
-             that $(b,oi registry build --all) iterates over). Pass no \
-             $(b,PKG) arguments to clear the list."
+            "Package specs to record as the overlay's root packages (the \
+             list that $(b,oi registry build --all) iterates over). Each \
+             argument is one solve group: a bare name becomes a \
+             single-package solve, while a comma-separated list becomes \
+             a multi-package group (useful for compiler variants — e.g. \
+             $(b,ocaml-option-flambda,ocaml-option-static,ocaml) forces \
+             the solver to pick an $(b,ocaml) version compatible with \
+             both options). Pass no $(b,PKG) arguments to clear the list."
           [])
   in
   let info =
@@ -4295,15 +4299,21 @@ let repo_set_roots_cmd =
             "Writes $(b,x-root-packages: [...]) on a new bumped version of \
              $(b,HANDLE). The recorded list drives $(b,oi registry build \
              --all), which iterates every overlay in the reporepo and \
-             builds each handle's root packages as $(b,@handle/pkg).";
+             builds each handle's root groups. Single-package groups \
+             solve and build as one $(b,@handle/pkg); multi-package \
+             groups (comma-separated on the CLI) solve together so the \
+             resulting layers capture a specific variant.";
           `P
             "Passing zero $(b,PKG) arguments clears the list. The new version \
              is stamped $(b,YYYYMMDD.N) exactly like $(b,oi repo bump) — the \
              previous entry stays around as history.";
           `S Manpage.s_examples;
+          `P "Record three independent root packages:";
+          `Pre "  oi repo set-roots relocatable dune utop merlin";
+          `P "Record a compiler variant alongside plain packages:";
           `Pre
-            "  oi repo set-roots relocatable dune utop merlin\n\
-            \  oi repo set-roots avsm owntracks-cli crockford";
+            "  oi repo set-roots relocatable \
+             ocaml-option-flambda,ocaml-option-static,ocaml dune utop";
         ]
   in
   Cmd.v info
