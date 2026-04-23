@@ -292,16 +292,22 @@ let with_default_reporter ~total_packages ~n_stages f =
           pkg_event =
             (fun e ->
               match e with
+              (* [Started] is the "now working on X" signal — show the
+                 package on the bar so the user sees what's in flight,
+                 without ticking the completion counter. *)
               | Started { pkg; stage; total_stages = _ } ->
-                  report (0, Fmt.str "[%s] %s (build)" (stage_s stage) pkg)
-              | Cached { pkg } -> report (1, Fmt.str "%s (cached)" pkg)
-              | Built { pkg } -> report (1, Fmt.str "%s" pkg)
+                  report (0, Fmt.str "[%s] %s" (stage_s stage) pkg)
+              (* Terminal events only tick the counter; the label is
+                 left at whatever [Started] last set, so the bar always
+                 reads as the currently-in-flight job rather than the
+                 last one that finished. *)
+              | Cached _ | Built _ -> report (1, "")
+              | Dep_failed _ -> ()
               | Build_failed { pkg; log } ->
                   Progress.interject_with (fun () ->
                       Fmt.epr "  %a %s → %s@."
                         Fmt.(styled (`Fg `Red) string)
                         "FAIL" pkg log)
-              | Dep_failed { pkg = _; upstream_log = _ } -> ()
               | Install_failed { pkg; log } ->
                   Progress.interject_with (fun () ->
                       Fmt.epr "  %a %s (install) → %s@."
@@ -398,10 +404,16 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
     else
     List.iter
       (fun (group : Plan.group) ->
-        (* Phase 1: restore cached layers (Binary packages) *)
+        (* Phase 1: restore cached layers (Binary packages). Emit a
+           [Started] before each restore so the progress bar label
+           shows the package currently being restored, not the one
+           that just finished. *)
         List.iter
           (fun (p : Plan.package_plan) ->
             if p.method_ = `Binary then begin
+              reporter.pkg_event
+                (Started
+                   { pkg = p.pkg; stage = group.stage; total_stages = n_stages });
               D10.Layer.restore d10 ~hash:p.layer_hash ~prefix;
               reporter.pkg_event (Cached { pkg = p.pkg })
             end)
@@ -453,13 +465,18 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
               active := !active - 1)
             to_build
         end;
-        (* Phase 3: serial install for successfully built packages *)
+        (* Phase 3: serial install for successfully built packages.
+           Emit [Started] before each install so the bar label tracks
+           the in-flight package. *)
         List.iter
           (fun (p : Plan.package_plan) ->
             if
               p.method_ = `Source
               && not (Hashtbl.mem failed_layers p.layer_hash)
             then begin
+              reporter.pkg_event
+                (Started
+                   { pkg = p.pkg; stage = group.stage; total_stages = n_stages });
               let before = D10.Prefix.snapshot ~fs prefix in
               try
                 install_package ~proc_mgr ~fs p;
