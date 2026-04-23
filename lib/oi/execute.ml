@@ -342,6 +342,12 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
   let failed_layers : (string, string) Hashtbl.t =
     match failed_layers with Some t -> t | None -> Hashtbl.create 16
   in
+  (* Snapshot the pre-run count so the end-of-run raise only fires for
+     failures introduced BY THIS CALL. Without this, every group after
+     the first failure in an [--all] run re-reports that failure as
+     its own (Execute.run would raise on each subsequent call because
+     [failed_layers] still carries the earlier entry). *)
+  let failed_count_before = Hashtbl.length failed_layers in
   let mark_failed ~(p : Plan.package_plan) ~log_path =
     if not (Hashtbl.mem failed_layers p.layer_hash) then
       Hashtbl.replace failed_layers p.layer_hash log_path
@@ -500,5 +506,5 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
   | Some r -> do_work r
   | None ->
       with_default_reporter ~total_packages:plan.total_packages ~n_stages do_work);
-  let n_failed = Hashtbl.length failed_layers in
+  let n_failed = Hashtbl.length failed_layers - failed_count_before in
   if n_failed > 0 then Error.msg "%d package(s) failed to build" n_failed
