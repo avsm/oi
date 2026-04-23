@@ -2725,19 +2725,19 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
     ~group_results =
   let module R = struct
     type t =
-      | Skipped of string  (** solver failure *)
+      | Skipped of string * string  (* solver failure + log path *)
       | Ok of int * int * int
       | Failed of int * int * int * string * (string * string) list
   end in
   let result_for t =
     match Hashtbl.find_opt solve_failures t with
-    | Some msg -> R.Skipped msg
+    | Some (msg, log_path) -> R.Skipped (msg, log_path)
     | None -> (
         match Hashtbl.find_opt target_group t with
-        | None -> R.Skipped "unknown"
+        | None -> R.Skipped ("unknown", "")
         | Some gi -> (
             match Hashtbl.find_opt group_results gi with
-            | None -> R.Skipped "group not built"
+            | None -> R.Skipped ("group not built", "")
             | Some (`Ok (p, b, c)) -> R.Ok (p, b, c)
             | Some (`Fail (p, b, c, msg, failures)) ->
                 R.Failed (p, b, c, msg, failures)))
@@ -2774,7 +2774,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
     | R.Ok (p, b, c) -> Fmt.str "%d pkg (%d built, %d cached)" p b c
     | R.Failed (p, b, c, _, _) ->
         Fmt.str "%d pkg (%d built, %d cached) — build failed" p b c
-    | R.Skipped msg -> Fmt.str "skipped (%s)" (first_line msg)
+    | R.Skipped (msg, _) -> Fmt.str "skipped (%s)" (first_line msg)
   in
   let target_width =
     List.fold_left (fun w (t, _, _) -> max w (String.length t)) 12 rows
@@ -2807,6 +2807,10 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
                 Fmt.(styled `Faint string)
                 "↳ log" pkg log_path)
             failures
+      | R.Skipped (_, log_path) when log_path <> "" ->
+          Fmt.pr "         %a %s@."
+            Fmt.(styled `Faint string)
+            "↳ solver log:" log_path
       | _ -> ())
     rows;
   Fmt.pr "@.%d ok, %d failed, %d skipped@." n_ok n_failed n_skipped;
@@ -2817,7 +2821,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
     (fun (target, _handle, r) ->
       match r with
       | R.Failed (_, _, _, msg, _) -> Log.info (fun m -> m "%s: %s" target msg)
-      | R.Skipped msg when String.contains msg '\n' ->
+      | R.Skipped (msg, _) when String.contains msg '\n' ->
           Log.info (fun m -> m "%s: %s" target msg)
       | _ -> ())
     rows
@@ -2830,6 +2834,10 @@ let registry_build_cmd =
     let proc_mgr, fs, clock, sys, platform, os_key, cache =
       bootstrap env cache_dir
     in
+    (* Timestamp for filtering stale log files out of the end-of-run
+       "transient fetch errors" listing. Any [fetch-*.log] with mtime
+       older than this was left over by a previous invocation. *)
+    let run_start_time = Unix.time () in
     init_opam_root ~fs ~data_dir;
     ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
@@ -3290,7 +3298,37 @@ let registry_build_cmd =
        are keyed by index; their build result (ok / failed, with the
        package counts) is written into [group_results] when the group
        finishes. *)
-    let solve_failures : (string, string) Hashtbl.t = Hashtbl.create 16 in
+    let solve_failures : (string, string * string) Hashtbl.t =
+      Hashtbl.create 16
+    in
+    (* Dump the solver's diagnostic so the user can grep for conflicting
+       version constraints. The file name's short hash comes from the
+       (targets, handles) tuple so two solve groups whose first target
+       name collides don't clobber each other's logs. *)
+    let write_solve_failure_log ~targets ~handles ~msg =
+      let key =
+        String.concat " " (targets @ List.map (fun h -> "@" ^ h) handles)
+      in
+      let hash = Digest.to_hex (Digest.string key) in
+      let first = match targets with t :: _ -> t | [] -> "solve" in
+      let path =
+        Oi.Build_logs.path ~cache_root ~kind:"solve" ~name:first ~hash
+      in
+      let handles_str =
+        if handles = [] then "(base only)"
+        else String.concat ", " (List.map (fun h -> "@" ^ h) handles)
+      in
+      let trailing_nl =
+        if msg = "" || msg.[String.length msg - 1] = '\n' then "" else "\n"
+      in
+      let body =
+        Fmt.str "targets: %s\nhandles: %s\n\n%s%s"
+          (String.concat ", " targets)
+          handles_str msg trailing_nl
+      in
+      Oi.Build_logs.write ~fs ~cache_root path body;
+      path
+    in
     let target_group : (string, int) Hashtbl.t = Hashtbl.create 16 in
     let group_results :
         ( int,
@@ -3331,7 +3369,12 @@ let registry_build_cmd =
                   (List.length pkgs));
             Some (group, handles, pkg_dirs, pkgs)
         | Error msg ->
-            List.iter (fun t -> Hashtbl.replace solve_failures t msg) group;
+            let log_path =
+              write_solve_failure_log ~targets:group ~handles ~msg
+            in
+            List.iter
+              (fun t -> Hashtbl.replace solve_failures t (msg, log_path))
+              group;
             Log.debug (fun m ->
                 m "solve failed: %s: %s" (group_label group) msg);
             None
@@ -3603,12 +3646,21 @@ let registry_build_cmd =
          the user can investigate transient errors (git fetch
          failures, opam archive 500s) without them polluting the
          live output. *)
-      let logs_dir = cache_root / "build" / "logs" in
+      let logs_dir = Oi.Build_logs.dir ~cache_root in
       if Sys.file_exists logs_dir then begin
+        (* Only list logs that were (re-)written during THIS run. Stale
+           [fetch-*.log] files left over from previous invocations
+           would otherwise show up unrelated to the current build. *)
+        let written_this_run p =
+          try (Unix.stat p).Unix.st_mtime >= run_start_time
+          with Unix.Unix_error _ -> false
+        in
         let entries =
           try
             Sys.readdir logs_dir |> Array.to_list
             |> List.filter (fun n -> String.starts_with ~prefix:"fetch-" n)
+            |> List.map (fun n -> logs_dir / n)
+            |> List.filter written_this_run
             |> List.sort String.compare
           with Sys_error _ -> []
         in
@@ -3616,7 +3668,7 @@ let registry_build_cmd =
           Fmt.pr "@.%a (%d):@."
             Fmt.(styled `Faint string)
             "transient fetch errors" (List.length entries);
-          List.iter (fun e -> Fmt.pr "  %s@." (logs_dir / e)) entries
+          List.iter (fun p -> Fmt.pr "  %s@." p) entries
         end
       end
     end

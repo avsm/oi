@@ -25,21 +25,16 @@ let default_build_parallelism () =
 
 (* -- Failure logging ----------------------------------------------------- *)
 
-(* Failed package builds get their output written here instead of dumped
-   to stderr. Keeps the live progress bar / summary readable, and gives
-   the user a file path to grep without re-running the build. The log
-   file name matches the [build_dir] convention: <pkg>-<short_hash>.log
-   so builds of the same name.version from different overlays don't
-   clobber each other's logs either. *)
-let logs_dir_of ~cache_root = cache_root / "build" / "logs"
-
-let short_layer_hash h = String.sub h 0 (min 12 (String.length h))
-
-let write_failure_log ~cache_root ~(p : Plan.package_plan) ~exn =
-  let dir = logs_dir_of ~cache_root in
-  (try Unix.mkdir dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
+(* Failed package builds get their output written to a file under the
+   shared [<cache_root>/build/logs] dir instead of dumped to stderr.
+   Keeps the live progress bar / summary readable and gives the user
+   a file path to grep without re-running the build. The file name
+   mirrors the [build_dir] convention: [build-<pkg>-<short_hash>.log]
+   so the same [name.version] built in two different solve contexts
+   doesn't collide. *)
+let write_failure_log ~fs ~cache_root ~(p : Plan.package_plan) ~exn =
   let path =
-    dir / (p.pkg ^ "-" ^ short_layer_hash p.layer_hash ^ ".log")
+    Build_logs.path ~cache_root ~kind:"build" ~name:p.pkg ~hash:p.layer_hash
   in
   let body =
     match exn with
@@ -47,11 +42,7 @@ let write_failure_log ~cache_root ~(p : Plan.package_plan) ~exn =
         Fmt.str "package: %s\ncommand: %s\n\n%s" pkg cmd output
     | _ -> Printexc.to_string exn
   in
-  (try
-     let oc = open_out path in
-     output_string oc body;
-     close_out oc
-   with Sys_error _ -> ());
+  Build_logs.write ~fs ~cache_root path body;
   path
 
 (* -- Command execution --------------------------------------------------- *)
@@ -144,13 +135,13 @@ let run_cmd ~proc_mgr ~fs ~env ~cwd ~pkg cmd =
 (* -- Fetching ------------------------------------------------------------- *)
 
 (* Per-fetch retry log so retry warnings go to a file instead of stderr.
-   Empty path means the caller didn't route them anywhere (default
-   Retry.with_attempts behaviour kicks in). *)
+   Retry.with_attempts opens the file in append mode on each retry, so
+   the caller just has to supply the path and make sure the parent
+   [logs/] directory exists. *)
 let fetch_log_path_of ~cache_root ~(p : Plan.package_plan) =
-  logs_dir_of ~cache_root
-  / ("fetch-" ^ p.pkg ^ "-" ^ short_layer_hash p.layer_hash ^ ".log")
+  Build_logs.path ~cache_root ~kind:"fetch" ~name:p.pkg ~hash:p.layer_hash
 
-let fetch_source ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
+let fetch_source ?(cache_urls = []) ~fs ~cache_root (p : Plan.package_plan) =
   match p.source with
   | None -> ()
   | Some src ->
@@ -163,8 +154,7 @@ let fetch_source ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
         in
         Log.info (fun m -> m "Fetching %s from %s" p.pkg src.url);
         let error_log_path = fetch_log_path_of ~cache_root ~p in
-        (try Unix.mkdir (logs_dir_of ~cache_root) 0o755
-         with Unix.Unix_error (EEXIST, _, _) -> ());
+        Build_logs.ensure ~fs ~cache_root;
         Retry.with_attempts ~label:(Fmt.str "fetch %s (%s)" p.pkg src.url)
           ~error_log_path (fun () ->
             let result =
@@ -178,7 +168,8 @@ let fetch_source ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
                 Fmt.failwith "Failed to fetch %s: %s" p.pkg msg)
       end
 
-let fetch_extra_sources ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
+let fetch_extra_sources ?(cache_urls = []) ~fs ~cache_root
+    (p : Plan.package_plan) =
   List.iter
     (fun (name, (src : Plan.source_info)) ->
       let dst = p.build_dir / name in
@@ -190,8 +181,7 @@ let fetch_extra_sources ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
         let error_log_path = fetch_log_path_of ~cache_root ~p in
-        (try Unix.mkdir (logs_dir_of ~cache_root) 0o755
-         with Unix.Unix_error (EEXIST, _, _) -> ());
+        Build_logs.ensure ~fs ~cache_root;
         try
           Retry.with_attempts
             ~label:(Fmt.str "fetch extra source %s (%s)" name src.url)
@@ -246,13 +236,13 @@ let apply_substs (p : Plan.package_plan) =
 
 let build_package ?(cache_urls = []) ~cache_root ~proc_mgr ~fs
     (p : Plan.package_plan) =
-  fetch_source ~cache_urls ~cache_root p;
+  fetch_source ~cache_urls ~fs ~cache_root p;
   (* Ensure build_dir exists before fetching extra-sources: pull_tree
      (in fetch_source) creates the directory, but packages with no main
      source (e.g. seq.base) still need the directory to exist so that
      extra-source files can be written into it. *)
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / p.build_dir);
-  fetch_extra_sources ~cache_urls ~cache_root p;
+  fetch_extra_sources ~cache_urls ~fs ~cache_root p;
   apply_patches ~proc_mgr ~fs p;
   apply_substs p;
   List.iter
@@ -455,7 +445,7 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
                    ~proc_mgr ~fs p
                with exn ->
                  let log_path =
-                   write_failure_log ~cache_root:plan.cache_root ~p ~exn
+                   write_failure_log ~fs ~cache_root:plan.cache_root ~p ~exn
                  in
                  mark_failed ~p ~log_path;
                  reporter.pkg_event
@@ -493,7 +483,7 @@ let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
                 reporter.pkg_event (Built { pkg = p.pkg })
               with exn ->
                 let log_path =
-                  write_failure_log ~cache_root:plan.cache_root ~p ~exn
+                  write_failure_log ~fs ~cache_root:plan.cache_root ~p ~exn
                 in
                 mark_failed ~p ~log_path;
                 reporter.pkg_event
