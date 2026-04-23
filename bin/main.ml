@@ -4882,7 +4882,7 @@ let repo_cmd =
 
 let () =
   let info =
-    Cmd.info "oi" ~version:"0.3.6"
+    Cmd.info "oi" ~version:"0.3.7"
       ~doc:"A fast, stateless OCaml package manager"
       ~man:
         [
