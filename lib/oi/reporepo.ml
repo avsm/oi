@@ -785,17 +785,14 @@ let bump ~fs ~sys ~path ~handle ?url ?ref_ ?depends ?root_packages () =
   (* Skip the write when the resolved state matches [prev] exactly —
      same URL, commit, branch, and deps. Otherwise we'd accumulate
      identical [YYYYMMDD.N] entries on every scheduled bump. Compare
-     deps order-insensitively since [auto_base_depends] returns them
-     in lookup order, which may differ from the file order. *)
-  let same_depends a b =
-    let norm = List.sort compare in
-    norm a = norm b
-  in
-  let same_roots a b = List.sort compare a = List.sort compare b in
+     deps and roots order-insensitively since [auto_base_depends]
+     returns them in lookup order, which may differ from the file
+     order. *)
+  let eq_as_set a b = List.sort compare a = List.sort compare b in
   if
     url = prev.url && commit = prev.commit && ref_ = prev.ref_
-    && same_depends depends prev.depends
-    && same_roots root_packages prev.root_packages
+    && eq_as_set depends prev.depends
+    && eq_as_set root_packages prev.root_packages
   then `Unchanged prev
   else
     let version = next_version entries ~handle in

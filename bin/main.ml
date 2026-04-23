@@ -105,20 +105,17 @@ let cli_extra_repo_of_url url_s : Oi.Project.extra_repo =
   let name = "extra-" ^ String.sub hash 0 10 in
   { name; url = url_s }
 
-(* Reporepo path: honour [OI_REPOREPO] and otherwise fall back to
-   [Oi.Reporepo.default_path]. Looked up fresh per call so tests can
-   set the env per invocation. *)
-let reporepo_path () =
-  match Sys.getenv_opt "OI_REPOREPO" with
-  | Some v when v <> "" -> v
-  | _ -> Oi.Reporepo.default_path
+(* Lookup [name] in the environment, returning [default] when it's
+   absent or set to an empty string. Used to thread [OI_*] env vars
+   through commands while keeping their fallbacks in one place. *)
+let getenv_or ~default name =
+  match Sys.getenv_opt name with Some v when v <> "" -> v | _ -> default
 
-(* Reporepo clone URL: [OI_REPOREPO_URL] wins, otherwise falls back
-   to [Oi.Reporepo.default_url]. *)
-let reporepo_url () =
-  match Sys.getenv_opt "OI_REPOREPO_URL" with
-  | Some v when v <> "" -> v
-  | _ -> Oi.Reporepo.default_url
+(* Reporepo path + clone URL, honouring [OI_REPOREPO] / [OI_REPOREPO_URL]
+   env overrides. Looked up fresh per call so tests can set the env per
+   invocation. *)
+let reporepo_path () = getenv_or ~default:Oi.Reporepo.default_path "OI_REPOREPO"
+let reporepo_url () = getenv_or ~default:Oi.Reporepo.default_url "OI_REPOREPO_URL"
 
 (* Format-style debug logger for overlay / reporepo plumbing. *)
 let log_overlay fmt = Fmt.kstr (fun s -> Logs.debug (fun m -> m "%s" s)) fmt
@@ -150,11 +147,7 @@ let overlay_extras_of_handles ~fs ~sys handles =
   if handles = [] then []
   else begin
     let path = reporepo_path () in
-    let url =
-      match Sys.getenv_opt "OI_REPOREPO_URL" with
-      | Some v when v <> "" -> v
-      | _ -> Oi.Reporepo.default_url
-    in
+    let url = reporepo_url () in
     Oi.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path ~url;
     log_overlay "resolving handles %s against reporepo %s"
       (String.concat ", " handles)
@@ -2105,10 +2098,7 @@ let config_cmd =
       Fmt.pr
         "  %a no 'relocatable' overlay in reporepo %s — run 'oi repo add'@,"
         Fmt.(styled `Yellow string)
-        "(none)"
-        (match Sys.getenv_opt "OI_REPOREPO" with
-        | Some v when v <> "" -> v
-        | _ -> Oi.Reporepo.default_path)
+        "(none)" (reporepo_path ())
     else
       List.iter
         (fun (e : Oi.Reporepo.entry) ->
@@ -2777,7 +2767,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
      table stays readable. Full detail is still logged per-target
      below. *)
   let first_line s =
-    match String.index_opt s '\n' with None -> s | Some i -> String.sub s 0 i
+    match String.split_on_char '\n' s with [] -> "" | h :: _ -> h
   in
   let detail_col r =
     match r with
@@ -2947,49 +2937,31 @@ let registry_build_cmd =
     let extra_cli, url_project =
       materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
     in
-    (* [global_handles] are overlays the user requested apply to every
-       solve (via [--with-repo] or from URL-project [x-reporepo]). Per-
-       group handles are those extracted from each group's [@h/pkg]
-       tokens and only apply to that group's solve.
-
-       The current-call [with_repos] at this point is the merge of CLI-
-       supplied handles and token-derived ones — we already separated
-       them above (token-derived come via the [Overlay_pkg]/[Overlay_all]
-       filter), but the code then re-merges them. To keep overlays
-       isolated per user, we recompute [global_handles] as the CLI-only
-       set and defer token-derived handles to per-group scope. *)
-    let global_handles =
-      (* The handles the caller explicitly asked to be global:
-         [--with-repo] args + URL-project overlays. Token-derived
-         handles are handled per-group below. *)
-      let cli_only =
-        List.filter
-          (fun h ->
-            (* Keep everything here that wasn't added by token parsing.
-               We recover the CLI-only subset by removing any handle
-               that a token classified as [Overlay_*]. *)
-            not
-              (List.exists
-                 (function
-                   | Overlay_pkg (h', _) | Overlay_all h' -> h' = h
-                   | Plain_target _ -> false)
-                 parsed))
-          with_repos
-      in
-      cli_only @ url_project.overlays
+    (* Split handles into two scopes:
+       - [global_handles] apply to every solve (explicit [--with-repo]
+         + any URL-project [x-reporepo]).
+       - [token_handles] come from [@h/pkg] tokens and only apply to
+         their group's solve.
+       [with_repos] at this point already contains both, so recover
+       [global_handles] by subtracting the token-derived set. *)
+    let token_handles =
+      List.filter_map
+        (function
+          | Overlay_pkg (h, _) | Overlay_all h -> Some h
+          | Plain_target _ -> None)
+        parsed
     in
-    (* Clone ALL handles (global + per-group) upfront so per-group
-       resolution below can just read already-materialised packages
-       dirs. Don't keep the merged paths list — packages dirs are
-       recomputed per-group from the handle subset. *)
+    let global_handles =
+      let tokens = List.sort_uniq String.compare token_handles in
+      List.filter (fun h -> not (List.mem h tokens)) with_repos
+      @ url_project.overlays
+    in
+    (* Clone every relevant overlay (global + token) upfront so
+       per-group resolution below just reads already-materialised
+       packages dirs. We don't keep the merged paths list — packages
+       dirs are recomputed per-group from the handle subset. *)
     let all_handles =
-      global_handles
-      @ List.filter_map
-          (function
-            | Overlay_pkg (h, _) | Overlay_all h -> Some h
-            | Plain_target _ -> None)
-          parsed
-      |> List.sort_uniq String.compare
+      List.sort_uniq String.compare (global_handles @ token_handles)
     in
     let cli_extras_records =
       merge_extras
@@ -3008,22 +2980,40 @@ let registry_build_cmd =
     in
     (* Expand [@handle] into every package the overlay's clone
        provides. List just the top-level names under the overlay's
-       [packages/] dir — the solver will pick specific versions. *)
+       [packages/] dir — the solver will pick specific versions. If
+       the overlay was force-bumped to a new version since the last
+       [ensure_extra] call (e.g. the user just ran [oi repo add
+       --force] pointing at a new URL), clone it on the fly rather
+       than fail out. *)
     let overlay_packages handle =
       let entries = Oi.Reporepo.load ~path:(reporepo_path ()) in
       match Oi.Reporepo.latest entries ~handle with
       | None -> Oi.Error.config_error "no overlay %s in reporepo" handle
       | Some e ->
-          let dir =
-            data_dir / "repos"
-            / ("overlay-" ^ e.handle ^ "-" ^ e.version)
-            / "packages"
-          in
-          if not (Sys.file_exists dir) then
-            Oi.Error.config_error "overlay %s clone has no packages/ tree at %s"
-              handle dir;
-          Sys.readdir dir |> Array.to_list
-          |> List.filter (fun n -> Sys.is_directory (dir / n))
+          let name = "overlay-" ^ e.handle ^ "-" ^ e.version in
+          let clone_dir = data_dir / "repos" / name in
+          let pkgs_dir = clone_dir / "packages" in
+          if not (Sys.file_exists pkgs_dir) then begin
+            let url =
+              if e.commit = "" then e.url else e.url ^ "#" ^ e.commit
+            in
+            Log.info (fun m -> m "On-demand clone of %s from %s" name url);
+            try
+              Oi.Repo.ensure_extra ~fs ~data_dir ~refresh
+                [ { Oi.Project.name; url } ]
+              |> ignore
+            with exn ->
+              Oi.Error.config_error
+                "overlay %s@.%s failed to clone from %s:@.  %s" handle
+                e.version url (Printexc.to_string exn)
+          end;
+          if not (Sys.file_exists pkgs_dir) then
+            Oi.Error.config_error
+              "overlay %s clone at %s has no packages/ tree (the upstream \
+               repo at %s may not be an opam-repository layout)"
+              handle clone_dir e.url;
+          Sys.readdir pkgs_dir |> Array.to_list
+          |> List.filter (fun n -> Sys.is_directory (pkgs_dir / n))
           |> List.sort String.compare
     in
     (* Remember which handle each target came from so the summary
@@ -3369,12 +3359,12 @@ let registry_build_cmd =
         List.rev !acc
     in
     if solutions = [] then Oi.Error.msg "no packages solved successfully";
-    (* 2. Each solve group becomes its own build group. *)
-    let groups = List.map (fun sol -> ([ sol ], Hashtbl.create 0)) solutions in
-    let n_groups = List.length groups in
-    Log.info (fun m ->
-        m "%d solve group(s) → %d build group(s)" (List.length solutions)
-          n_groups);
+    (* 2. Each solve group is its own build group (no cross-group
+       merging). Dedup-by-layer-hash already happens inside the layer
+       cache; merging here would only gain shared plan construction
+       at the cost of failure cascades. *)
+    let n_groups = List.length solutions in
+    Log.info (fun m -> m "%d build group(s)" n_groups);
     (* Shared failure tracker across every build group: if [foo.1.2]
        fails in group 1, any later group that depends on the same
        layer hash skips it and marks its own dependents as failed
@@ -3464,38 +3454,15 @@ let registry_build_cmd =
     in
     in_progress_reporter @@ fun reporter ->
     List.iteri
-      (fun gi (group_solutions, _) ->
+      (fun gi (group_targets_list, _handles, pkg_dirs, solution_pkgs) ->
         counters#set_group (gi + 1);
-        let group_targets_list =
-          List.concat_map (fun (t, _, _, _) -> t) group_solutions
-        in
         let group_targets = String.concat ", " group_targets_list in
         List.iter
           (fun t -> Hashtbl.replace target_group t gi)
           group_targets_list;
-        let seen = Hashtbl.create 256 in
-        let merged_pkgs =
-          List.concat_map
-            (fun (_, _, _, pkgs) ->
-              List.filter
-                (fun pkg ->
-                  let key = OpamPackage.to_string pkg in
-                  if Hashtbl.mem seen key then false
-                  else begin
-                    Hashtbl.replace seen key true;
-                    true
-                  end)
-                pkgs)
-            group_solutions
-        in
-        (* Reuse the scoped packages_dirs the solve used for this
-           group so planning / topo-sort / exec-plan see exactly the
-           same overlays as the solver did. *)
-        let pkg_dirs =
-          match group_solutions with
-          | (_, _, d, _) :: _ -> d
-          | [] -> base_packages_dirs
-        in
+        (* Solution packages are already unique within a single solve,
+           so no cross-solution dedup is needed. *)
+        let merged_pkgs = solution_pkgs in
         let group_ctx =
           Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs:pkg_dirs ~conf
         in
@@ -3531,6 +3498,28 @@ let registry_build_cmd =
           in
           Fmt.pr "%a@." (Oi.Action.pp_tree ~remote_has) build_plan
         end
+        else if n_build = 0 then begin
+          (* Fast path for fully-cached groups: every layer is already
+             in the d10 cache, so there's no reason to pay for
+             [Plan.create] (resolves commands / install files),
+             [Execute.run] (prefix wipe + layer restore), or the
+             source-mirror promotion pass. Just emit Cached events for
+             the reporter counters and call it done. This is the
+             common case when re-running [oi registry build --all]
+             against an already-populated cache. *)
+          Log.info (fun m -> m "all %d packages cached" n_cached);
+          (match reporter with
+          | None -> ()
+          | Some r ->
+              List.iter
+                (fun (n : Oi.Action.node) ->
+                  r.pkg_event
+                    (Oi.Execute.Cached
+                       { pkg = OpamPackage.to_string n.pkg }))
+                (Oi.Action.nodes build_plan));
+          Hashtbl.replace group_results gi
+            (`Ok (n_pkgs, n_build, n_cached))
+        end
         else begin
           Log.info (fun m -> m "%d to build, %d cached" n_build n_cached);
           let exec_plan =
@@ -3561,56 +3550,52 @@ let registry_build_cmd =
           let build_outcome
               : [ `Ok
                 | `Fail of string * (string * string) list ] =
-            if n_build = 0 then `Ok
-            else begin
-              let build_plan =
-                fetch_remote_layers ?jobs ~remote ~d10
-                  ~packages_dirs:pkg_dirs ~ctx:group_ctx ~pkgs:sorted_pkgs
+            let build_plan =
+              fetch_remote_layers ?jobs ~remote ~d10
+                ~packages_dirs:pkg_dirs ~ctx:group_ctx ~pkgs:sorted_pkgs
+                build_plan
+            in
+            let exec_plan_ref = ref None in
+            try
+              let exec_plan =
+                Oi.Plan.create group_ctx ~packages_dirs:pkg_dirs
+                  ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
                   build_plan
               in
-              let exec_plan_ref = ref None in
-              try
-                let exec_plan =
-                  Oi.Plan.create group_ctx ~packages_dirs:pkg_dirs
-                    ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
-                    build_plan
+              exec_plan_ref := Some exec_plan;
+              let cache_urls = cache_urls_of ~cache ~remote in
+              Oi.Execute.run ~cache_urls ?jobs ~failed_layers ?reporter
+                ~proc_mgr ~fs
+                ~clock:(clock :> D10.Config.clk)
+                ~sys ~os_key exec_plan;
+              `Ok
+            with
+            | Oi.Error.E e ->
+                let failures =
+                  match !exec_plan_ref with
+                  | Some p -> collect_failures p
+                  | None -> []
                 in
-                exec_plan_ref := Some exec_plan;
-                let cache_urls = cache_urls_of ~cache ~remote in
-                Oi.Execute.run ~cache_urls ?jobs ~failed_layers ?reporter
-                  ~proc_mgr ~fs
-                  ~clock:(clock :> D10.Config.clk)
-                  ~sys ~os_key exec_plan;
-                `Ok
-              with
-              | Oi.Error.E e ->
-                  let failures =
-                    match !exec_plan_ref with
-                    | Some p -> collect_failures p
-                    | None -> []
-                  in
-                  `Fail (Fmt.str "%a" Oi.Error.pp e, failures)
-              | Failure msg ->
-                  let failures =
-                    match !exec_plan_ref with
-                    | Some p -> collect_failures p
-                    | None -> []
-                  in
-                  `Fail (msg, failures)
-            end
+                `Fail (Fmt.str "%a" Oi.Error.pp e, failures)
+            | Failure msg ->
+                let failures =
+                  match !exec_plan_ref with
+                  | Some p -> collect_failures p
+                  | None -> []
+                in
+                `Fail (msg, failures)
           in
           Hashtbl.replace group_results gi
             (match build_outcome with
             | `Ok -> `Ok (n_pkgs, n_build, n_cached)
             | `Fail (msg, failures) ->
                 `Fail (n_pkgs, n_build, n_cached, msg, failures));
-          (* Write-side mirror: run unconditionally so binary-cached
-             layers whose tarballs still live in opam's download-cache
-             from an earlier run also get promoted. [record] is a
-             silent no-op for anything not in the cache. *)
+          (* Write-side mirror: only useful when we actually built
+             something new; fully-cached groups have no fresh sources
+             to promote. *)
           record_sources_to_mirror ~sys ~cache exec_plan
         end)
-      groups;
+      solutions;
     if not dry_run then begin
       print_build_summary ~targets ~target_handle ~solve_failures ~target_group
         ~group_results;
@@ -4176,13 +4161,8 @@ let registry_cmd =
 (* -- repo (reporepo of overlay pins) ------------------------------------ *)
 
 let reporepo_term =
-  let default =
-    match Sys.getenv_opt "OI_REPOREPO" with
-    | Some v when v <> "" -> v
-    | _ -> Oi.Reporepo.default_path
-  in
   Arg.(
-    value & opt string default
+    value & opt string (reporepo_path ())
     & info ~docv:"DIR"
         ~doc:
           "Local directory containing the reporepo clone to operate on. Falls \
@@ -4191,13 +4171,8 @@ let reporepo_term =
         [ "reporepo" ])
 
 let reporepo_url_term =
-  let default =
-    match Sys.getenv_opt "OI_REPOREPO_URL" with
-    | Some v when v <> "" -> v
-    | _ -> Oi.Reporepo.default_url
-  in
   Arg.(
-    value & opt string default
+    value & opt string (reporepo_url ())
     & info ~docv:"URL"
         ~doc:
           "Git URL to clone the reporepo from when the local clone doesn't \

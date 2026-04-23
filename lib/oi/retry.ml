@@ -18,30 +18,28 @@ let append_to_log path line =
 
 let with_attempts ~label ?(max_attempts = 3) ?(initial_delay_s = 1.0)
     ?error_log_path f =
-  let note_failure attempt delay exn =
-    let line =
-      Fmt.str "%s failed (attempt %d/%d): %s — retrying in %.1fs" label
-        attempt max_attempts (Printexc.to_string exn) delay
-    in
+  (* Route attempt notes either to the supplied log file or to the
+     default [Log.*] sink. [failure] / [success] differ only by
+     phrasing and the default log level. *)
+  let note ~level line =
     match error_log_path with
     | Some path -> append_to_log path line
-    | None -> Log.warn (fun m -> m "%s" line)
-  in
-  let note_success attempt =
-    let line =
-      Fmt.str "%s succeeded on attempt %d/%d" label attempt max_attempts
-    in
-    match error_log_path with
-    | Some path -> append_to_log path line
-    | None -> Log.app (fun m -> m "%s" line)
+    | None ->
+        let emit = match level with `Warn -> Log.warn | `App -> Log.app in
+        emit (fun m -> m "%s" line)
   in
   let rec loop attempt delay =
     match f () with
     | result ->
-        if attempt > 1 then note_success attempt;
+        if attempt > 1 then
+          note ~level:`App
+            (Fmt.str "%s succeeded on attempt %d/%d" label attempt
+               max_attempts);
         result
     | exception exn when attempt < max_attempts ->
-        note_failure attempt delay exn;
+        note ~level:`Warn
+          (Fmt.str "%s failed (attempt %d/%d): %s — retrying in %.1fs" label
+             attempt max_attempts (Printexc.to_string exn) delay);
         Unix.sleepf delay;
         loop (attempt + 1) (delay *. 2.0)
   in

@@ -47,15 +47,18 @@ type t = {
    anything else (pin-depends trees, raw URLs) returns [None]. *)
 let overlay_of_packages_dir pkgs_dir =
   let base = Filename.basename (Filename.dirname pkgs_dir) in
-  if String.length base > 8 && String.sub base 0 8 = "overlay-" then
-    let rest = String.sub base 8 (String.length base - 8) in
+  let prefix = "overlay-" in
+  if not (String.starts_with ~prefix base) then (None, None)
+  else
+    let rest = String.sub base (String.length prefix)
+        (String.length base - String.length prefix)
+    in
     match String.rindex_opt rest '-' with
     | None -> (None, None)
     | Some i ->
         let h = String.sub rest 0 i in
         let v = String.sub rest (i + 1) (String.length rest - i - 1) in
         (Some h, Some v)
-  else (None, None)
 
 let find_pkg_source_dir ~packages_dirs pkg =
   let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
