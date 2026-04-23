@@ -899,6 +899,48 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     hashes
   end
   else begin
+    (* Proactive depext check: build-from-source packages need their
+       system dependencies present before compile time. Skip the check
+       entirely when every node in the plan is [Binary]; the restore
+       path only extracts cached layer trees and needs no depexts.
+       Failures here are non-fatal warnings; the user can still run
+       the build and let it fail cryptically if they insist. *)
+    let source_pkgs =
+      Oi.Action.nodes build_plan
+      |> List.filter_map (fun (n : Oi.Action.node) ->
+             match n.Oi.Action.method_ with
+             | Oi.Action.Source -> Some n.Oi.Action.pkg
+             | Oi.Action.Binary -> None)
+    in
+    if source_pkgs <> [] then begin
+      let entries = Oi.Depexts.compute ctx ~packages_dirs source_pkgs in
+      let all =
+        List.fold_left
+          (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
+          OpamSysPkg.Set.empty entries
+      in
+      if not (OpamSysPkg.Set.is_empty all) then
+        let st = Oi.Depexts.status all in
+        if not (OpamSysPkg.Set.is_empty st.missing) then begin
+          Fmt.epr
+            "%a system packages are not installed. The build may fail at \
+             compile time. Install them with:@.  %s@."
+            Fmt.(styled `Yellow string)
+            "warning:"
+            (st.missing |> OpamSysPkg.Set.elements
+             |> List.map OpamSysPkg.to_string
+             |> String.concat " ")
+        end;
+        if not (OpamSysPkg.Set.is_empty st.not_found) then
+          Fmt.epr
+            "%a system packages are not known to the host package \
+             manager: %s@."
+            Fmt.(styled `Yellow string)
+            "warning:"
+            (st.not_found |> OpamSysPkg.Set.elements
+             |> List.map OpamSysPkg.to_string
+             |> String.concat ", ")
+    end;
     let exec_plan =
       Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
         ~ocaml_version:conf.ocaml_version build_plan
@@ -4347,7 +4389,7 @@ let registry_build_cmd =
 
 let depexts_cmd =
   let run () data_dir cache_dir refresh with_repos with_deps by_package
-      os_override =
+      show_all show_status show_not_found os_override =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, _clock, sys, platform, _os_key, cache =
@@ -4406,24 +4448,67 @@ let depexts_cmd =
       | Error msg -> Oi.Error.no_solution msg
     in
     let entries = Oi.Depexts.compute ctx ~packages_dirs solved in
+    let all =
+      List.fold_left
+        (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
+        OpamSysPkg.Set.empty entries
+    in
+    (* The installed-check runs through the host's package manager, so it
+       only makes sense when [--os] hasn't been overridden to some other
+       distro. With [--os], fall back to printing every depext. *)
+    let show, status =
+      if os_override <> None || show_all then (all, None)
+      else
+        let st = Oi.Depexts.status all in
+        if show_not_found then (st.not_found, Some st)
+        else if show_status then (all, Some st)
+        else (st.missing, Some st)
+    in
     if by_package then
+      let keep_pkg s =
+        OpamSysPkg.Set.inter s show |> fun s ->
+        if OpamSysPkg.Set.is_empty s then None else Some s
+      in
       List.iter
         (fun { Oi.Depexts.pkg; sys_pkgs } ->
-          OpamSysPkg.Set.iter
-            (fun s ->
-              Fmt.pr "%s\t%s@."
-                (OpamPackage.to_string pkg)
-                (OpamSysPkg.to_string s))
-            sys_pkgs)
+          match keep_pkg sys_pkgs with
+          | None -> ()
+          | Some s ->
+              OpamSysPkg.Set.iter
+                (fun p ->
+                  let tag =
+                    match status with
+                    | None -> ""
+                    | Some st ->
+                        if OpamSysPkg.Set.mem p st.installed then "\tinstalled"
+                        else if OpamSysPkg.Set.mem p st.not_found then
+                          "\tnot-found"
+                        else "\tmissing"
+                  in
+                  Fmt.pr "%s\t%s%s@."
+                    (OpamPackage.to_string pkg)
+                    (OpamSysPkg.to_string p) tag)
+                s)
         entries
-    else begin
-      let all =
-        List.fold_left
-          (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
-          OpamSysPkg.Set.empty entries
+    else if show_status then
+      (* Grouped view: three blocks. Keeps the flat-list ordering within
+         each group so [grep missing] still gives usable output. *)
+      let block label pkgs =
+        if not (OpamSysPkg.Set.is_empty pkgs) then begin
+          Fmt.pr "%s:@." label;
+          OpamSysPkg.Set.iter
+            (fun p -> Fmt.pr "  %s@." (OpamSysPkg.to_string p))
+            pkgs
+        end
       in
-      OpamSysPkg.Set.iter (fun s -> Fmt.pr "%s@." (OpamSysPkg.to_string s)) all
-    end
+      match status with
+      | None -> OpamSysPkg.Set.iter (fun p -> Fmt.pr "%s@." (OpamSysPkg.to_string p)) show
+      | Some st ->
+          block "missing" st.missing;
+          block "not-found" st.not_found;
+          block "installed" st.installed
+    else
+      OpamSysPkg.Set.iter (fun p -> Fmt.pr "%s@." (OpamSysPkg.to_string p)) show
   in
   let by_package =
     Arg.(
@@ -4435,6 +4520,40 @@ let depexts_cmd =
              list."
           [ "by-package" ])
   in
+  let show_all =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Print every depext declared by the solve, including those \
+             already installed on the host. By default the command hides \
+             already-installed packages, so piping the result to the \
+             system package manager installs only what is actually \
+             missing."
+          [ "all" ])
+  in
+  let show_status =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Print every depext grouped by host installation status: \
+             $(b,missing) (available from the package manager but not \
+             installed), $(b,not-found) (not in the package manager's \
+             index), and $(b,installed). Useful for eyeballing the \
+             current state of a machine."
+          [ "status" ])
+  in
+  let show_not_found =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Print only depexts that the host package manager does not \
+             recognise. These require manual attention (third-party \
+             repository, renamed package, or unsupported platform)."
+          [ "not-found" ])
+  in
   let os_override =
     Arg.(
       value
@@ -4443,32 +4562,57 @@ let depexts_cmd =
           ~doc:
             "Report depexts as if the current machine were running \
              $(b,OS) (for example $(b,linux) or $(b,macos)). Useful for \
-             previewing what a different distribution would need."
+             previewing what a different distribution would need. \
+             Implies $(b,--all), because the host installation check \
+             is meaningless when the output is computed for a different \
+             platform."
           [ "os" ])
   in
   let info =
     Cmd.info "depexts"
-      ~doc:"List system packages required by the dependency closure"
+      ~doc:"List missing system packages required by the dependency closure"
       ~man:
         [
           `S Manpage.s_description;
           `P
             "$(b,oi depexts) solves the project's dependency tree and \
-             prints every system package that the resulting OCaml \
+             prints the system packages that the resulting OCaml \
              packages need at build time: C libraries, headers, build \
-             tools, and the like. The output is tagged for the current \
-             distribution, so you can pipe it straight into the \
-             platform's package manager.";
+             tools, and the like. By default only depexts that are not \
+             yet installed on the host are printed, so the output can \
+             be piped directly into the system package manager:";
           `Pre "  sudo apt install \\$(oi depexts)";
+          `P
+            "On a fully-provisioned machine the default output is \
+             empty. Pass $(b,--all) to print every depext regardless of \
+             installation state, $(b,--status) for a grouped view that \
+             shows installed, missing, and unknown packages separately, \
+             or $(b,--not-found) to surface depexts that the package \
+             manager does not recognise.";
           `S "OPTIONS";
+          `P
+            "$(b,--all) prints every depext, ignoring installation \
+             state. This is the behaviour to use when regenerating \
+             Dockerfiles or other non-interactive consumers.";
+          `P
+            "$(b,--status) prints depexts grouped by $(b,missing), \
+             $(b,not-found), and $(b,installed). Intended for \
+             eyeballing the current state of a machine.";
+          `P
+            "$(b,--not-found) prints only depexts that the package \
+             manager does not recognise. These typically require a \
+             third-party repository or a rename.";
           `P
             "$(b,--by-package) groups the output by the opam package \
              that needs each system dependency, which is helpful when \
-             tracking down why a particular library is being requested.";
+             tracking down why a particular library is being requested. \
+             Works with $(b,--status), which then annotates each row \
+             with its installation state.";
           `P
             "$(b,--os=NAME) pretends the current machine is running a \
              different distribution and prints the depexts that distro \
-             would need, without actually changing anything on disk.";
+             would need. Implies $(b,--all) because the host-install \
+             check cannot answer questions about a different platform.";
           `P
             "$(b,--with) and $(b,--with-repo) extend the solve in the \
              same way as in $(b,oi run).";
@@ -4477,9 +4621,143 @@ let depexts_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ data_dir_term $ cache_dir_term $ refresh_term
-      $ with_repos_term $ with_deps_term $ by_package $ os_override)
+      $ with_repos_term $ with_deps_term $ by_package $ show_all $ show_status
+      $ show_not_found $ os_override)
 
 (* -- registry docker ---------------------------------------------------- *)
+
+(* Walk the reporepo and return the list of [(handle, root_groups)]
+   pairs that should drive depext computation for [oi registry docker].
+   Excludes the [default] handle (the full opam-repository) and any
+   overlay that does not declare [x-root-packages]. *)
+let overlay_root_targets reporepo_entries =
+  reporepo_entries
+  |> List.map (fun (e : Oi.Reporepo.entry) -> e.handle)
+  |> List.sort_uniq String.compare
+  |> List.filter_map (fun h ->
+         if h = "default" then None
+         else
+           match Oi.Reporepo.latest reporepo_entries ~handle:h with
+           | Some e when e.root_packages <> [] -> Some (h, e.root_packages)
+           | _ -> None)
+
+(* Resolve the effective [packages_dirs] for a single overlay handle:
+   its own clone plus every overlay it depends on (via the reporepo's
+   [depends:] entries), followed by the base opam/relocatable clones.
+   Same first-wins ordering the registry build uses. *)
+let packages_dirs_for_overlay ~data_dir ~base_packages_dirs ~reporepo_entries
+    handle =
+  let roots = [ { Oi.Reporepo.handle; version = None } ] in
+  let transitive =
+    try Oi.Reporepo.resolve reporepo_entries ~roots |> List.rev
+    with Oi.Error.E _ -> []
+  in
+  let overlay_dirs =
+    List.map
+      (fun (e : Oi.Reporepo.entry) ->
+        let name = "overlay-" ^ e.handle ^ "-" ^ e.version in
+        Oi.Repo.repo_dir ~data_dir name / "packages")
+      transitive
+  in
+  let seen = Hashtbl.create 8 in
+  let dedup xs =
+    List.filter
+      (fun d ->
+        if Hashtbl.mem seen d then false
+        else begin
+          Hashtbl.replace seen d ();
+          true
+        end)
+      xs
+  in
+  dedup (overlay_dirs @ base_packages_dirs)
+
+(* For each target distro, compute the union of depexts declared by
+   every overlay's [x-root-packages]. Solves happen once per overlay
+   root group under the host conf (all target distros are linux so
+   the solve output is the same); depexts are then re-evaluated per
+   distro using {!Oi.Depexts.compute_for_conf}, which only rewrites
+   the filter env and does not require a fresh switch state. *)
+let compute_overlay_depexts_per_distro ~fs ~sys ~cache ~data_dir ~refresh
+    ~platform ~distros =
+  init_opam_root ~fs ~data_dir;
+  let base_packages_dirs = get_packages_dirs ~fs ~sys ~data_dir ~refresh () in
+  let path = reporepo_path () in
+  Oi.Reporepo.ensure_clone ~fs ~sys ~refresh ~path ~url:(reporepo_url ());
+  let reporepo_entries =
+    try Oi.Reporepo.load ~path with _ -> []
+  in
+  let targets = overlay_root_targets reporepo_entries in
+  let cache_root = Oi.Cache.root_s cache in
+  let build_prefix = cache_root / "build" / "prefix" in
+  let host_conf = make_conf ~platform in
+  (* Solve each root group once. Failures are tolerated (overlay may
+     be broken); that group simply contributes no depexts. *)
+  let solves =
+    List.concat_map
+      (fun (handle, groups) ->
+        let pkg_dirs =
+          packages_dirs_for_overlay ~data_dir ~base_packages_dirs
+            ~reporepo_entries handle
+        in
+        List.filter_map
+          (fun group ->
+            let ctx =
+              Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs:pkg_dirs
+                ~conf:host_conf
+            in
+            let items = List.map parse_pkg_target group in
+            let names = List.map fst items in
+            let constraints =
+              List.fold_left
+                (fun acc (name, c) ->
+                  match c with
+                  | None -> acc
+                  | Some c -> OpamPackage.Name.Map.add name c acc)
+                OpamPackage.Name.Map.empty items
+            in
+            match
+              Oi.Solve.solve ~fs ~cache_root ctx ~packages_dirs:pkg_dirs
+                ~constraints names
+            with
+            | Ok solved -> Some (pkg_dirs, solved)
+            | Error msg ->
+                Logs.info (fun m ->
+                    m "docker depexts: %s group failed to solve: %s" handle
+                      msg);
+                None)
+          groups)
+      targets
+  in
+  List.map
+    (fun distro ->
+      let vars = Registry_docker.opam_vars_of_distro distro in
+      let distro_conf =
+        {
+          host_conf with
+          os = "linux";
+          os_distribution = vars.os_distribution;
+          os_family = vars.os_family;
+          os_version = vars.os_version;
+        }
+      in
+      let all =
+        List.fold_left
+          (fun acc (pkg_dirs, solved) ->
+            let entries =
+              Oi.Depexts.compute_for_conf ~conf:distro_conf
+                ~packages_dirs:pkg_dirs solved
+            in
+            List.fold_left
+              (fun acc e -> OpamSysPkg.Set.union acc e.Oi.Depexts.sys_pkgs)
+              acc entries)
+          OpamSysPkg.Set.empty solves
+      in
+      let names =
+        OpamSysPkg.Set.elements all |> List.map OpamSysPkg.to_string
+      in
+      (distro, names))
+    distros
 
 let registry_docker_cmd =
   let default_distros : Registry_docker.Distro.t list =
@@ -4492,20 +4770,39 @@ let registry_docker_cmd =
       `Fedora `Latest;
     ]
   in
-  let run () output_dir src_context =
+  let run () data_dir cache_dir output_dir src_context refresh =
     with_error_handling @@ fun () ->
+    with_eio_root @@ fun env _sw ->
+    let _proc_mgr, fs, _clock, sys, platform, _os_key, cache =
+      bootstrap env cache_dir
+    in
     (try Unix.mkdir output_dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
     let df_oi = Registry_docker.dockerfile_oi ~src_context in
     let oi_path = output_dir / "Dockerfile.oi" in
     Registry_docker.write_dockerfile oi_path df_oi;
+    Fmt.pr "Computing overlay depexts for %d distros...@."
+      (List.length default_distros);
+    let per_distro_depexts =
+      try
+        compute_overlay_depexts_per_distro ~fs ~sys ~cache ~data_dir ~refresh
+          ~platform ~distros:default_distros
+      with _ -> List.map (fun d -> (d, [])) default_distros
+    in
     let per_distro_paths =
       List.map
         (fun d ->
           let fname = Registry_docker.one_distro_filename d in
           let path = output_dir / fname in
-          let df = Registry_docker.dockerfile_one_distro d in
+          let overlay_depexts =
+            Stdlib.Option.value
+              (List.assoc_opt d per_distro_depexts)
+              ~default:[]
+          in
+          let df =
+            Registry_docker.dockerfile_one_distro ~overlay_depexts d
+          in
           Registry_docker.write_dockerfile path df;
-          (d, path))
+          (d, path, List.length overlay_depexts))
         default_distros
     in
     let compose_path = output_dir / "docker-compose.yml" in
@@ -4516,7 +4813,11 @@ let registry_docker_cmd =
     Registry_docker.write_file compose_path compose_yaml;
     Fmt.pr "Wrote:@.";
     Fmt.pr "  %s@." oi_path;
-    List.iter (fun (_, path) -> Fmt.pr "  %s@." path) per_distro_paths;
+    List.iter
+      (fun (_, path, n) ->
+        if n = 0 then Fmt.pr "  %s@." path
+        else Fmt.pr "  %s  (%d overlay depexts)@." path n)
+      per_distro_paths;
     Fmt.pr "  %s@." compose_path;
     Fmt.pr "@.";
     Fmt.pr "Static oi release binary:@.";
@@ -4592,7 +4893,9 @@ let registry_docker_cmd =
         ]
   in
   Cmd.v info
-    Term.(const run $ log_term $ output_dir $ src_context)
+    Term.(
+      const run $ log_term $ data_dir_term $ cache_dir_term $ output_dir
+      $ src_context $ refresh_term)
 
 (* -- registry mirror ------------------------------------------------------ *)
 

@@ -14,11 +14,29 @@ val dockerfile_oi : src_context:string -> Dockerfile.t
     musl-linked [oi] binary from the source tree at [src_context] (relative to
     the build context) and exports it as a scratch image at [/oi]. *)
 
-val dockerfile_one_distro : Distro.t -> Dockerfile.t
-(** Per-distro build image. Installs depexts, fetches the latest statically
-    linked [oi-linux-<arch>] from the [oi] GitHub releases page, and sets
-    [/work] as the working directory. No [CMD] is set — the compose file
-    drives the build+export steps. *)
+val dockerfile_one_distro :
+  ?overlay_depexts:string list -> Distro.t -> Dockerfile.t
+(** Per-distro build image. Installs the generic build toolchain
+    (compilers, headers, [curl]) together with [overlay_depexts] (the
+    union of [depexts:] declared by every overlay's [x-root-packages]
+    evaluated for this distro). It then fetches the latest statically
+    linked [oi-linux-<arch>] from the [oi] GitHub releases page and
+    sets [/work] as the working directory. No [CMD] is set: the
+    compose file drives the build+export steps. *)
+
+type opam_vars = {
+  os_distribution : string;
+  os_family : string;
+  os_version : string;
+}
+
+val opam_vars_of_distro : Distro.t -> opam_vars
+(** Map a supported docker distribution to the opam platform variables
+    its opam filters expect. [os-family] follows opam's conventions
+    ([debian], [rhel], [alpine], [suse], [arch]), [os-distribution] is
+    the per-distro name ([ubuntu], [fedora], etc.), and [os-version] is
+    the release string taken from the [Distro.t] tag. [os] is always
+    [linux] for the distros this function supports. *)
 
 val one_distro_filename : Distro.t -> string
 (** Filename (without directory) for a per-distro Dockerfile, e.g.

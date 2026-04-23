@@ -44,6 +44,15 @@ val load_opam : string list -> OpamPackage.t -> OpamFile.OPAM.t option
 (** [load_opam packages_dirs pkg] searches [packages_dirs] in order for the opam
     file of [pkg]. *)
 
+val filter_env : Opam_ctx.conf -> OpamFilter.env
+(** [filter_env conf] builds an opam filter environment from a
+    synthetic platform configuration. The returned function answers
+    [arch], [os], [os-distribution], [os-version], [os-family] from
+    [conf], yields the current opam version for [opam-version], and
+    returns empty strings for [sys-ocaml-*] (no host compiler is
+    assumed at plan time). Suitable for evaluating any filter that
+    reads only platform variables, such as those in [depexts:]. *)
+
 val topo_sort :
   packages_dirs:string list ->
   Opam_ctx.t ->

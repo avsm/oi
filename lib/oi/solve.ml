@@ -52,6 +52,9 @@ let std_env ?(ocaml_native = true) ?opam_version (conf : Opam_ctx.conf) v =
 
 let ctx_env ctx = std_env (Opam_ctx.conf ctx)
 
+let filter_env (conf : Opam_ctx.conf) v =
+  std_env conf (OpamVariable.Full.to_string v)
+
 (** Compute direct dependency names of [pkg] that are in [in_solution],
     including depopts that appear in the solution. *)
 let dep_names ~packages_dirs ctx pkg in_solution =
