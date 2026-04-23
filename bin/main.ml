@@ -4418,7 +4418,7 @@ let ref_term =
         [ "ref"; "r" ])
 
 let repo_add_cmd =
-  let run () reporepo reporepo_url handle url ref_ depend_specs =
+  let run () reporepo reporepo_url handle url ref_ depend_specs force =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
@@ -4435,7 +4435,8 @@ let repo_add_cmd =
       | _ -> Some (List.map parse_depend_spec depend_specs)
     in
     let e =
-      Oi.Reporepo.add ~fs ~sys ~path:reporepo ~handle ~url ?ref_ ?depends ()
+      Oi.Reporepo.add ~fs ~sys ~path:reporepo ~handle ~url ?ref_ ?depends
+        ~force ()
     in
     Fmt.pr "Added %s.%s@ url=%s@ commit=%s@ at %s@." e.handle e.version e.url
       e.commit e.opam_path;
@@ -4461,6 +4462,18 @@ let repo_add_cmd =
       required
       & pos 1 (some string) None
       & info ~docv:"URL" ~doc:"Upstream opam-repository git URL" [])
+  in
+  let force =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "Write a new $(b,YYYYMMDD.N) entry for $(i,HANDLE) even when \
+             the handle already exists. Use this to deliberately switch \
+             an overlay to a different upstream URL without clobbering \
+             history — older entries stay around and pin the previous \
+             URL."
+          [ "force"; "f" ])
   in
   let info =
     Cmd.info "add" ~doc:"Register a new overlay in the reporepo"
@@ -4495,7 +4508,7 @@ let repo_add_cmd =
   Cmd.v info
     Term.(
       const run $ log_term $ reporepo_term $ reporepo_url_term $ handle $ url
-      $ ref_term $ depend_term)
+      $ ref_term $ depend_term $ force)
 
 let repo_bump_cmd =
   let run () reporepo reporepo_url handle url ref_ depend_specs =

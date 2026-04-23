@@ -173,6 +173,7 @@ val add :
   ?root_packages:string list list ->
   ?synopsis:string ->
   ?display_name:string ->
+  ?force:bool ->
   ?origin_url:string ->
   unit ->
   entry
@@ -187,7 +188,11 @@ val add :
     entry auto-depends on the latest [relocatable] and [default] versions
     currently in the reporepo — that's how user overlays lock themselves against
     a specific base set. Pass [~depends:[]] to produce an entry with no deps.
-    Raises if [handle] already has entries in the reporepo. *)
+
+    Raises if [handle] already has entries in the reporepo, unless [force] is
+    [true] — in which case a new [YYYYMMDD.N] version is written alongside
+    the existing entries (useful for deliberately switching an overlay to a
+    different upstream URL without clobbering history). *)
 
 val bump :
   fs:Eio.Fs.dir_ty Eio.Path.t ->

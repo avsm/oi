@@ -718,18 +718,25 @@ let auto_base_depends entries ~handle =
     List.filter_map Fun.id [ pin "relocatable"; pin "default" ]
 
 let add ~fs ~sys ~path ~handle ~url ?ref_ ?depends ?(root_packages = [])
-    ?synopsis ?display_name ?origin_url () =
+    ?synopsis ?display_name ?(force = false) ?origin_url () =
   let entries = load ~path in
-  if List.exists (fun (e : entry) -> e.handle = handle) entries then
+  let handle_exists = List.exists (fun (e : entry) -> e.handle = handle) entries in
+  if handle_exists && not force then
     Error.config_error
       "overlay %s already exists in reporepo; use 'oi repo bump' to add a new \
-       version"
+       version, or pass --force to register a new entry with a different URL"
       handle;
   let depends =
     match depends with Some d -> d | None -> auto_base_depends entries ~handle
   in
   let commit = ls_remote_sha ~sys ?ref_ url in
-  let version = today_yyyymmdd () ^ ".0" in
+  (* [force] on an existing handle picks the next [YYYYMMDD.N] slot so
+     today's existing entries aren't clobbered. Fresh handles use
+     [YYYYMMDD.0]. *)
+  let version =
+    if handle_exists then next_version entries ~handle
+    else today_yyyymmdd () ^ ".0"
+  in
   let synopsis =
     Stdlib.Option.value synopsis ~default:(default_synopsis handle)
   in
