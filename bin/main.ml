@@ -839,9 +839,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
         match Oi.Solve_cache.lookup_layers ~cache_root ~key:k with
         | None -> None
         | Some hashes
-          when List.for_all
-                 (fun h -> D10.Layer.succeeded d10 ~hash:h)
-                 hashes ->
+          when List.for_all (fun h -> D10.Layer.succeeded d10 ~hash:h) hashes ->
             Some hashes
         | Some _ ->
             Logs.info (fun m ->
@@ -879,21 +877,22 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs ~ctx ~pkgs build_plan
   in
   let hashes = Oi.Action.layer_hashes build_plan in
-  (* Check if the requested packages' layers are cached *)
-  let targets_cached =
+  (* Every layer in the plan must be cached (Binary method) to skip
+     Execute.run. Checking only the top-level targets is unsafe: a
+     missing transitive dep's [fs/] tree means its installed files
+     are silently dropped from the assembled prefix, so we rebuild
+     anything that isn't Binary. *)
+  let all_layers_cached =
     List.for_all
-      (fun name ->
-        match Oi.Action.layer_hash_for build_plan name with
-        | Some h -> D10.Layer.succeeded d10 ~hash:h
-        | None -> true)
-      names
+      (fun (n : Oi.Action.node) -> n.method_ = Oi.Action.Binary)
+      (Oi.Action.nodes build_plan)
   in
   let persist_layer_cache () =
     match layer_cache_key with
     | None -> ()
     | Some k -> Oi.Solve_cache.store_layers ~fs ~cache_root ~key:k hashes
   in
-  if targets_cached then begin
+  if all_layers_cached then begin
     Logs.info (fun m -> m "Layers cached, skipping build");
     persist_layer_cache ();
     hashes

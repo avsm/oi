@@ -10,7 +10,7 @@ let ( / ) = Filename.concat
 (* Bumped whenever the cache key layout or the marshal value shape
    changes. Old entries are simply ignored on key mismatch and get
    GC'd by [oi cache clean]. *)
-let schema_version = "v2"
+let schema_version = "v4"
 
 (* Process-wide memo: [oi registry build --all] asks for the same
    dir's HEAD across many solve groups. Without this, we'd fork a git
@@ -150,8 +150,8 @@ let store ~fs ~cache_root ~key pkgs =
       m "solve-cache stored %s (%d pkgs)" (short_key key) (List.length pkgs))
 
 let lookup_layers ~cache_root ~key =
-  match read_marshal ~label:"layer-cache"
-          (key_path ~cache_root ~sub:"layers" key)
+  match
+    read_marshal ~label:"layer-cache" (key_path ~cache_root ~sub:"layers" key)
   with
   | Some v -> Some (v : string list)
   | None -> None
@@ -160,5 +160,5 @@ let store_layers ~fs ~cache_root ~key hashes =
   let path = key_path ~cache_root ~sub:"layers" key in
   write_marshal ~fs ~label:"layer-cache" path (hashes : string list);
   Log.debug (fun m ->
-      m "layer-cache stored %s (%d hashes)" (short_key key)
+      m "layer-cache stored %s (%d layers)" (short_key key)
         (List.length hashes))

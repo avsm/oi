@@ -52,11 +52,12 @@ val store :
     d10 layer hashes by {!Action.plan}, the hashes are persisted
     under a parallel key. A subsequent [oi run] with identical inputs
     can then skip {!Opam_ctx.create}, {!Solve.solve} and
-    {!Action.plan} entirely — provided every stored layer hash is
-    still present in the d10 cache (checked by the caller). *)
+    {!Action.plan} entirely, provided every cached layer is still
+    present in the d10 cache. The fast path validates this by calling
+    {!D10.Layer.succeeded} on each hash; a single failure forces a
+    full re-plan so any missing dependency gets rebuilt. *)
 
-val lookup_layers :
-  cache_root:string -> key:string -> string list option
+val lookup_layers : cache_root:string -> key:string -> string list option
 
 val store_layers :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
