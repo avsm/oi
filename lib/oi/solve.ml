@@ -195,18 +195,43 @@ let log_package_sources ~packages_dirs pkgs =
       end)
     packages_dirs
 
-let solve ctx ~packages_dirs ~constraints names =
+let solve ~fs ~cache_root ctx ~packages_dirs ~constraints names =
   let conf = Opam_ctx.conf ctx in
   let ocaml_version =
     match String.index_opt conf.ocaml_version '+' with
     | Some i -> String.sub conf.ocaml_version 0 i
     | None -> conf.ocaml_version
   in
-  match
-    solve_with_dir_context ctx ~packages_dirs ~constraints ~ocaml_version names
-  with
-  | Ok (pkgs, _) ->
-      let pkgs = topo_sort ~packages_dirs ctx pkgs in
-      log_package_sources ~packages_dirs pkgs;
-      Ok pkgs
-  | Error _ as e -> e
+  let run_solve () =
+    match
+      solve_with_dir_context ctx ~packages_dirs ~constraints ~ocaml_version
+        names
+    with
+    | Ok (pkgs, _) ->
+        let pkgs = topo_sort ~packages_dirs ctx pkgs in
+        log_package_sources ~packages_dirs pkgs;
+        Ok pkgs
+    | Error _ as e -> e
+  in
+  (* Consult the persistent solve cache before running 0install. Only
+     successful solves are cached; failures always re-run so that a
+     fix picked up via a changed HEAD (after [git pull] on an opam
+     repository, or a new overlay version) is exercised immediately.
+     [key] returns [None] if any [packages_dir] isn't under a git
+     working tree — we then fall back to an uncached solve. *)
+  match Solve_cache.key ~conf ~packages_dirs ~constraints ~names with
+  | None -> run_solve ()
+  | Some cache_key -> (
+      match Solve_cache.lookup ~cache_root ~key:cache_key with
+      | Some pkgs ->
+          Log.info (fun m ->
+              m "solve cache hit %s (%d packages)"
+                (String.sub cache_key 0 12)
+                (List.length pkgs));
+          Ok pkgs
+      | None -> (
+          match run_solve () with
+          | Ok pkgs as r ->
+              Solve_cache.store ~fs ~cache_root ~key:cache_key pkgs;
+              r
+          | Error _ as e -> e))

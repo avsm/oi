@@ -14,13 +14,21 @@
     enumeration, and {!load_opam} searches all repos in priority order. *)
 
 val solve :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  cache_root:string ->
   Opam_ctx.t ->
   packages_dirs:string list ->
   constraints:OpamFormula.version_constraint OpamTypes.name_map ->
   OpamPackage.Name.t list ->
   (OpamPackage.t list, string) result
-(** [solve ctx ~packages_dirs ~constraints names] resolves the dependency
-    closure for [names]. Returns packages in topological order. *)
+(** [solve ~fs ~cache_root ctx ~packages_dirs ~constraints names]
+    resolves the dependency closure for [names]. Returns packages in
+    topological order.
+
+    Successful solves are persisted to
+    [<cache_root>/solve-cache/] and re-used when an identical input
+    is presented again (see {!Solve_cache}). Failed solves are not
+    cached. *)
 
 val dep_names :
   packages_dirs:string list ->

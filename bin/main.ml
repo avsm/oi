@@ -757,14 +757,50 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     (List.length packages_dirs)
     (String.concat "" (List.map (fun d -> Fmt.str "\n  %s" d) packages_dirs));
   let cache_root = Oi.Cache.root_s cache in
+  let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
+  (* Fast-path: if we've seen these exact inputs before AND every layer
+     hash we stored is still present in the d10 cache, skip
+     [Opam_ctx.create] + [Solve.solve] + [Action.plan] entirely. The
+     ~900ms of opam-file parsing that [Opam_ctx.create] does swamps
+     everything else in the happy-path [oi run] of an already-built
+     target, so cutting it out here is the main perf win. Disabled
+     when [dry_run] is set since that mode needs the full plan tree to
+     print. *)
+  let layer_cache_key =
+    if dry_run then None
+    else Oi.Solve_cache.key ~conf ~packages_dirs ~constraints ~names
+  in
+  let fast_hashes =
+    match layer_cache_key with
+    | None -> None
+    | Some k -> (
+        match Oi.Solve_cache.lookup_layers ~cache_root ~key:k with
+        | None -> None
+        | Some hashes
+          when List.for_all
+                 (fun h -> D10.Layer.succeeded d10 ~hash:h)
+                 hashes ->
+            Some hashes
+        | Some _ ->
+            Logs.info (fun m ->
+                m "layer cache entry stale (layers missing), falling through");
+            None)
+  in
+  match fast_hashes with
+  | Some hashes ->
+      Logs.info (fun m ->
+          m "layer cache hit %s (%d layers), skipping solve"
+            (String.sub (Stdlib.Option.get layer_cache_key) 0 12)
+            (List.length hashes));
+      hashes
+  | None ->
   let build_prefix = cache_root / "build" / "prefix" in
   let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
   let pkgs =
-    match Oi.Solve.solve ctx ~packages_dirs ~constraints names with
+    match Oi.Solve.solve ~fs ~cache_root ctx ~packages_dirs ~constraints names with
     | Ok pkgs -> pkgs
     | Error msg -> Oi.Error.no_solution msg
   in
-  let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
   let build_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
   if dry_run then begin
     let remote_has =
@@ -790,8 +826,14 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
         | None -> true)
       names
   in
+  let persist_layer_cache () =
+    match layer_cache_key with
+    | None -> ()
+    | Some k -> Oi.Solve_cache.store_layers ~fs ~cache_root ~key:k hashes
+  in
   if targets_cached then begin
     Logs.info (fun m -> m "Layers cached, skipping build");
+    persist_layer_cache ();
     hashes
   end
   else begin
@@ -814,6 +856,7 @@ let solve_and_ensure_layers ~sys ~proc_mgr ~fs ~clock ~cache ~data_dir ~conf
     in
     (try Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix_dir)
      with _ -> ());
+    persist_layer_cache ();
     hashes
   end
 
@@ -858,7 +901,7 @@ let run_script ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
       let build_prefix = cache_root / "build" / "prefix" in
       let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
       let pkgs =
-        match Oi.Solve.solve ctx ~packages_dirs ~constraints dep_names with
+        match Oi.Solve.solve ~fs ~cache_root ctx ~packages_dirs ~constraints dep_names with
         | Ok pkgs -> pkgs
         | Error msg ->
             Fmt.epr "No solution: %s@." msg;
@@ -1369,11 +1412,13 @@ let plan_cmd =
     let names =
       List.map OpamPackage.Name.of_string targets @ extra_names @ url_names
     in
-    let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
+    let cache_root = Oi.Cache.root_s cache in
+    let build_prefix = cache_root / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let pkgs =
       match
-        Oi.Solve.solve ctx ~packages_dirs ~constraints:extra_constraints names
+        Oi.Solve.solve ~fs ~cache_root ctx ~packages_dirs
+          ~constraints:extra_constraints names
       with
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
@@ -1383,8 +1428,8 @@ let plan_cmd =
     in
     let action_plan = Oi.Action.plan ctx ~d10 ~packages_dirs pkgs in
     let plan =
-      Oi.Plan.create ctx ~packages_dirs ~cache_root:(Oi.Cache.root_s cache)
-        ~os_key ~ocaml_version:conf.ocaml_version action_plan
+      Oi.Plan.create ctx ~packages_dirs ~cache_root ~os_key
+        ~ocaml_version:conf.ocaml_version action_plan
     in
     Fmt.pr "%a@." Oi.Plan.pp plan
   in
@@ -3360,8 +3405,8 @@ let registry_build_cmd =
             base_constraints items
         in
         match
-          Oi.Solve.solve gctx ~packages_dirs:pkg_dirs ~constraints
-            (names @ extra_names)
+          Oi.Solve.solve ~fs ~cache_root gctx ~packages_dirs:pkg_dirs
+            ~constraints (names @ extra_names)
         with
         | Ok pkgs ->
             Log.info (fun m ->
@@ -3808,7 +3853,8 @@ let depexts_cmd =
       let c = make_conf ~platform in
       match os_override with None -> c | Some os -> { c with os }
     in
-    let build_prefix = Oi.Cache.root_s cache / "build" / "prefix" in
+    let cache_root = Oi.Cache.root_s cache in
+    let build_prefix = cache_root / "build" / "prefix" in
     let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let extra_constraints = Oi.Script.constraints extra_cli in
     let extra_names =
@@ -3822,7 +3868,8 @@ let depexts_cmd =
     let names = List.map OpamPackage.Name.of_string proj.deps @ extra_names in
     let solved =
       match
-        Oi.Solve.solve ctx ~packages_dirs ~constraints:extra_constraints names
+        Oi.Solve.solve ~fs ~cache_root ctx ~packages_dirs
+          ~constraints:extra_constraints names
       with
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg
