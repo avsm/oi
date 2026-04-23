@@ -23,6 +23,37 @@ let default_build_parallelism () =
       match int_of_string_opt s with Some n when n > 0 -> n | _ -> 4)
   | None -> min (Domain.recommended_domain_count ()) 4
 
+(* -- Failure logging ----------------------------------------------------- *)
+
+(* Failed package builds get their output written here instead of dumped
+   to stderr. Keeps the live progress bar / summary readable, and gives
+   the user a file path to grep without re-running the build. The log
+   file name matches the [build_dir] convention: <pkg>-<short_hash>.log
+   so builds of the same name.version from different overlays don't
+   clobber each other's logs either. *)
+let logs_dir_of ~cache_root = cache_root / "build" / "logs"
+
+let short_layer_hash h = String.sub h 0 (min 12 (String.length h))
+
+let write_failure_log ~cache_root ~(p : Plan.package_plan) ~exn =
+  let dir = logs_dir_of ~cache_root in
+  (try Unix.mkdir dir 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
+  let path =
+    dir / (p.pkg ^ "-" ^ short_layer_hash p.layer_hash ^ ".log")
+  in
+  let body =
+    match exn with
+    | Error.E (Build_failed { pkg; cmd; output }) ->
+        Fmt.str "package: %s\ncommand: %s\n\n%s" pkg cmd output
+    | _ -> Printexc.to_string exn
+  in
+  (try
+     let oc = open_out path in
+     output_string oc body;
+     close_out oc
+   with Sys_error _ -> ());
+  path
+
 (* -- Command execution --------------------------------------------------- *)
 
 (* Resolve an unqualified executable name against the PATH in [env],
@@ -112,7 +143,14 @@ let run_cmd ~proc_mgr ~fs ~env ~cwd ~pkg cmd =
 
 (* -- Fetching ------------------------------------------------------------- *)
 
-let fetch_source ?(cache_urls = []) (p : Plan.package_plan) =
+(* Per-fetch retry log so retry warnings go to a file instead of stderr.
+   Empty path means the caller didn't route them anywhere (default
+   Retry.with_attempts behaviour kicks in). *)
+let fetch_log_path_of ~cache_root ~(p : Plan.package_plan) =
+  logs_dir_of ~cache_root
+  / ("fetch-" ^ p.pkg ^ "-" ^ short_layer_hash p.layer_hash ^ ".log")
+
+let fetch_source ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
   match p.source with
   | None -> ()
   | Some src ->
@@ -124,8 +162,11 @@ let fetch_source ?(cache_urls = []) (p : Plan.package_plan) =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
         Log.info (fun m -> m "Fetching %s from %s" p.pkg src.url);
+        let error_log_path = fetch_log_path_of ~cache_root ~p in
+        (try Unix.mkdir (logs_dir_of ~cache_root) 0o755
+         with Unix.Unix_error (EEXIST, _, _) -> ());
         Retry.with_attempts ~label:(Fmt.str "fetch %s (%s)" p.pkg src.url)
-          (fun () ->
+          ~error_log_path (fun () ->
             let result =
               OpamRepository.pull_tree p.pkg ~cache_dir ~cache_urls dst_dir
                 checksums [ url ]
@@ -137,7 +178,7 @@ let fetch_source ?(cache_urls = []) (p : Plan.package_plan) =
                 Fmt.failwith "Failed to fetch %s: %s" p.pkg msg)
       end
 
-let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
+let fetch_extra_sources ?(cache_urls = []) ~cache_root (p : Plan.package_plan) =
   List.iter
     (fun (name, (src : Plan.source_info)) ->
       let dst = p.build_dir / name in
@@ -148,10 +189,13 @@ let fetch_extra_sources ?(cache_urls = []) (p : Plan.package_plan) =
         let cache_dir =
           OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
         in
+        let error_log_path = fetch_log_path_of ~cache_root ~p in
+        (try Unix.mkdir (logs_dir_of ~cache_root) 0o755
+         with Unix.Unix_error (EEXIST, _, _) -> ());
         try
           Retry.with_attempts
             ~label:(Fmt.str "fetch extra source %s (%s)" name src.url)
-            (fun () ->
+            ~error_log_path (fun () ->
               let result =
                 OpamRepository.pull_file name ~cache_dir ~cache_urls
                   ~silent_hits:true dst_file checksums [ url ]
@@ -200,14 +244,15 @@ let apply_substs (p : Plan.package_plan) =
 
 (* -- Build and install ---------------------------------------------------- *)
 
-let build_package ?(cache_urls = []) ~proc_mgr ~fs (p : Plan.package_plan) =
-  fetch_source ~cache_urls p;
+let build_package ?(cache_urls = []) ~cache_root ~proc_mgr ~fs
+    (p : Plan.package_plan) =
+  fetch_source ~cache_urls ~cache_root p;
   (* Ensure build_dir exists before fetching extra-sources: pull_tree
      (in fetch_source) creates the directory, but packages with no main
      source (e.g. seq.base) still need the directory to exist so that
      extra-source files can be written into it. *)
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / p.build_dir);
-  fetch_extra_sources ~cache_urls p;
+  fetch_extra_sources ~cache_urls ~cache_root p;
   apply_patches ~proc_mgr ~fs p;
   apply_substs p;
   List.iter
@@ -224,9 +269,60 @@ let install_package ~proc_mgr ~fs (p : Plan.package_plan) =
     Installer.install ~fs ~prefix:p.prefix ~build_dir:p.build_dir
       ~install_file:p.install_file
 
+(* -- Reporter ------------------------------------------------------------- *)
+
+type pkg_event =
+  | Started of { pkg : string; stage : int; total_stages : int }
+  | Cached of { pkg : string }
+  | Built of { pkg : string }
+  | Build_failed of { pkg : string; log : string }
+  | Dep_failed of { pkg : string; upstream_log : string }
+  | Install_failed of { pkg : string; log : string }
+
+type reporter = { pkg_event : pkg_event -> unit }
+
 (* -- Main loop ------------------------------------------------------------ *)
 
-let run ?(cache_urls = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~os_key plan =
+(* Default reporter: internal Progress bar + inline FAIL prints. Used by
+   [oi run] / [oi sync], which only ever run one [Execute.run] at a time
+   and have no outer UI to coordinate with. [oi registry build] supplies
+   its own reporter to drive a cross-invocation bar with live counters. *)
+let with_default_reporter ~total_packages ~n_stages f =
+  let config = Progress.Config.v ~persistent:false () in
+  let bar =
+    let open Progress.Line in
+    pair ~sep:(const " ")
+      (list [ spinner (); brackets (count_to total_packages) ])
+      (rpad 60 string)
+  in
+  Progress.with_reporter ~config bar (fun report ->
+      let stage_s stage = Fmt.str "stage %d/%d" stage n_stages in
+      let reporter =
+        {
+          pkg_event =
+            (fun e ->
+              match e with
+              | Started { pkg; stage; total_stages = _ } ->
+                  report (0, Fmt.str "[%s] %s (build)" (stage_s stage) pkg)
+              | Cached { pkg } -> report (1, Fmt.str "%s (cached)" pkg)
+              | Built { pkg } -> report (1, Fmt.str "%s" pkg)
+              | Build_failed { pkg; log } ->
+                  Progress.interject_with (fun () ->
+                      Fmt.epr "  %a %s → %s@."
+                        Fmt.(styled (`Fg `Red) string)
+                        "FAIL" pkg log)
+              | Dep_failed { pkg = _; upstream_log = _ } -> ()
+              | Install_failed { pkg; log } ->
+                  Progress.interject_with (fun () ->
+                      Fmt.epr "  %a %s (install) → %s@."
+                        Fmt.(styled (`Fg `Red) string)
+                        "FAIL" pkg log));
+        }
+      in
+      f reporter)
+
+let run ?(cache_urls = []) ?jobs ?failed_layers ?reporter ~proc_mgr ~fs ~clock
+    ~sys ~os_key plan =
   let build_parallelism =
     match jobs with Some n when n > 0 -> n | _ -> default_build_parallelism ()
   in
@@ -234,122 +330,175 @@ let run ?(cache_urls = []) ?jobs ~proc_mgr ~fs ~clock ~sys ~os_key plan =
     { sys; fs; clock; root = Eio.Path.(fs / plan.Plan.cache_root); os_key }
   in
   let prefix = plan.cache_root / "build" / "prefix" in
-  Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix);
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / prefix);
-  List.iter
-    (fun sub ->
-      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / prefix / sub))
-    [ "bin"; "lib"; "sbin"; "share"; "etc"; "doc"; "man" ];
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-    Eio.Path.(fs / plan.cache_root / "build" / "_build");
   let n_stages = List.length plan.groups in
-  let failed_pkgs : (string, bool) Hashtbl.t = Hashtbl.create 16 in
-  let completed = ref 0 in
-  let config = Progress.Config.v ~persistent:false () in
-  let bar =
-    let open Progress.Line in
-    pair ~sep:(const " ")
-      (list [ spinner (); brackets (count_to plan.total_packages) ])
-      (rpad 60 string)
+  (* Track failed layer-hashes rather than package names so
+     cross-overlay builds of the same [name.version] (which resolve to
+     different layer hashes) stay independent. The optional arg lets
+     [oi registry build --all] thread one tracker through every build
+     group, so a failure in group 1 skips dependents in group 2
+     rather than retrying the same build. Keyed by layer hash; value
+     is the failure-log path (empty string for cascaded failures that
+     inherit the log from an upstream dep). *)
+  let failed_layers : (string, string) Hashtbl.t =
+    match failed_layers with Some t -> t | None -> Hashtbl.create 16
   in
-  Progress.with_reporter ~config bar (fun report ->
+  let mark_failed ~(p : Plan.package_plan) ~log_path =
+    if not (Hashtbl.mem failed_layers p.layer_hash) then
+      Hashtbl.replace failed_layers p.layer_hash log_path
+  in
+  let is_dep_failed (d : Plan.dep_layer) = Hashtbl.mem failed_layers d.hash in
+  (* First dep's log path, for cascading skip messages. *)
+  let cascade_log (p : Plan.package_plan) =
+    List.find_map
+      (fun (d : Plan.dep_layer) -> Hashtbl.find_opt failed_layers d.hash)
+      p.dep_layers
+    |> Stdlib.Option.value ~default:""
+  in
+  (* A plan is "doomed" when every source package in it is already in
+     [failed_layers] or has a failed dep, so no Source build will run.
+     In that case every Binary in the plan would be restored into the
+     prefix purely to emit [Cached] events — pure IO waste. Detect it
+     up front and short-circuit: emit Cached / Dep_failed events for
+     the reporter's accounting, mark sources as failed, and skip every
+     prefix wipe / layer restore. This is the common case when a
+     common dep fails early in [--all] and drags hundreds of groups
+     with it. *)
+  let is_pkg_doomed (p : Plan.package_plan) =
+    p.method_ <> `Source
+    || Hashtbl.mem failed_layers p.layer_hash
+    || List.exists is_dep_failed p.dep_layers
+  in
+  let plan_doomed =
+    List.for_all
+      (fun (g : Plan.group) -> List.for_all is_pkg_doomed g.packages)
+      plan.groups
+  in
+  if not plan_doomed then begin
+    Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prefix);
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / prefix);
+    List.iter
+      (fun sub ->
+        Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+          Eio.Path.(fs / prefix / sub))
+      [ "bin"; "lib"; "sbin"; "share"; "etc"; "doc"; "man" ];
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+      Eio.Path.(fs / plan.cache_root / "build" / "_build")
+  end;
+  let do_work (reporter : reporter) =
+    if plan_doomed then
       List.iter
         (fun (group : Plan.group) ->
-          let stage_s = Fmt.str "stage %d/%d" group.stage n_stages in
-          (* Phase 1: restore cached layers (Binary packages) *)
           List.iter
             (fun (p : Plan.package_plan) ->
-              if p.method_ = `Binary then begin
-                D10.Layer.restore d10 ~hash:p.layer_hash ~prefix;
-                incr completed;
-                report (1, Fmt.str "[%s] %s (cached)" stage_s p.pkg)
-              end)
-            group.packages;
-          (* Phase 2: parallel fetch+build for Source packages *)
-          let to_build =
-            List.filter
-              (fun (p : Plan.package_plan) ->
-                if
-                  p.method_ = `Source
-                  && not
-                       (List.exists
-                          (fun (d : Plan.dep_layer) ->
-                            Hashtbl.mem failed_pkgs d.pkg)
-                          p.dep_layers)
-                then true
-                else begin
-                  if p.method_ = `Source then
-                    Hashtbl.replace failed_pkgs p.pkg true;
-                  false
-                end)
-              group.packages
-          in
-          let build_failures : (string * exn) list ref = ref [] in
-          if to_build <> [] then begin
-            let active = ref 0 in
-            Eio.Fiber.List.iter ~max_fibers:build_parallelism
-              (fun (p : Plan.package_plan) ->
-                active := !active + 1;
-                report
-                  ( 0,
-                    Fmt.str "[%s] [%d active] %s (build)" stage_s !active p.pkg
-                  );
-                (try
-                   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / p.build_dir);
-                   build_package ~cache_urls ~proc_mgr ~fs p
-                 with exn ->
-                   build_failures := (p.pkg, exn) :: !build_failures;
-                   Hashtbl.replace failed_pkgs p.pkg true);
-                active := !active - 1)
-              to_build
-          end;
-          (* Report build failures from this stage *)
-          List.iter
-            (fun (pkg, exn) ->
-              Progress.interject_with (fun () ->
-                  match exn with
-                  | Error.E (Build_failed { pkg = p; cmd; output }) ->
-                      Fmt.epr
-                        "@.@[<v>\x1b[1;31mFAIL\x1b[0m %s@,command: %s@,@,%s@]@."
-                        p cmd output
-                  | _ -> Fmt.epr "  FAIL %s: %s@." pkg (Printexc.to_string exn)))
-            !build_failures;
-          (* Phase 3: serial install for successfully built packages *)
-          List.iter
-            (fun (p : Plan.package_plan) ->
-              if p.method_ = `Source && not (Hashtbl.mem failed_pkgs p.pkg) then begin
-                report (0, Fmt.str "[%s] %s (install)" stage_s p.pkg);
-                let before = D10.Prefix.snapshot ~fs prefix in
-                (try
-                   install_package ~proc_mgr ~fs p;
-                   let files =
-                     D10.Prefix.diff ~fs ~prefix ~before |> List.map fst
-                   in
-                   let dep_hashes =
-                     List.filter_map
-                       (fun (d : Plan.dep_layer) ->
-                         if D10.Layer.succeeded d10 ~hash:d.hash then
-                           Some d.hash
-                         else None)
-                       p.dep_layers
-                   in
-                   D10.Layer.store d10 ~hash:p.layer_hash ~prefix ~files
-                     ~package:p.pkg
-                     ~deps:
-                       (List.map
-                          (fun (d : Plan.dep_layer) -> d.pkg)
-                          p.dep_layers)
-                     ~parent_hashes:dep_hashes ~exit_status:0
-                     ?overlay_handle:p.overlay_handle
-                     ?overlay_version:p.overlay_version ()
-                 with exn ->
-                   Hashtbl.replace failed_pkgs p.pkg true;
-                   Progress.interject_with (fun () ->
-                       Fmt.epr "  FAIL %s: %s@." p.pkg (Printexc.to_string exn)));
-                incr completed;
-                report (1, Fmt.str "[%s] %s" stage_s p.pkg)
-              end)
+              match p.method_ with
+              | `Binary -> reporter.pkg_event (Cached { pkg = p.pkg })
+              | `Source ->
+                  let upstream_log = cascade_log p in
+                  mark_failed ~p ~log_path:upstream_log;
+                  reporter.pkg_event
+                    (Dep_failed { pkg = p.pkg; upstream_log }))
             group.packages)
-        plan.groups);
-  let n_failed = Hashtbl.length failed_pkgs in
+        plan.groups
+    else
+    List.iter
+      (fun (group : Plan.group) ->
+        (* Phase 1: restore cached layers (Binary packages) *)
+        List.iter
+          (fun (p : Plan.package_plan) ->
+            if p.method_ = `Binary then begin
+              D10.Layer.restore d10 ~hash:p.layer_hash ~prefix;
+              reporter.pkg_event (Cached { pkg = p.pkg })
+            end)
+          group.packages;
+        (* Phase 2: parallel fetch+build for Source packages. Skip
+           a package when its own layer has already failed in a
+           previous build group (persistent tracker), or when any
+           of its dep layers is known-failed. In either case we
+           mark the package's own layer as failed so its dependents
+           propagate the skip downstream and emit a Dep_failed
+           event for the reporter. *)
+        let to_build =
+          List.filter
+            (fun (p : Plan.package_plan) ->
+              if
+                p.method_ = `Source
+                && not (Hashtbl.mem failed_layers p.layer_hash)
+                && not (List.exists is_dep_failed p.dep_layers)
+              then true
+              else begin
+                (if p.method_ = `Source then
+                   let upstream_log = cascade_log p in
+                   mark_failed ~p ~log_path:upstream_log;
+                   reporter.pkg_event
+                     (Dep_failed { pkg = p.pkg; upstream_log }));
+                false
+              end)
+            group.packages
+        in
+        if to_build <> [] then begin
+          let active = ref 0 in
+          Eio.Fiber.List.iter ~max_fibers:build_parallelism
+            (fun (p : Plan.package_plan) ->
+              active := !active + 1;
+              reporter.pkg_event
+                (Started
+                   { pkg = p.pkg; stage = group.stage; total_stages = n_stages });
+              (try
+                 Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / p.build_dir);
+                 build_package ~cache_urls ~cache_root:plan.cache_root
+                   ~proc_mgr ~fs p
+               with exn ->
+                 let log_path =
+                   write_failure_log ~cache_root:plan.cache_root ~p ~exn
+                 in
+                 mark_failed ~p ~log_path;
+                 reporter.pkg_event
+                   (Build_failed { pkg = p.pkg; log = log_path }));
+              active := !active - 1)
+            to_build
+        end;
+        (* Phase 3: serial install for successfully built packages *)
+        List.iter
+          (fun (p : Plan.package_plan) ->
+            if
+              p.method_ = `Source
+              && not (Hashtbl.mem failed_layers p.layer_hash)
+            then begin
+              let before = D10.Prefix.snapshot ~fs prefix in
+              try
+                install_package ~proc_mgr ~fs p;
+                let files =
+                  D10.Prefix.diff ~fs ~prefix ~before |> List.map fst
+                in
+                let dep_hashes =
+                  List.filter_map
+                    (fun (d : Plan.dep_layer) ->
+                      if D10.Layer.succeeded d10 ~hash:d.hash then Some d.hash
+                      else None)
+                    p.dep_layers
+                in
+                D10.Layer.store d10 ~hash:p.layer_hash ~prefix ~files
+                  ~package:p.pkg
+                  ~deps:
+                    (List.map (fun (d : Plan.dep_layer) -> d.pkg) p.dep_layers)
+                  ~parent_hashes:dep_hashes ~exit_status:0
+                  ?overlay_handle:p.overlay_handle
+                  ?overlay_version:p.overlay_version ();
+                reporter.pkg_event (Built { pkg = p.pkg })
+              with exn ->
+                let log_path =
+                  write_failure_log ~cache_root:plan.cache_root ~p ~exn
+                in
+                mark_failed ~p ~log_path;
+                reporter.pkg_event
+                  (Install_failed { pkg = p.pkg; log = log_path })
+            end)
+          group.packages)
+      plan.groups
+  in
+  (match reporter with
+  | Some r -> do_work r
+  | None ->
+      with_default_reporter ~total_packages:plan.total_packages ~n_stages do_work);
+  let n_failed = Hashtbl.length failed_layers in
   if n_failed > 0 then Error.msg "%d package(s) failed to build" n_failed

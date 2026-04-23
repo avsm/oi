@@ -2737,7 +2737,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
     type t =
       | Skipped of string  (** solver failure *)
       | Ok of int * int * int
-      | Failed of int * int * int * string
+      | Failed of int * int * int * string * (string * string) list
   end in
   let result_for t =
     match Hashtbl.find_opt solve_failures t with
@@ -2749,7 +2749,8 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
             match Hashtbl.find_opt group_results gi with
             | None -> R.Skipped "group not built"
             | Some (`Ok (p, b, c)) -> R.Ok (p, b, c)
-            | Some (`Fail (p, b, c, msg)) -> R.Failed (p, b, c, msg)))
+            | Some (`Fail (p, b, c, msg, failures)) ->
+                R.Failed (p, b, c, msg, failures)))
   in
   let handle_for t =
     match Hashtbl.find_opt target_handle t with
@@ -2781,7 +2782,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
   let detail_col r =
     match r with
     | R.Ok (p, b, c) -> Fmt.str "%d pkg (%d built, %d cached)" p b c
-    | R.Failed (p, b, c, _) ->
+    | R.Failed (p, b, c, _, _) ->
         Fmt.str "%d pkg (%d built, %d cached) — build failed" p b c
     | R.Skipped msg -> Fmt.str "skipped (%s)" (first_line msg)
   in
@@ -2802,12 +2803,21 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
   Fmt.pr "@.";
   List.iter
     (fun (target, handle, r) ->
-      if handle_width = 0 then
-        Fmt.pr "  %-6s %-*s  %s@." (status_col r) target_width target
-          (detail_col r)
-      else
-        Fmt.pr "  %-6s %s  %-*s  %s@." (status_col r) (styled_handle handle)
-          target_width target (detail_col r))
+      (if handle_width = 0 then
+         Fmt.pr "  %-6s %-*s  %s@." (status_col r) target_width target
+           (detail_col r)
+       else
+         Fmt.pr "  %-6s %s  %-*s  %s@." (status_col r) (styled_handle handle)
+           target_width target (detail_col r));
+      match r with
+      | R.Failed (_, _, _, _, failures) ->
+          List.iter
+            (fun (pkg, log_path) ->
+              Fmt.pr "         %a %s: %s@."
+                Fmt.(styled `Faint string)
+                "↳ log" pkg log_path)
+            failures
+      | _ -> ())
     rows;
   Fmt.pr "@.%d ok, %d failed, %d skipped@." n_ok n_failed n_skipped;
   (* Dump per-target build-failure output at debug level so `-v` still
@@ -2816,7 +2826,7 @@ let print_build_summary ~targets ~target_handle ~solve_failures ~target_group
   List.iter
     (fun (target, _handle, r) ->
       match r with
-      | R.Failed (_, _, _, msg) -> Log.info (fun m -> m "%s: %s" target msg)
+      | R.Failed (_, _, _, msg, _) -> Log.info (fun m -> m "%s: %s" target msg)
       | R.Skipped msg when String.contains msg '\n' ->
           Log.info (fun m -> m "%s: %s" target msg)
       | _ -> ())
@@ -2937,13 +2947,56 @@ let registry_build_cmd =
     let extra_cli, url_project =
       materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
     in
-    let with_repos = with_repos @ url_project.overlays in
+    (* [global_handles] are overlays the user requested apply to every
+       solve (via [--with-repo] or from URL-project [x-reporepo]). Per-
+       group handles are those extracted from each group's [@h/pkg]
+       tokens and only apply to that group's solve.
+
+       The current-call [with_repos] at this point is the merge of CLI-
+       supplied handles and token-derived ones — we already separated
+       them above (token-derived come via the [Overlay_pkg]/[Overlay_all]
+       filter), but the code then re-merges them. To keep overlays
+       isolated per user, we recompute [global_handles] as the CLI-only
+       set and defer token-derived handles to per-group scope. *)
+    let global_handles =
+      (* The handles the caller explicitly asked to be global:
+         [--with-repo] args + URL-project overlays. Token-derived
+         handles are handled per-group below. *)
+      let cli_only =
+        List.filter
+          (fun h ->
+            (* Keep everything here that wasn't added by token parsing.
+               We recover the CLI-only subset by removing any handle
+               that a token classified as [Overlay_*]. *)
+            not
+              (List.exists
+                 (function
+                   | Overlay_pkg (h', _) | Overlay_all h' -> h' = h
+                   | Plain_target _ -> false)
+                 parsed))
+          with_repos
+      in
+      cli_only @ url_project.overlays
+    in
+    (* Clone ALL handles (global + per-group) upfront so per-group
+       resolution below can just read already-materialised packages
+       dirs. Don't keep the merged paths list — packages dirs are
+       recomputed per-group from the handle subset. *)
+    let all_handles =
+      global_handles
+      @ List.filter_map
+          (function
+            | Overlay_pkg (h, _) | Overlay_all h -> Some h
+            | Plain_target _ -> None)
+          parsed
+      |> List.sort_uniq String.compare
+    in
     let cli_extras_records =
       merge_extras
-        ~cli:(cli_extra_repos ~fs ~sys with_repos)
+        ~cli:(cli_extra_repos ~fs ~sys all_handles)
         ~project:url_project.extra_repos
     in
-    let extra_pkg_dirs =
+    let _ : string list =
       Oi.Repo.ensure_extra ~fs ~data_dir ~refresh cli_extras_records
     in
     (* URL-project pins materialize into a synthetic packages/ tree
@@ -2985,8 +3038,15 @@ let registry_build_cmd =
        ships — "build everything in the overlay" isn't a single-solve
        concept. Groups composed of [@handle/pkg] or plain [pkg] tokens
        keep their shape so multi-package solve groups (compiler
-       variants) survive intact. *)
-    let target_groups =
+       variants) survive intact.
+
+       Each result carries its own [handles] — the set of overlay
+       handles that should be visible to the solver for this group.
+       [@avsm/karakeep] yields a group with handles [avsm], nothing
+       else. That scope is what keeps [@avsm] solves from picking up
+       conflicting packages out of [@samoht]'s overlay. *)
+    let raw_target_groups
+        : (string list (* targets *) * string list (* handles *)) list =
       List.concat_map
         (fun raw_group ->
           match List.map parse_build_target raw_group with
@@ -2995,7 +3055,7 @@ let registry_build_cmd =
               List.iter (fun p -> Hashtbl.replace target_handle p h) ps;
               Log.info (fun m ->
                   m "Overlay %s: %d package(s) to build" h (List.length ps));
-              List.map (fun p -> [ p ]) ps
+              List.map (fun p -> ([ p ], [ h ])) ps
           | classified ->
               let names =
                 List.map
@@ -3011,24 +3071,67 @@ let registry_build_cmd =
                           h h)
                   classified
               in
-              [ names ])
+              let handles =
+                List.filter_map
+                  (function
+                    | Plain_target _ -> None
+                    | Overlay_pkg (h, _) | Overlay_all h -> Some h)
+                  classified
+                |> List.sort_uniq String.compare
+              in
+              [ (names, handles) ])
         token_groups
     in
-    let targets = List.concat target_groups in
+    let target_groups = raw_target_groups in
+    let targets = List.concat_map fst target_groups in
     (* [--dry-run --all] prints the expanded target list (with handles
        and the latest version each overlay ships) and stops before
        solving. Useful to audit what [--all] would attempt without
        paying the solver's cost. Non-[--all] dry-runs keep the existing
        per-group build-plan tree output downstream. *)
     if dry_run && all then begin
-      let n = List.length targets in
-      Fmt.pr "@.%a@." Fmt.(styled `Bold string)
-        (Fmt.str "--all would build %d target%s:" n (if n = 1 then "" else "s"));
-      (* Resolve each handle once to its cloned packages/ dir so we can
-         look up the latest version of each package it contributes.
-         Falls back gracefully if the overlay isn't cloned yet. *)
-      let handle_dir = Hashtbl.create 8 in
       let entries = Oi.Reporepo.load ~path:(reporepo_path ()) in
+      let n = List.length target_groups in
+      let n_targets = List.length targets in
+      (* Display-only grouping: per-target solves are kept for speed
+         and failure isolation (opam-0install scales badly with root
+         count), but we bucket the dry-run output by handle signature
+         so the reader sees one row per reporepo overlay set, not one
+         per root package. *)
+      let display_groups =
+        let tbl : (string list, string list ref) Hashtbl.t =
+          Hashtbl.create 8
+        in
+        let order = ref [] in
+        List.iter
+          (fun (targets, handles) ->
+            let key = List.sort_uniq String.compare handles in
+            match Hashtbl.find_opt tbl key with
+            | Some acc -> acc := !acc @ targets
+            | None ->
+                Hashtbl.add tbl key (ref targets);
+                order := key :: !order)
+          target_groups;
+        List.rev_map
+          (fun key ->
+            let ts =
+              !(Hashtbl.find tbl key) |> List.sort_uniq String.compare
+            in
+            (ts, key))
+          !order
+      in
+      let n_display = List.length display_groups in
+      Fmt.pr "@.%a@." Fmt.(styled `Bold string)
+        (Fmt.str
+           "--all would build %d target%s in %d solve group%s (grouped into \
+            %d handle scope%s):"
+           n_targets
+           (if n_targets = 1 then "" else "s")
+           n
+           (if n = 1 then "" else "s")
+           n_display
+           (if n_display = 1 then "" else "s"));
+      let handle_dir = Hashtbl.create 8 in
       let dir_for_handle h =
         match Hashtbl.find_opt handle_dir h with
         | Some v -> v
@@ -3048,8 +3151,6 @@ let registry_build_cmd =
             v
       in
       let bare_name t =
-        (* Strip version / relop suffixes so [latest_version_in_dirs]
-           can find the package entry. *)
         let stop = [ '='; '<'; '>'; '.'; '{' ] in
         let len = String.length t in
         let rec find i =
@@ -3059,64 +3160,124 @@ let registry_build_cmd =
         in
         String.sub t 0 (find 0)
       in
-      let version_for t =
-        match Hashtbl.find_opt target_handle t with
-        | None -> None
-        | Some h -> (
+      let version_for target handles =
+        List.find_map
+          (fun h ->
             match dir_for_handle h with
-            | None -> None
-            | Some d -> latest_version_in_dirs ~pkg:(bare_name t) [ d ])
+            | Some d -> latest_version_in_dirs ~pkg:(bare_name target) [ d ]
+            | None -> None)
+          handles
       in
-      let handle_w =
+      let overlays_summary_for handles =
+        let eff =
+          List.sort_uniq compare ("relocatable" :: (global_handles @ handles))
+        in
+        let resolved =
+          let roots =
+            List.map
+              (fun h : Oi.Reporepo.root -> { handle = h; version = None })
+              eff
+          in
+          try Oi.Reporepo.resolve entries ~roots
+          with Oi.Error.E _ -> []
+        in
+        String.concat ", "
+          (List.map
+             (fun (e : Oi.Reporepo.entry) -> "@" ^ e.handle ^ "." ^ e.version)
+             resolved)
+      in
+      let group_label handles =
+        match handles with
+        | [] -> "(no overlay)"
+        | hs -> String.concat "+" (List.map (fun h -> "@" ^ h) hs)
+      in
+      let sort_key (_, handles) = group_label handles in
+      let sorted_groups =
+        List.sort
+          (fun a b -> String.compare (sort_key a) (sort_key b))
+          display_groups
+      in
+      let label_w =
         List.fold_left
-          (fun w t ->
-            match Hashtbl.find_opt target_handle t with
-            | Some h -> max w (String.length h + 1)
-            | None -> w)
-          0 targets
-      in
-      let target_w =
-        List.fold_left (fun w t -> max w (String.length t)) 0 targets
+          (fun w (_, handles) -> max w (String.length (group_label handles)))
+          0 sorted_groups
       in
       List.iter
-        (fun t ->
-          let handle_cell =
-            match Hashtbl.find_opt target_handle t with
-            | Some h ->
-                Fmt.str "%a" Fmt.(styled `Cyan string) ("@" ^ h)
-            | None -> ""
+        (fun (targets, handles) ->
+          let label = group_label handles in
+          Fmt.pr "@.  %a %-*s  %a@."
+            Fmt.(styled `Cyan string)
+            "▸" label_w label
+            Fmt.(styled `Faint string)
+            (overlays_summary_for handles);
+          let sorted_targets = List.sort String.compare targets in
+          let with_versions =
+            List.map
+              (fun t ->
+                match version_for t handles with
+                | Some v -> t ^ "." ^ v
+                | None -> t)
+              sorted_targets
           in
-          let version_cell =
-            match version_for t with
-            | Some v -> Fmt.str "%a" Fmt.(styled `Faint string) v
-            | None -> ""
-          in
-          (* [handle_w] is used raw as the visible width, even though
-             [handle_cell] has ANSI codes — we pad the plain-text
-             handle, then colourise. *)
-          let handle_plain =
-            match Hashtbl.find_opt target_handle t with
-            | Some h -> "@" ^ h
-            | None -> ""
-          in
-          let handle_pad = String.make (handle_w - String.length handle_plain) ' ' in
-          Fmt.pr "  %s%s  %-*s  %s@." handle_cell handle_pad target_w t
-            version_cell)
-        targets;
+          Fmt.pr "      %s@." (String.concat ", " with_versions))
+        sorted_groups;
       Fmt.pr "@.";
       exit 0
     end;
     if targets = [] && url_project.roots = [] then
       Oi.Error.config_error "no targets to build";
-    let packages_dirs =
-      Stdlib.Option.to_list pin_dir
-      @ extra_pkg_dirs
-      @ get_packages_dirs ~fs ~sys ~data_dir ()
-    in
     let cache_root = Oi.Cache.root_s cache in
     let build_prefix = cache_root / "build" / "prefix" in
-    let ctx = Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf in
     let d10 = make_d10 ~sys ~fs ~clock ~cache ~os_key in
+    let base_packages_dirs = get_packages_dirs ~fs ~sys ~data_dir () in
+    (* Per-group packages_dirs: each solve group sees ONLY the overlay
+       handles it actually uses (plus its transitive base deps via
+       reporepo [depends:] resolution, plus any globally-scoped handles
+       from [--with-repo] / URL-project [x-reporepo]). This is what
+       keeps [@avsm/karakeep] from accidentally picking up packages
+       out of [@samoht]'s overlay — the samoht clone is on disk but
+       isn't in this group's solver search path. *)
+    let reporepo_entries_cache =
+      try Oi.Reporepo.load ~path:(reporepo_path ()) with _ -> []
+    in
+    let overlay_entries_for_handles handles =
+      let roots =
+        List.rev handles
+        |> List.map (fun h : Oi.Reporepo.root ->
+               { handle = h; version = None })
+      in
+      try
+        Oi.Reporepo.resolve reporepo_entries_cache ~roots
+        (* [resolve] returns deps-first; reverse so dependents win on
+           name collisions under the solver's first-wins fold. *)
+        |> List.rev
+      with Oi.Error.E _ -> []
+    in
+    let packages_dirs_for_handles handles =
+      let effective =
+        global_handles @ handles |> List.sort_uniq String.compare
+      in
+      let overlay_entries = overlay_entries_for_handles effective in
+      let overlay_dirs =
+        List.map
+          (fun (e : Oi.Reporepo.entry) ->
+            let name = "overlay-" ^ e.handle ^ "-" ^ e.version in
+            Oi.Repo.repo_dir ~data_dir name / "packages")
+          overlay_entries
+      in
+      let seen = Hashtbl.create 8 in
+      let dedup xs =
+        List.filter
+          (fun d ->
+            if Hashtbl.mem seen d then false
+            else begin
+              Hashtbl.replace seen d ();
+              true
+            end)
+          xs
+      in
+      dedup (Stdlib.Option.to_list pin_dir @ overlay_dirs @ base_packages_dirs)
+    in
     (* [--with] adds extra packages to every target's root set plus any
        version constraints they carry. *)
     let base_constraints = Oi.Script.constraints extra_cli in
@@ -3129,9 +3290,10 @@ let registry_build_cmd =
       @ List.map OpamPackage.Name.of_string url_project.roots
     in
     let target_groups =
-      target_groups @ List.map (fun r -> [ r ]) url_project.roots
+      target_groups
+      @ List.map (fun r -> ([ r ], [])) url_project.roots
     in
-    let targets = List.concat target_groups in
+    let targets = List.concat_map fst target_groups in
     (* Per-target result tracking; the final summary walks [targets] in
        order and looks each name up here. A target either fails to
        solve (status stored directly), or lands in some group. Groups
@@ -3142,19 +3304,23 @@ let registry_build_cmd =
     let target_group : (string, int) Hashtbl.t = Hashtbl.create 16 in
     let group_results :
         ( int,
-          [ `Ok of int * int * int | `Fail of int * int * int * string ] )
+          [ `Ok of int * int * int
+          | `Fail of int * int * int * string * (string * string) list ] )
         Hashtbl.t =
       Hashtbl.create 16
     in
-    (* 1. Solve each solve-group. A group is a list of target strings
-       fed to the solver as a single root set, so variant-forming groups
-       (e.g. [["ocaml-option-flambda"; "ocaml-option-static"; "ocaml"]])
-       solve to a combined plan and cache as a unit. Singleton groups
-       are indistinguishable from the previous per-target solves. *)
+    (* 1. Solve each solve-group against that group's scoped
+       [packages_dirs] — handles from the group's own tokens plus any
+       global [--with-repo] ones. Different groups see different
+       overlays so [@avsm/...] never solves against [@samoht/...]. *)
     let solutions =
       let n_groups = List.length target_groups in
       let group_label group = String.concat " " group in
-      let solve_group group =
+      let solve_one (group, handles) =
+        let pkg_dirs = packages_dirs_for_handles handles in
+        let gctx =
+          Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs:pkg_dirs ~conf
+        in
         let items = List.map parse_pkg_target group in
         let names = List.map fst items in
         let constraints =
@@ -3166,21 +3332,21 @@ let registry_build_cmd =
             base_constraints items
         in
         match
-          Oi.Solve.solve ctx ~packages_dirs ~constraints
+          Oi.Solve.solve gctx ~packages_dirs:pkg_dirs ~constraints
             (names @ extra_names)
         with
         | Ok pkgs ->
             Log.info (fun m ->
                 m "Solved %s: %d packages" (group_label group)
                   (List.length pkgs));
-            Some (group, pkgs)
+            Some (group, handles, pkg_dirs, pkgs)
         | Error msg ->
             List.iter (fun t -> Hashtbl.replace solve_failures t msg) group;
             Log.debug (fun m ->
                 m "solve failed: %s: %s" (group_label group) msg);
             None
       in
-      if n_groups <= 1 then List.filter_map solve_group target_groups
+      if n_groups <= 1 then List.filter_map solve_one target_groups
       else
         let config = Progress.Config.v ~persistent:false () in
         let bar =
@@ -3192,10 +3358,10 @@ let registry_build_cmd =
         let acc = ref [] in
         Progress.with_reporter ~config bar (fun report ->
             List.iter
-              (fun group ->
-                let label = group_label group in
+              (fun ((g, _) as group_and_handles) ->
+                let label = group_label g in
                 report (0, Fmt.str "solve %s" label);
-                (match solve_group group with
+                (match solve_one group_and_handles with
                 | Some s -> acc := s :: !acc
                 | None -> ());
                 report (1, Fmt.str "solve %s" label))
@@ -3209,10 +3375,100 @@ let registry_build_cmd =
     Log.info (fun m ->
         m "%d solve group(s) → %d build group(s)" (List.length solutions)
           n_groups);
-    (* 3. Build each group *)
+    (* Shared failure tracker across every build group: if [foo.1.2]
+       fails in group 1, any later group that depends on the same
+       layer hash skips it and marks its own dependents as failed
+       rather than retrying the doomed build. Keyed by layer_hash so
+       the same [name.version] resolved to a different layer (e.g.
+       via a different dep set in another overlay) still gets its own
+       attempt. *)
+    let failed_layers : (string, string) Hashtbl.t = Hashtbl.create 64 in
+    (* 3. Build each group, threading a single cross-group progress
+       bar and accounting. The bar shows total packages processed
+       (across every build group), the group counter, and live
+       counts of each outcome so the user can see at a glance how
+       many are built vs. cached vs. failing to build vs. skipped
+       because a dep failed. *)
+    let total_pkgs_estimate =
+      List.fold_left
+        (fun acc (_, _, _, pkgs) -> acc + List.length pkgs)
+        0 solutions
+    in
+    let counters =
+      object
+        val mutable ok = 0
+        val mutable cached = 0
+        val mutable build_failed = 0
+        val mutable dep_failed = 0
+        val mutable cur_group = 0
+        val mutable cur_pkg = ""
+        method ok = ok
+        method cached = cached
+        method build_failed = build_failed
+        method dep_failed = dep_failed
+        method set_group g = cur_group <- g
+        method set_pkg p = cur_pkg <- p
+        method incr_ok = ok <- ok + 1
+        method incr_cached = cached <- cached + 1
+        method incr_build_failed = build_failed <- build_failed + 1
+        method incr_dep_failed = dep_failed <- dep_failed + 1
+        method status =
+          Fmt.str "groups %d/%d  ok:%d cached:%d fail:%d dep:%d  %s" cur_group
+            n_groups ok cached build_failed dep_failed cur_pkg
+      end
+    in
+    let make_reporter report =
+      Oi.Execute.
+        {
+          pkg_event =
+            (fun e ->
+              (match e with
+              | Started { pkg; _ } -> counters#set_pkg pkg
+              | Cached _ -> counters#incr_cached
+              | Built _ -> counters#incr_ok
+              | Build_failed { pkg; log } ->
+                  counters#incr_build_failed;
+                  Progress.interject_with (fun () ->
+                      Fmt.epr "  %a %s → %s@."
+                        Fmt.(styled (`Fg `Red) string)
+                        "FAIL" pkg log)
+              | Install_failed { pkg; log } ->
+                  counters#incr_build_failed;
+                  Progress.interject_with (fun () ->
+                      Fmt.epr "  %a %s (install) → %s@."
+                        Fmt.(styled (`Fg `Red) string)
+                        "FAIL" pkg log)
+              | Dep_failed _ -> counters#incr_dep_failed);
+              let delta =
+                match e with
+                | Started _ -> 0
+                | Cached _ | Built _ | Build_failed _ | Install_failed _
+                | Dep_failed _ ->
+                    1
+              in
+              report (delta, counters#status));
+        }
+    in
+    let progress_config = Progress.Config.v ~persistent:false () in
+    let progress_bar =
+      let open Progress.Line in
+      pair ~sep:(const " ")
+        (list [ spinner (); brackets (count_to total_pkgs_estimate) ])
+        (rpad 80 string)
+    in
+    let in_progress_reporter f =
+      if dry_run then f None
+      else
+        Progress.with_reporter ~config:progress_config progress_bar (fun rep ->
+            f (Some (make_reporter rep)))
+    in
+    in_progress_reporter @@ fun reporter ->
     List.iteri
       (fun gi (group_solutions, _) ->
-        let group_targets_list = List.concat_map fst group_solutions in
+        counters#set_group (gi + 1);
+        let group_targets_list =
+          List.concat_map (fun (t, _, _, _) -> t) group_solutions
+        in
         let group_targets = String.concat ", " group_targets_list in
         List.iter
           (fun t -> Hashtbl.replace target_group t gi)
@@ -3220,7 +3476,7 @@ let registry_build_cmd =
         let seen = Hashtbl.create 256 in
         let merged_pkgs =
           List.concat_map
-            (fun (_, pkgs) ->
+            (fun (_, _, _, pkgs) ->
               List.filter
                 (fun pkg ->
                   let key = OpamPackage.to_string pkg in
@@ -3232,11 +3488,19 @@ let registry_build_cmd =
                 pkgs)
             group_solutions
         in
+        (* Reuse the scoped packages_dirs the solve used for this
+           group so planning / topo-sort / exec-plan see exactly the
+           same overlays as the solver did. *)
+        let pkg_dirs =
+          match group_solutions with
+          | (_, _, d, _) :: _ -> d
+          | [] -> base_packages_dirs
+        in
         let group_ctx =
-          Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs ~conf
+          Oi.Opam_ctx.create ~prefix:build_prefix ~packages_dirs:pkg_dirs ~conf
         in
         let sorted_pkgs =
-          Oi.Solve.topo_sort ~packages_dirs group_ctx merged_pkgs
+          Oi.Solve.topo_sort ~packages_dirs:pkg_dirs group_ctx merged_pkgs
         in
         if n_groups > 1 then
           Log.info (fun m ->
@@ -3245,7 +3509,7 @@ let registry_build_cmd =
         else
           Log.info (fun m -> m "%d unique packages" (List.length sorted_pkgs));
         let build_plan =
-          Oi.Action.plan group_ctx ~d10 ~packages_dirs sorted_pkgs
+          Oi.Action.plan group_ctx ~d10 ~packages_dirs:pkg_dirs sorted_pkgs
         in
         let count_by f =
           List.length (List.filter f (Oi.Action.nodes build_plan))
@@ -3270,35 +3534,76 @@ let registry_build_cmd =
         else begin
           Log.info (fun m -> m "%d to build, %d cached" n_build n_cached);
           let exec_plan =
-            Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
+            Oi.Plan.create group_ctx ~packages_dirs:pkg_dirs ~cache_root ~os_key
               ~ocaml_version:conf.ocaml_version build_plan
           in
-          let build_outcome : [ `Ok | `Fail of string ] =
+          (* After the build, any package in this group's plan whose
+             layer hash is in [failed_layers] with a non-empty path
+             either failed directly (its own build log) or inherited
+             a log from a failed upstream dep (cascaded). Dedup by
+             log path so a single upstream failure doesn't produce N
+             repeated summary lines for its dependents. *)
+          let collect_failures (exec_plan : Oi.Plan.t) =
+            let seen = Hashtbl.create 16 in
+            List.concat_map
+              (fun (g : Oi.Plan.group) ->
+                List.filter_map
+                  (fun (p : Oi.Plan.package_plan) ->
+                    match Hashtbl.find_opt failed_layers p.layer_hash with
+                    | Some path
+                      when path <> "" && not (Hashtbl.mem seen path) ->
+                        Hashtbl.replace seen path ();
+                        Some (p.pkg, path)
+                    | _ -> None)
+                  g.packages)
+              exec_plan.groups
+          in
+          let build_outcome
+              : [ `Ok
+                | `Fail of string * (string * string) list ] =
             if n_build = 0 then `Ok
             else begin
               let build_plan =
-                fetch_remote_layers ?jobs ~remote ~d10 ~packages_dirs
-                  ~ctx:group_ctx ~pkgs:sorted_pkgs build_plan
+                fetch_remote_layers ?jobs ~remote ~d10
+                  ~packages_dirs:pkg_dirs ~ctx:group_ctx ~pkgs:sorted_pkgs
+                  build_plan
               in
+              let exec_plan_ref = ref None in
               try
                 let exec_plan =
-                  Oi.Plan.create group_ctx ~packages_dirs ~cache_root ~os_key
-                    ~ocaml_version:conf.ocaml_version build_plan
+                  Oi.Plan.create group_ctx ~packages_dirs:pkg_dirs
+                    ~cache_root ~os_key ~ocaml_version:conf.ocaml_version
+                    build_plan
                 in
+                exec_plan_ref := Some exec_plan;
                 let cache_urls = cache_urls_of ~cache ~remote in
-                Oi.Execute.run ~cache_urls ?jobs ~proc_mgr ~fs
+                Oi.Execute.run ~cache_urls ?jobs ~failed_layers ?reporter
+                  ~proc_mgr ~fs
                   ~clock:(clock :> D10.Config.clk)
                   ~sys ~os_key exec_plan;
                 `Ok
               with
-              | Oi.Error.E e -> `Fail (Fmt.str "%a" Oi.Error.pp e)
-              | Failure msg -> `Fail msg
+              | Oi.Error.E e ->
+                  let failures =
+                    match !exec_plan_ref with
+                    | Some p -> collect_failures p
+                    | None -> []
+                  in
+                  `Fail (Fmt.str "%a" Oi.Error.pp e, failures)
+              | Failure msg ->
+                  let failures =
+                    match !exec_plan_ref with
+                    | Some p -> collect_failures p
+                    | None -> []
+                  in
+                  `Fail (msg, failures)
             end
           in
           Hashtbl.replace group_results gi
             (match build_outcome with
             | `Ok -> `Ok (n_pkgs, n_build, n_cached)
-            | `Fail msg -> `Fail (n_pkgs, n_build, n_cached, msg));
+            | `Fail (msg, failures) ->
+                `Fail (n_pkgs, n_build, n_cached, msg, failures));
           (* Write-side mirror: run unconditionally so binary-cached
              layers whose tarballs still live in opam's download-cache
              from an earlier run also get promoted. [record] is a
@@ -3306,9 +3611,30 @@ let registry_build_cmd =
           record_sources_to_mirror ~sys ~cache exec_plan
         end)
       groups;
-    if not dry_run then
+    if not dry_run then begin
       print_build_summary ~targets ~target_handle ~solve_failures ~target_group
-        ~group_results
+        ~group_results;
+      (* Point at any fetch-retry logs collected during the run so
+         the user can investigate transient errors (git fetch
+         failures, opam archive 500s) without them polluting the
+         live output. *)
+      let logs_dir = cache_root / "build" / "logs" in
+      if Sys.file_exists logs_dir then begin
+        let entries =
+          try
+            Sys.readdir logs_dir |> Array.to_list
+            |> List.filter (fun n -> String.starts_with ~prefix:"fetch-" n)
+            |> List.sort String.compare
+          with Sys_error _ -> []
+        in
+        if entries <> [] then begin
+          Fmt.pr "@.%a (%d):@."
+            Fmt.(styled `Faint string)
+            "transient fetch errors" (List.length entries);
+          List.iter (fun e -> Fmt.pr "  %s@." (logs_dir / e)) entries
+        end
+      end
+    end
   in
   let targets =
     Arg.(

@@ -39,30 +39,44 @@ type t = {
 }
 
 (* Scan a packages directory and load all opam files into a map *)
+(* Process-wide cache for [load_opams_from_dir]. Reading and parsing
+   every opam file under the default opam-repository's [packages/] tree
+   (~25k files) takes seconds; when a single [oi registry build --all]
+   run builds hundreds of [Opam_ctx.t]s (one per solve group) the same
+   dirs get reparsed hundreds of times. Caching by absolute path keeps
+   the work O(unique dirs) instead of O(groups × unique dirs). *)
+let load_cache : (string, OpamFile.OPAM.t OpamPackage.Map.t) Hashtbl.t =
+  Hashtbl.create 8
+
 let load_opams_from_dir dir =
-  let opams = ref OpamPackage.Map.empty in
-  if Sys.file_exists dir then
-    Array.iter
-      (fun name_s ->
-        let name_dir = dir / name_s in
-        if Sys.is_directory name_dir then
-          Array.iter
-            (fun pkg_s ->
-              let pkg_dir = name_dir / pkg_s in
-              let opam_path = pkg_dir / "opam" in
-              if Sys.file_exists opam_path then
-                try
-                  let opam =
-                    OpamFile.OPAM.read
-                      (OpamFile.make (OpamFilename.raw opam_path))
-                  in
-                  let pkg = OpamPackage.of_string pkg_s in
-                  opams := OpamPackage.Map.add pkg opam !opams
-                with _ ->
-                  Log.debug (fun m -> m "Could not parse %s" opam_path))
-            (Sys.readdir name_dir))
-      (Sys.readdir dir);
-  !opams
+  match Hashtbl.find_opt load_cache dir with
+  | Some m -> m
+  | None ->
+      let opams = ref OpamPackage.Map.empty in
+      if Sys.file_exists dir then
+        Array.iter
+          (fun name_s ->
+            let name_dir = dir / name_s in
+            if Sys.is_directory name_dir then
+              Array.iter
+                (fun pkg_s ->
+                  let pkg_dir = name_dir / pkg_s in
+                  let opam_path = pkg_dir / "opam" in
+                  if Sys.file_exists opam_path then
+                    try
+                      let opam =
+                        OpamFile.OPAM.read
+                          (OpamFile.make (OpamFilename.raw opam_path))
+                      in
+                      let pkg = OpamPackage.of_string pkg_s in
+                      opams := OpamPackage.Map.add pkg opam !opams
+                    with _ ->
+                      Log.debug (fun m -> m "Could not parse %s" opam_path))
+                (Sys.readdir name_dir))
+          (Sys.readdir dir);
+      let m = !opams in
+      Hashtbl.add load_cache dir m;
+      m
 
 let _global_state :
     OpamStateTypes.unlocked OpamStateTypes.global_state option ref =

@@ -157,7 +157,20 @@ let resolve_plan ctx ~packages_dirs ~cache_root ~os_key:_ action_plan =
               OpamFilter.commands env (OpamFile.OPAM.install opam)
               |> List.filter_map (function [] -> None | cmd -> Some cmd)
             in
-            let build_dir = cache_root / "build" / "_build" / pkg_s in
+            (* Suffix the build dir with the short layer hash so two
+               overlays that pin the same [name.version] to different
+               upstream URLs (or with different deps/options) don't
+               clash on one [_build/<pkg>] directory. The layer hash
+               already folds in URL, commit, deps, patches, OS key and
+               build flags, so sharing a dir implies genuinely
+               interchangeable inputs. [install_file] lives under
+               [build_dir] so it inherits the uniqueness automatically. *)
+            let short_hash =
+              String.sub layer_hash 0 (min 12 (String.length layer_hash))
+            in
+            let build_dir =
+              cache_root / "build" / "_build" / (pkg_s ^ "-" ^ short_hash)
+            in
             let name_s = OpamPackage.Name.to_string (OpamPackage.name pkg) in
             let install_file = build_dir / (name_s ^ ".install") in
             let env = Opam_ctx.compilation_env ctx opam in
