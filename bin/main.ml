@@ -297,6 +297,61 @@ let split_handle_prefix s =
           Some (handle, pkg_spec)
         end
 
+(* Strip [@handle/pkg] prefixes out of a list of tokens. Each hit
+   routes [handle] into [with_repos], replaces the token with its
+   stripped form, and records a {!handle_pin} so the caller can
+   pin the package to the overlay's version.
+
+   Shared between run, plan, and anything else that solves for a
+   caller-supplied list of targets. Returns
+   [(stripped_tokens, updated_with_repos, handle_pins)]. *)
+let extract_handle_pins ~with_repos tokens =
+  let acc_repos = ref with_repos in
+  let acc_pins = ref [] in
+  let stripped =
+    List.map
+      (fun t ->
+        match split_handle_prefix t with
+        | None -> t
+        | Some (h, pkg_spec) ->
+            let pkg, user_constr = OpamFormula.atom_of_string pkg_spec in
+            acc_repos := !acc_repos @ [ h ];
+            acc_pins := !acc_pins @ [ { handle = h; pkg; user_constr } ];
+            pkg_spec)
+      tokens
+  in
+  (stripped, !acc_repos, !acc_pins)
+
+(* Turn a list of {!handle_pin}s into an [= VERSION] constraint map
+   suitable for merging into the solver's [constraints] argument. A
+   handle_pin without an explicit user constraint gets pinned to the
+   highest version the overlay ships. [cli_extras] is the caller's
+   [--with-repo] extras (including any handles just appended by
+   {!extract_handle_pins}); it needs to be fully materialised on disk
+   before this runs so the overlay's [packages/] tree is readable. *)
+let handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras handle_pins =
+  if handle_pins = [] then OpamPackage.Name.Map.empty
+  else
+    let overlay_pkg_dirs =
+      Oi.Repo.ensure_extra ~fs ~data_dir ~refresh cli_extras
+    in
+    List.fold_left
+      (fun acc { handle; pkg; user_constr } ->
+        match user_constr with
+        | Some c -> OpamPackage.Name.Map.add pkg c acc
+        | None -> (
+            let pkg_s = OpamPackage.Name.to_string pkg in
+            match latest_version_in_dirs ~pkg:pkg_s overlay_pkg_dirs with
+            | None ->
+                Oi.Error.config_error
+                  "overlay %s does not provide a package named %s" handle pkg_s
+            | Some v ->
+                log_overlay "pinning %s = %s from overlay %s" pkg_s v handle;
+                OpamPackage.Name.Map.add pkg
+                  (`Eq, OpamPackage.Version.of_string v)
+                  acc))
+      OpamPackage.Name.Map.empty handle_pins
+
 (* Merge CLI [--with-repo] URLs and project-declared extras. Project
    extras win on a name collision (CLI URLs are synthesised names and
    cannot collide with a user-chosen name unless the user picked an
@@ -958,50 +1013,26 @@ let run_cmd =
     let conf = make_conf ~platform in
     let remote = remote_of_registry registry in
     let dune_cache_root = Oi.Cache.dune_root cache in
-    (* [TARGET] accepts a "@handle/pkg[constraint]" shortcut that
-       pulls the corresponding overlay (and its transitive overlays)
-       into the solver set. The prefix is stripped; the remainder is
-       treated as a package (not a binary), so [@samoht/irmin] solves
-       and installs the [irmin] package from samoht's overlay rather
-       than going through the binary-name index. The bare package
-       name becomes the [TARGET] used for the final [bin/<name>]
-       lookup; any version constraint is passed to the solver via
-       [--with]. *)
-    (* Pull [@handle/pkg] out of a spec string and collect it as a
-       pin. Shared between the TARGET and the [--with] fold below so
-       both inputs accept the same shortcut syntax. *)
-    let extract_handle_pin spec =
-      match split_handle_prefix spec with
-      | None -> (None, spec)
+    (* [TARGET] and every [--with] token accept the
+       [@handle/pkg[constraint]] shortcut. The handle is routed into
+       [with_repos] so the overlay joins the solve; the stripped
+       package spec takes its place; each handle_pin is then pinned
+       to the overlay's version below. For [TARGET] the bare package
+       name is also the final [bin/<name>] lookup, so we unpack the
+       target's pin separately. *)
+    let target, with_repos, with_deps, target_pin =
+      match split_handle_prefix target with
+      | None -> (target, with_repos, with_deps, None)
       | Some (h, pkg_spec) ->
           let pkg, user_constr = OpamFormula.atom_of_string pkg_spec in
-          (Some { handle = h; pkg; user_constr }, pkg_spec)
-    in
-    (* TARGET shortcut: the stripped package name becomes the bare
-       TARGET used for the final [bin/<name>] lookup, the full spec
-       is passed through [--with], and the handle is appended to
-       [with_repos]. *)
-    let target, with_repos, with_deps, target_pin =
-      match extract_handle_pin target with
-      | None, _ -> (target, with_repos, with_deps, None)
-      | Some pin, pkg_spec ->
-          ( OpamPackage.Name.to_string pin.pkg,
-            with_repos @ [ pin.handle ],
+          let pin = { handle = h; pkg; user_constr } in
+          ( OpamPackage.Name.to_string pkg,
+            with_repos @ [ h ],
             with_deps @ [ pkg_spec ],
             Some pin )
     in
-    (* [--with] tokens accept the same shortcut syntax. The opam atom
-       parser rejects "@avsm/owntracks-cli" directly because [@] and
-       [/] aren't valid in package names, so we split before handing
-       off. *)
-    let with_repos, with_deps, with_pins =
-      List.fold_left
-        (fun (repos, deps, pins) w ->
-          match extract_handle_pin w with
-          | None, _ -> (repos, deps @ [ w ], pins)
-          | Some pin, pkg_spec ->
-              (repos @ [ pin.handle ], deps @ [ pkg_spec ], pins @ [ pin ]))
-        (with_repos, [], []) with_deps
+    let with_deps, with_repos, with_pins =
+      extract_handle_pins ~with_repos with_deps
     in
     (* URL-projects in [--with=…]: clone each URL into the pin cache,
        scan its *.opam files, and merge the contribution as pins +
@@ -1040,28 +1071,7 @@ let run_cmd =
        the subsequent solve reuses the same clone. *)
     let handle_pins = Stdlib.Option.to_list target_pin @ with_pins in
     let handle_constraints =
-      if handle_pins = [] then OpamPackage.Name.Map.empty
-      else
-        let overlay_pkg_dirs =
-          Oi.Repo.ensure_extra ~fs ~data_dir ~refresh cli_extras
-        in
-        List.fold_left
-          (fun acc { handle; pkg; user_constr } ->
-            match user_constr with
-            | Some c -> OpamPackage.Name.Map.add pkg c acc
-            | None -> (
-                let pkg_s = OpamPackage.Name.to_string pkg in
-                match latest_version_in_dirs ~pkg:pkg_s overlay_pkg_dirs with
-                | None ->
-                    Oi.Error.config_error
-                      "overlay %s does not provide a package named %s" handle
-                      pkg_s
-                | Some v ->
-                    log_overlay "pinning %s = %s from overlay %s" pkg_s v handle;
-                    OpamPackage.Name.Map.add pkg
-                      (`Eq, OpamPackage.Version.of_string v)
-                      acc))
-          OpamPackage.Name.Map.empty handle_pins
+      handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras handle_pins
     in
     let extra_constraints =
       OpamPackage.Name.Map.union
@@ -1420,6 +1430,18 @@ let plan_cmd =
     ignore (get_packages_dirs ~fs ~sys ~data_dir ~refresh ());
     let conf = make_conf ~platform in
     let cwd_s, _ = resolved_cwd fs in
+    (* Accept [@handle/pkg] in both positional targets and [--with]
+       tokens. The handle is routed into [with_repos]; the stripped
+       package spec replaces the original token; any bare [@handle/pkg]
+       without an explicit version is later pinned to the overlay's
+       latest via [handle_pin_constraints]. *)
+    let targets, with_repos, target_pins =
+      extract_handle_pins ~with_repos targets
+    in
+    let with_deps, with_repos, with_pins =
+      extract_handle_pins ~with_repos with_deps
+    in
+    let handle_pins = target_pins @ with_pins in
     let extra_deps, url_project =
       materialize_with_deps ~fs ~sys ~cache ~refresh with_deps
     in
@@ -1433,10 +1455,9 @@ let plan_cmd =
     let project_pins = project_pins @ url_project.pins in
     let project_overlays = project_overlays @ url_project.overlays in
     let with_repos = project_overlays @ with_repos in
+    let cli_extras = cli_extra_repos ~fs ~sys with_repos in
     let all_extras =
-      merge_extras
-        ~cli:(cli_extra_repos ~fs ~sys with_repos)
-        ~project:project_extras
+      merge_extras ~cli:cli_extras ~project:project_extras
     in
     let extra_pkg_dirs =
       Oi.Repo.ensure_extra ~fs ~data_dir ~refresh all_extras
@@ -1448,6 +1469,14 @@ let plan_cmd =
       @ get_packages_dirs ~fs ~sys ~data_dir ()
     in
     let extra_constraints = Oi.Script.constraints extra_deps in
+    let handle_constraints =
+      handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras handle_pins
+    in
+    let extra_constraints =
+      OpamPackage.Name.Map.union
+        (fun a _ -> a)
+        handle_constraints extra_constraints
+    in
     let extra_names =
       List.filter_map
         (fun (d : Oi.Script.dep) ->
@@ -2464,7 +2493,7 @@ let clean_cmd =
           ~doc:
             "Print the items that would be removed and their sizes, but do \
              not delete anything."
-          [ "dry-run"; "n" ])
+          [ "n"; "dry-run" ])
   in
   let info =
     Cmd.info "clean" ~doc:"Free up disk space by deleting cached data"
@@ -2521,9 +2550,9 @@ let clean_cmd =
       const run $ log_term $ cache_dir_term $ data_dir_term $ all $ toolchains
       $ sources $ binaries $ dune_cache $ repos $ dry_run)
 
-(* -- registry show ------------------------------------------------------- *)
+(* -- registry list ------------------------------------------------------- *)
 
-let registry_show_cmd =
+let registry_list_cmd =
   let run () cache_dir _data_dir target =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
@@ -2658,28 +2687,32 @@ let registry_show_cmd =
     Arg.(
       value
       & pos 0 (some string) None
-      & info ~docv:"PACKAGE" ~doc:"Package name to inspect (omit for overview)"
+      & info ~docv:"PKG"
+          ~doc:
+            "Name of a single cached package to inspect. When omitted, \
+             the command prints an overview of every package in the \
+             cache."
           [])
   in
   let info =
-    Cmd.info "show"
-      ~doc:"Summarise what's in the local cache of pre-built packages"
+    Cmd.info "list"
+      ~doc:"List the pre-built packages in the local cache"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "$(b,oi registry show) reports the state of the local cache of \
-             pre-built packages. With no argument it prints a summary: the \
-             number of cached packages, the total disk used, and any \
-             packages that failed to build and are being retained so you \
-             can inspect them. It is a quick sanity check before a big \
-             build or publication.";
+            "$(b,oi registry list) reports the state of the local cache \
+             of pre-built packages. With no argument it prints a \
+             summary: the number of cached packages, the total disk \
+             used, and any packages that failed to build and are being \
+             retained for inspection. Use it as a quick sanity check \
+             before a big build or publication.";
           `P
-            "Pass a $(b,PACKAGE) name to drill into a specific entry. The \
-             output then lists every cached version of that package, the \
-             build hash for each, the direct dependencies that were \
-             compiled into it, and the files it installed into its \
-             prefix.";
+            "Pass a $(b,PKG) name to drill into a specific entry. The \
+             output then lists every cached version of that package, \
+             the build hash for each, the direct dependencies that \
+             were compiled into it, and the files it installed into \
+             its prefix.";
         ]
   in
   Cmd.v info
@@ -4187,7 +4220,7 @@ let registry_docker_cmd =
   let src_context =
     Arg.(
       value & opt string "."
-      & info ~docv:"PATH"
+      & info ~docv:"DIR"
           ~doc:
             "Path to the $(b,oi) source tree, relative to the Docker \
              build context. Defaults to the context root."
@@ -4468,7 +4501,7 @@ let registry_cmd =
              This group of commands inspects and manages both sides of \
              that arrangement.";
           `P
-            "Most users only need $(b,oi registry show) to inspect the \
+            "Most users only need $(b,oi registry list) to inspect the \
              local cache. The $(b,build) and $(b,export) subcommands \
              come in when you are running your own registry for a team \
              or a set of machines. The $(b,mirror) subgroup handles the \
@@ -4477,7 +4510,7 @@ let registry_cmd =
   in
   Cmd.group info
     [
-      registry_show_cmd;
+      registry_list_cmd;
       registry_index_cmd;
       registry_export_cmd;
       registry_build_cmd;
