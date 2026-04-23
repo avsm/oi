@@ -529,12 +529,12 @@ let count_on_disk_layers ~os_layer_dir =
         0 entries
 
 (* Ensure the local index exists and is not stale. A stale index is
-   the common cause of [oi which] missing a just-built layer: the
-   index is built once when [oi which] / [oi run] first needs it, but
+   the common cause of [oi search] missing a just-built layer: the
+   index is built once when [oi search] / [oi run] first needs it, but
    subsequent builds store layers on disk without touching it. Cheap
    staleness check: compare [layers/<os_key>/] directory count with
    the row count in the index. A mismatch triggers a full rebuild.
-   Call before any index query in oi run / oi which. *)
+   Call before any index query in oi run / oi search. *)
 let ensure_local_index ~sys ~fs ~clock ~cache ~os_key =
   let layers_dir = Oi.Cache.root_s cache / "layers" / os_key in
   let index_path = layers_dir / "index.db" in
@@ -1640,63 +1640,351 @@ let env_cmd =
 
 (* -- init ---------------------------------------------------------------- *)
 
-(* -- which --------------------------------------------------------------- *)
+(* -- search -------------------------------------------------------------- *)
 
-let which_cmd =
-  let run () cache_dir registry long pattern =
+(* Glob match with [*] wildcard. Used for package-name filtering in
+   [oi search]; binary-name filtering goes through SQL's [LIKE] inside
+   [D10.Index]. *)
+let glob_matches ~pattern name =
+  if not (String.contains pattern '*') then pattern = name
+  else
+    let segs = String.split_on_char '*' pattern in
+    let anchored_start = not (String.starts_with ~prefix:"*" pattern) in
+    let anchored_end = not (String.ends_with ~suffix:"*" pattern) in
+    let rec walk pos = function
+      | [] -> true
+      | [ last ] ->
+          if anchored_end then
+            String.ends_with ~suffix:last name
+            && String.length name - String.length last >= pos
+          else
+            let _ = last in
+            true
+      | "" :: rest -> walk pos rest
+      | seg :: rest -> (
+          let rec find_from start =
+            if start + String.length seg > String.length name then None
+            else if
+              String.sub name start (String.length seg) = seg
+            then Some start
+            else find_from (start + 1)
+          in
+          match find_from pos with
+          | None -> false
+          | Some i when anchored_start && pos = 0 && i <> 0 -> false
+          | Some i -> walk (i + String.length seg) rest)
+    in
+    walk 0 (List.filter (fun s -> s <> "") segs)
+    && (not anchored_start
+       || List.hd segs = ""
+       || String.starts_with ~prefix:(List.hd segs) name)
+
+(* Scan every [repos/overlay-<h>-<v>/packages/] tree under [data_dir]
+   for package names matching [pattern]. Returns a list of
+   [(handle, version_tag, pkg_name, pkg_version)] rows, one per
+   [<name>/<name.version>/opam] found. [version_tag] is the overlay
+   version that the clone was pinned at.
+
+   Keeping every version here lets the caller pick latest-per-
+   (overlay, name) or expose all with [--all-versions]. *)
+let scan_declared_packages ~data_dir ~pattern ~overlay_filter =
+  let repos = data_dir / "repos" in
+  if not (Sys.file_exists repos) then []
+  else
+    let entries = Sys.readdir repos |> Array.to_list in
+    let rows = ref [] in
+    List.iter
+      (fun entry ->
+        if String.starts_with ~prefix:"overlay-" entry then
+          (* Parse overlay-<handle>-<version>. The version always
+             matches [YYYYMMDD.N] so it contains no dashes; the
+             handle is everything between "overlay-" and the last
+             dash. *)
+          let rest =
+            String.sub entry (String.length "overlay-")
+              (String.length entry - String.length "overlay-")
+          in
+          match String.rindex_opt rest '-' with
+          | None -> ()
+          | Some i ->
+              let handle = String.sub rest 0 i in
+              let version = String.sub rest (i + 1) (String.length rest - i - 1) in
+              let keep =
+                match overlay_filter with
+                | [] -> true
+                | xs -> List.mem handle xs
+              in
+              if keep then
+                let pkgs_dir = repos / entry / "packages" in
+                if Sys.file_exists pkgs_dir then
+                  Array.iter
+                    (fun name ->
+                      if glob_matches ~pattern name then
+                        let name_dir = pkgs_dir / name in
+                        if Sys.is_directory name_dir then
+                          Array.iter
+                            (fun pkg_s ->
+                              match OpamPackage.of_string_opt pkg_s with
+                              | None -> ()
+                              | Some p ->
+                                  let v =
+                                    OpamPackage.Version.to_string
+                                      (OpamPackage.version p)
+                                  in
+                                  rows := (handle, version, name, v) :: !rows)
+                            (Sys.readdir name_dir))
+                    (Sys.readdir pkgs_dir))
+      entries;
+    List.rev !rows
+
+(* Rank of a search-result state. Used to collapse redundant rows
+   for the same (kind, overlay, name, version): if a package is
+   built locally AND declared in the overlay, we keep [Local] and
+   drop [Declared]. *)
+type state = Local | Remote | Declared
+
+let state_rank = function Local -> 0 | Remote -> 1 | Declared -> 2
+let state_label = function
+  | Local -> "local"
+  | Remote -> "remote"
+  | Declared -> "declared"
+
+let state_styled st =
+  let style =
+    match st with Local -> `Green | Remote -> `Cyan | Declared -> `Yellow
+  in
+  Fmt.str "%a" Fmt.(styled style string) (state_label st)
+
+(* Latest version per key, or every version when [all_versions] is set.
+   Versions are compared via [OpamPackage.Version.compare]. *)
+let trim_to_latest ~all_versions rows key version =
+  if all_versions then rows
+  else
+    let by_key = Hashtbl.create 32 in
+    List.iter
+      (fun r ->
+        let k = key r in
+        let v = version r in
+        match Hashtbl.find_opt by_key k with
+        | None -> Hashtbl.replace by_key k r
+        | Some prev when
+            OpamPackage.Version.compare
+              (OpamPackage.Version.of_string v)
+              (OpamPackage.Version.of_string (version prev))
+            > 0 ->
+            Hashtbl.replace by_key k r
+        | Some _ -> ())
+      rows;
+    Hashtbl.fold (fun _ r acc -> r :: acc) by_key []
+
+(* One row of search output. Same shape for [bin] and [pkg] kinds so the
+   caller can print them in a single uniform table. *)
+type search_row = {
+  kind : [ `Bin | `Pkg ];
+  overlay : string; (* "@handle" or "-" *)
+  binary : string option; (* filled for [Bin]; [None] for [Pkg] *)
+  pkg_name : string;
+  pkg_version : string;
+  state : state;
+  hash : string option; (* present for Local / Remote, absent for Declared *)
+}
+
+let search_cmd =
+  let run () data_dir cache_dir registry all_versions overlay_filter long
+      pattern =
     with_error_handling @@ fun () ->
     with_eio_root @@ fun env _sw ->
     let _proc_mgr, fs, clock, sys, _platform, os_key, cache =
       bootstrap env cache_dir
     in
+    (* Accept [@handle/PATTERN] as a shortcut for
+       [--overlay=handle PATTERN]. Combines with any [--overlay] flags
+       the user already passed. *)
+    let pattern, overlay_filter =
+      match split_handle_prefix pattern with
+      | None -> (pattern, overlay_filter)
+      | Some (h, rest) -> (rest, h :: overlay_filter)
+    in
     let clk = (clock :> D10.Config.clk) in
     let index_path = ensure_local_index ~sys ~fs ~clock:clk ~cache ~os_key in
-    (* Merge remote index *)
     (match ensure_remote_index ~sys ~fs ~cache ~os_key ~registry with
     | Some remote_path -> merge_remote_into_local ~index_path ~remote_path
     | None -> ());
     let db = D10.Index.open_ ~path:index_path in
-    let results = D10.Index.search_binary db ~pattern ~os_key in
-    if results = [] then begin
-      Fmt.pr "No binaries matching %s@." pattern;
-      D10.Index.close db
-    end
-    else begin
-      (* Determine which hashes are available locally *)
-      let d10 : D10.Config.t =
-        { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
-      in
-      let short h = String.sub h 0 (min 12 (String.length h)) in
+    let d10 : D10.Config.t =
+      { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
+    in
+    let overlay_of = function
+      | None -> "-"
+      | Some (h, _) ->
+          if overlay_filter <> [] && not (List.mem h overlay_filter) then
+            "-" (* shouldn't happen after later filter, but defensive *)
+          else "@" ^ h
+    in
+    (* Binary matches from the index. Each hit emits one [Bin] row. *)
+    let bin_rows =
+      List.map
+        (fun (bin, pkg_name, pkg_ver, hash, overlay) ->
+          let st =
+            if D10.Layer.succeeded d10 ~hash then Local else Remote
+          in
+          {
+            kind = `Bin;
+            overlay = overlay_of overlay;
+            binary = Some bin;
+            pkg_name;
+            pkg_version = pkg_ver;
+            state = st;
+            hash = Some hash;
+          })
+        (D10.Index.search_binary db ~pattern ~os_key)
+    in
+    (* Built-package matches from the index. *)
+    let pkg_built_rows =
+      List.map
+        (fun (pkg_name, pkg_ver, hash, overlay) ->
+          let st =
+            if D10.Layer.succeeded d10 ~hash then Local else Remote
+          in
+          {
+            kind = `Pkg;
+            overlay = overlay_of overlay;
+            binary = None;
+            pkg_name;
+            pkg_version = pkg_ver;
+            state = st;
+            hash = Some hash;
+          })
+        (D10.Index.search_package db ~pattern ~os_key)
+    in
+    (* Declared-package matches scanned from overlay clones. *)
+    let pkg_declared_rows =
+      scan_declared_packages ~data_dir ~pattern ~overlay_filter
+      |> List.map (fun (handle, _ov_version, name, version) ->
+             {
+               kind = `Pkg;
+               overlay = "@" ^ handle;
+               binary = None;
+               pkg_name = name;
+               pkg_version = version;
+               state = Declared;
+               hash = None;
+             })
+    in
+    (* Apply overlay filter everywhere. The [@default] tag sits on the
+       base opam-repository clone, so passing [--overlay=default] keeps
+       base-repo rows. *)
+    let filter_by_overlay rows =
+      match overlay_filter with
+      | [] -> rows
+      | xs ->
+          List.filter
+            (fun r ->
+              let h =
+                if String.length r.overlay > 1 && r.overlay.[0] = '@' then
+                  String.sub r.overlay 1 (String.length r.overlay - 1)
+                else r.overlay
+              in
+              List.mem h xs)
+            rows
+    in
+    let all_rows =
+      filter_by_overlay bin_rows
+      @ filter_by_overlay pkg_built_rows
+      @ filter_by_overlay pkg_declared_rows
+    in
+    (* Collapse redundant rows for the same package: a locally built
+       package also appears as a [Declared] row from the overlay scan;
+       keep the strongest state ([Local] > [Remote] > [Declared]). *)
+    let strongest_per_key =
+      let by_key = Hashtbl.create 32 in
       List.iter
-        (fun (binary, pkg_name, pkg_ver, hash, overlay) ->
-          let source =
-            if D10.Layer.succeeded d10 ~hash then
-              Fmt.str "%a" Fmt.(styled `Green string) "local"
-            else Fmt.str "%a" Fmt.(styled `Cyan string) "remote"
+        (fun r ->
+          let k =
+            (r.kind, r.overlay, r.pkg_name, r.pkg_version, r.binary)
           in
-          let overlay_s =
-            match overlay with
-            | None -> "-"
-            | Some (h, v) -> Fmt.str "%s.%s" h v
+          match Hashtbl.find_opt by_key k with
+          | None -> Hashtbl.replace by_key k r
+          | Some prev
+            when state_rank r.state < state_rank prev.state ->
+              Hashtbl.replace by_key k r
+          | Some _ -> ())
+        all_rows;
+      Hashtbl.fold (fun _ r acc -> r :: acc) by_key []
+    in
+    (* Collapse to latest version per (kind, overlay, name, binary)
+       unless [--all-versions]. *)
+    let displayed =
+      trim_to_latest ~all_versions strongest_per_key
+        (fun r -> (r.kind, r.overlay, r.pkg_name, r.binary))
+        (fun r -> r.pkg_version)
+    in
+    (* Stable ordering for readable output: bins first, then pkgs,
+       alphabetic by name, version descending. *)
+    let sorted =
+      List.sort
+        (fun a b ->
+          let c =
+            match (a.kind, b.kind) with
+            | `Bin, `Pkg -> -1
+            | `Pkg, `Bin -> 1
+            | _ -> 0
           in
-          Fmt.pr "%-20s %-24s %-20s %-12s (%s)@." binary
-            (Fmt.str "%s.%s" pkg_name pkg_ver)
-            overlay_s (short hash) source;
-          if long then begin
-            let deps = D10.Index.deps db ~hash in
-            if deps = [] then
-              Fmt.pr "  %a@." Fmt.(styled `Faint string) "(no deps)"
+          if c <> 0 then c
+          else
+            let c = String.compare a.pkg_name b.pkg_name in
+            if c <> 0 then c
             else
-              List.iter
-                (fun (dep_name, dep_ver, dep_hash) ->
-                  Fmt.pr "  %a %s.%s@."
-                    Fmt.(styled `Faint string)
-                    (short dep_hash) dep_name dep_ver)
-                deps
-          end)
-        results;
-      D10.Index.close db
-    end
+              let c =
+                match (a.binary, b.binary) with
+                | Some x, Some y -> String.compare x y
+                | None, Some _ -> 1
+                | Some _, None -> -1
+                | None, None -> 0
+              in
+              if c <> 0 then c
+              else
+                OpamPackage.Version.compare
+                  (OpamPackage.Version.of_string b.pkg_version)
+                  (OpamPackage.Version.of_string a.pkg_version))
+        displayed
+    in
+    if sorted = [] then
+      Fmt.pr "No matches for %s@." pattern
+    else begin
+      let short_hash = function
+        | None -> ""
+        | Some h -> String.sub h 0 (min 12 (String.length h))
+      in
+      List.iter
+        (fun r ->
+          let kind_s = match r.kind with `Bin -> "bin" | `Pkg -> "pkg" in
+          let nv =
+            match r.binary with
+            | Some b -> Fmt.str "%s (%s.%s)" b r.pkg_name r.pkg_version
+            | None -> Fmt.str "%s.%s" r.pkg_name r.pkg_version
+          in
+          Fmt.pr "%-4s %-14s %-48s %-12s %s@." kind_s r.overlay nv
+            (short_hash r.hash) (state_styled r.state);
+          if long then
+            match r.hash with
+            | None -> ()
+            | Some h ->
+                let deps = D10.Index.deps db ~hash:h in
+                if deps = [] then
+                  Fmt.pr "  %a@." Fmt.(styled `Faint string) "(no deps)"
+                else
+                  List.iter
+                    (fun (dep_name, dep_ver, dep_hash) ->
+                      Fmt.pr "  %a %s.%s@."
+                        Fmt.(styled `Faint string)
+                        (String.sub dep_hash 0
+                           (min 12 (String.length dep_hash)))
+                        dep_name dep_ver)
+                    deps)
+        sorted
+    end;
+    D10.Index.close db
   in
   let pattern =
     Arg.(
@@ -1704,57 +1992,87 @@ let which_cmd =
       & pos 0 (some string) None
       & info ~docv:"PATTERN"
           ~doc:
-            "The binary name to look up. The $(b,*) character is a wildcard, \
-             so $(b,ocaml*) matches every binary whose name starts with \
-             $(b,ocaml) and $(b,*format*) matches anything containing \
-             $(b,format)."
+            "The name or glob to search for. The $(b,*) character is a \
+             wildcard. Matching is against binary names and opam package \
+             names. Prefix with $(b,@HANDLE/) to restrict the search to a \
+             single overlay without passing $(b,--overlay) separately."
           [])
+  in
+  let all_versions =
+    Arg.(
+      value & flag
+      & info
+          ~doc:
+            "List every cached version of each match. By default only the \
+             latest version per overlay is shown."
+          [ "all-versions" ])
+  in
+  let overlay =
+    Arg.(
+      value & opt_all string []
+      & info ~docv:"HANDLE"
+          ~doc:
+            "Restrict results to an overlay. May be given more than once \
+             to include several overlays. Equivalent to the \
+             $(b,@HANDLE/PATTERN) shorthand."
+          [ "overlay" ])
   in
   let long =
     Arg.(
       value & flag
       & info
           ~doc:
-            "Also print the direct dependencies of each matching build, \
-             giving the name, version, and a short hash for every one. This \
-             is the easiest way to tell two otherwise identical-looking \
-             results apart when the same package appears at the same \
-             version with different dependency closures."
+            "For built matches, print the direct dependencies of each \
+             result. Declared-only rows have no build and therefore no \
+             dependency list."
           [ "l"; "long" ])
   in
   let info =
-    Cmd.info "which" ~doc:"Find which opam package ships a given binary"
+    Cmd.info "search"
+      ~doc:"Find binaries and opam packages across caches and overlays"
       ~man:
         [
           `S Manpage.s_description;
           `P
-            "$(b,oi which) searches the local cache and the configured \
-             remote registry for any opam package that installs a binary \
-             matching $(b,PATTERN). The name may contain $(b,*) wildcards. \
-             Use it when you remember a command but not the package that \
-             ships it, or to check whether a tool is already available \
-             without triggering a build.";
+            "$(b,oi search) looks up $(b,PATTERN) in every source that \
+             $(b,oi) knows about and prints one row per match. The \
+             sources are the local layer cache, the configured remote \
+             registry, and the package lists declared by every overlay \
+             in the reporepo. Use it when you remember a name but not \
+             where it lives, or to check whether a tool is available \
+             before triggering a build.";
           `P
-            "Each result is printed on one line with the binary name, the \
-             package and version that ships it, its overlay tag, a short \
-             build hash, and whether the match came from the local cache or \
-             the remote registry.";
+            "Each row has five columns. $(b,KIND) is $(b,bin) for a \
+             binary name or $(b,pkg) for an opam package. $(b,OVERLAY) \
+             is the $(b,@handle) the match was pulled from, or $(b,-) \
+             for pin-depends and pre-tagging layers. $(b,NAME.VERSION) \
+             describes the match; a $(b,bin) row includes the binary \
+             name followed by the package it rides in. The short hash \
+             identifies the build. $(b,STATE) is one of $(b,local) (in \
+             the local cache), $(b,remote) (available to pull from the \
+             registry), or $(b,declared) (the overlay ships the opam \
+             metadata but no build is known).";
           `P
-            "The same package can appear more than once if it has been \
-             built against different dependency versions. Each distinct \
-             build has its own hash. Pass $(b,-l) or $(b,--long) to see the \
-             direct dependencies of each match, which makes it obvious \
-             which build to prefer.";
+            "By default only the latest version of each match is shown. \
+             Pass $(b,--all-versions) to list every cached and declared \
+             version. Filter to a single overlay with $(b,--overlay=HANDLE), \
+             or use the $(b,@HANDLE/PATTERN) shortcut at the end of the \
+             command line. Pass $(b,-l) to list the direct dependencies \
+             of each built match; this is the easiest way to \
+             distinguish two builds of the same version that differ only \
+             in their dependency closure.";
           `Pre
-            "  oi which dune\n\
-            \  oi which -l jsont\n\
-            \  oi which 'ocaml*'\n\
-            \  oi which '*fmt*'";
+            "  oi search dune\n\
+            \  oi search 'ocaml*'\n\
+            \  oi search @avsm/irmin\n\
+            \  oi search --overlay=avsm --overlay=default 'fmt*'\n\
+            \  oi search --all-versions -l jsont";
         ]
   in
   Cmd.v info
     Term.(
-      const run $ log_term $ cache_dir_term $ registry_term $ long $ pattern)
+      const run $ log_term $ data_dir_term $ cache_dir_term $ registry_term
+      $ all_versions $ overlay $ long $ pattern)
 
 (* -- tool installation --------------------------------------------------- *)
 
@@ -2765,15 +3083,15 @@ let registry_index_cmd =
           `S Manpage.s_description;
           `P
             "$(b,oi) maintains a small SQLite database next to the cache \
-             that maps every installed binary to the package that \
-             provides it. The database is what makes $(b,oi which) and \
-             the binary-name lookup in $(b,oi run) fast. This command \
-             rebuilds the database from scratch by walking every cached \
-             package.";
+             that maps every installed binary and cached package back to \
+             the layer that provides it. The database is what makes \
+             $(b,oi search) and the binary-name lookup in $(b,oi run) \
+             fast. This command rebuilds the database from scratch by \
+             walking every cached package.";
           `P
             "A rebuild is not needed in normal use. Run it if $(b,oi \
-             which) starts missing a binary that you know is cached, or \
-             after editing the cache directory by hand.";
+             search) starts missing a result that you know is cached, \
+             or after editing the cache directory by hand.";
         ]
   in
   Cmd.v info Term.(const run $ log_term $ cache_dir_term)
@@ -2935,7 +3253,7 @@ let registry_export_cmd =
             "The index records the overlay handle and version that \
              produced each layer, so clients that want to scope to a \
              specific overlay can query the index directly. There is no \
-             separate per-overlay tree to fetch. Use $(b,oi which) \
+             separate per-overlay tree to fetch. Use $(b,oi search) \
              against the published registry to see what overlays it \
              covers.";
           `P
@@ -5371,8 +5689,11 @@ let () =
           `Pre
             "  oi run @avsm/owntracks\n\
             \  oi run --with=@avsm/crockford roguedoi";
-          `P "Find which package ships a given binary:";
-          `Pre "  oi which dune\n  oi which 'ocaml*'";
+          `P "Find a binary or package across every source $(b,oi) knows about:";
+          `Pre
+            "  oi search dune\n\
+            \  oi search 'ocaml*'\n\
+            \  oi search @avsm/irmin";
           `P "Preview without actually doing anything:";
           `Pre "  oi plan utop\n  oi run -n utop";
           `S "COMMAND CATEGORIES";
@@ -5392,10 +5713,10 @@ let () =
                needs." );
           `I
             ( "$(b,Checking what's going on)",
-              "$(b,plan) shows the build plan. $(b,which) finds \
-               which package ships a binary. $(b,config) reports \
-               the platform, cache directories, project state, \
-               and dev-tool probes." );
+              "$(b,plan) shows the build plan. $(b,search) finds \
+               a binary or package across caches and overlays. \
+               $(b,config) reports the platform, cache directories, \
+               project state, and dev-tool probes." );
           `I
             ( "$(b,Sharing builds and managing disk)",
               "$(b,registry) manages the pre-built package cache \
@@ -5461,7 +5782,7 @@ let () =
         run_cmd;
         add_cmd;
         exec_cmd;
-        which_cmd;
+        search_cmd;
         plan_cmd;
         sync_cmd;
         env_cmd;

@@ -72,6 +72,17 @@ val search_binary :
     SQL [LIKE %]). Results are sorted by binary name then opam version
     descending. *)
 
+val search_package :
+  db ->
+  pattern:string ->
+  os_key:string ->
+  (string * string * string * (string * string) option) list
+(** [search_package db ~pattern ~os_key] searches for built packages whose
+    name matches [pattern], returning
+    [(package_name, package_version, layer_hash, overlay)]. Pattern matching
+    and the [overlay] field have the same semantics as {!search_binary}.
+    Results are sorted by package name then opam version descending. *)
+
 val deps : db -> hash:string -> (string * string * string) list
 (** [deps db ~hash] returns the direct dependencies of a layer as
     [(dep_name, dep_version, dep_hash)]. *)

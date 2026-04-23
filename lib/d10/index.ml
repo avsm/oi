@@ -276,6 +276,39 @@ let find_binary db ~binary ~os_key =
         (OpamPackage.Version.of_string v1))
     (List.rev !results)
 
+let search_package db ~pattern ~os_key =
+  let results = ref [] in
+  let some_if_set s = if s = "" then None else Some s in
+  let cb row =
+    match row with
+    | [| name; version; hash; oh; ov |] ->
+        let overlay =
+          match (some_if_set oh, some_if_set ov) with
+          | Some h, Some v -> Some (h, v)
+          | _ -> None
+        in
+        results := (name, version, hash, overlay) :: !results
+    | _ -> ()
+  in
+  let sql_pattern = String.map (fun c -> if c = '*' then '%' else c) pattern in
+  let op = if String.contains sql_pattern '%' then "LIKE" else "=" in
+  ignore
+    (Sqlite3.exec_not_null_no_headers db ~cb
+       (Fmt.str
+          "SELECT package_name, package_ver, hash, \
+           COALESCE(overlay_handle, ''), COALESCE(overlay_version, '') FROM \
+           layers WHERE package_name %s %s AND os_key = %s AND exit_status = 0"
+          op (quote sql_pattern) (quote os_key)));
+  List.sort
+    (fun (n1, v1, _, _) (n2, v2, _, _) ->
+      let c = String.compare n1 n2 in
+      if c <> 0 then c
+      else
+        OpamPackage.Version.compare
+          (OpamPackage.Version.of_string v2)
+          (OpamPackage.Version.of_string v1))
+    (List.rev !results)
+
 let search_binary db ~pattern ~os_key =
   let results = ref [] in
   let some_if_set s = if s = "" then None else Some s in
