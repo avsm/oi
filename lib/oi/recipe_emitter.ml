@@ -101,30 +101,38 @@ let opam_build_env_extras = [ "OCAMLFIND_LDCONF=ignore" ]
 let standard_system_path =
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-(* PATH gets special treatment: keep oi-controlled entries (anything
-   under [cache_root]), replace the rest with [standard_system_path]. *)
-let scrub_path ~cache_root entry =
+(* PATH gets special treatment: keep oi-controlled entries (anything under
+   [cache_root] or [toolchains_root] — the latter handles non-relocatable
+   toolchains whose [_opam/bin/] lives outside the per-cache tree), replace
+   the rest with [standard_system_path]. Without [toolchains_root] in the
+   allow-list a non-relocatable toolchain's [bin/] gets stripped from the
+   recipe's PATH and every build script that invokes [ocaml] / [dune] fails
+   with exit 127 inside the docker container, where [OI_CACHE_DIR=/cache]
+   but the toolchain lives under [~/.cache/oi/toolchains/]. *)
+let path_entry_oi_owned ~owned_prefixes p =
+  List.exists
+    (fun prefix ->
+      prefix <> ""
+      && String.length p >= String.length prefix
+      && String.sub p 0 (String.length prefix) = prefix)
+    owned_prefixes
+
+let scrub_path ~owned_prefixes entry =
   let prefix = "PATH=" in
   if not (String.length entry >= 5 && String.sub entry 0 5 = prefix) then entry
   else
     let value = String.sub entry 5 (String.length entry - 5) in
     let parts = String.split_on_char ':' value in
-    let oi_owned =
-      List.filter
-        (fun p ->
-          cache_root <> ""
-          && String.length p >= String.length cache_root
-          && String.sub p 0 (String.length cache_root) = cache_root)
-        parts
-    in
+    let oi_owned = List.filter (path_entry_oi_owned ~owned_prefixes) parts in
     "PATH=" ^ String.concat ":" (oi_owned @ [ standard_system_path ])
 
 let env_of_array ~cache_root env_array =
+  let owned_prefixes = [ cache_root; Cache.toolchains_root () ] in
   let kept =
     Array.to_list env_array
     |> List.filter (fun s -> String.contains s '=')
     |> List.filter env_entry_allowed
-    |> List.map (scrub_path ~cache_root)
+    |> List.map (scrub_path ~owned_prefixes)
   in
   let already key =
     let k = key ^ "=" in
