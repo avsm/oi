@@ -571,7 +571,8 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
   let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
   let _ : D10ir.Direct.result option =
     Oi.Build_pipeline.build pipeline_env ~reporter
-      { solved; layer_remote; source_remote; jobs; upload_archive_url = None }
+      { solved; layer_remote; source_remote; jobs; upload_archive_url = None;
+        archive_sources = false; snapshot_reporepo = false }
   in
   Oi.Build_pipeline.layer_hashes solved
 
@@ -1427,6 +1428,8 @@ type bucket_inputs = {
   extra_token_names : string list;
   pin_dir : string option;
   cache_root : string;
+  archive_sources : bool;
+  snapshot_reporepo : bool;
 }
 
 let bucket_req ~bi ~refresh ~override tgs : Oi.Build_pipeline.request =
@@ -1606,6 +1609,8 @@ let prepare_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~registry
       extra_token_names = List.map OpamPackage.Name.to_string extra_names;
       pin_dir;
       cache_root;
+      archive_sources = false;
+      snapshot_reporepo = false;
     }
   in
   (bi, buckets)
@@ -1649,6 +1654,8 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
         source_remote = bi.source_remote;
         jobs;
         upload_archive_url = upload_archive;
+        archive_sources = bi.archive_sources;
+        snapshot_reporepo = bi.snapshot_reporepo;
       }
   in
   record_build_results ~acc ~gi_offset solved result_opt;
@@ -1681,6 +1688,8 @@ type args = {
   save_d10ir : string option;
   dist : string option;
   upload_archive : string option;
+  archive_sources : bool;
+  snapshot_reporepo : bool;
   targets : string list;
 }
 
@@ -1691,7 +1700,7 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
     ~clock:(clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
     (fun ui_reporter ->
-      let bi, buckets =
+      let bi0, buckets =
         prepare_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform
           ~registry:args.registry ~use_registry:args.use_registry
           ~with_repos:args.with_repos ~with_deps:args.with_deps
@@ -1700,6 +1709,13 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
           ~ui_reporter ~proc_mgr ~clock ~os_key ~http_session ~acc
           ~all:args.all ~only:args.only ~skip:args.skip ~cache_root
           args.targets
+      in
+      let bi =
+        {
+          bi0 with
+          archive_sources = args.archive_sources;
+          snapshot_reporepo = args.snapshot_reporepo;
+        }
       in
       let gi_offset_ref = ref 0 in
       List.iter
@@ -1742,7 +1758,7 @@ let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform
 let mk_args refresh locked skip_local all only skip registry
     use_registry with_repos with_deps jobs toolchain_override depext_only
     export envrc_mode archives_only every_version save_d10ir dist
-    upload_archive targets =
+    upload_archive archive_sources snapshot_reporepo targets =
   {
     refresh = refresh && not locked;
     skip_local;
@@ -1764,6 +1780,8 @@ let mk_args refresh locked skip_local all only skip registry
     save_d10ir;
     dist;
     upload_archive;
+    archive_sources;
+    snapshot_reporepo;
     targets;
   }
 
@@ -1779,7 +1797,7 @@ let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
 let run (c : Terms.common) refresh locked skip_local all only skip
     registry use_registry with_repos with_deps jobs toolchain_override
     depext_only export envrc_mode archives_only every_version save_d10ir dist
-    upload_archive targets =
+    upload_archive archive_sources snapshot_reporepo targets =
   Harness.run @@ fun ~sw env ->
   let {
     Harness.proc_mgr;
@@ -1800,7 +1818,7 @@ let run (c : Terms.common) refresh locked skip_local all only skip
     mk_args refresh locked skip_local all only skip registry
       use_registry with_repos with_deps jobs toolchain_override depext_only
       export envrc_mode archives_only every_version save_d10ir dist
-      upload_archive targets
+      upload_archive archive_sources snapshot_reporepo targets
   in
   let project_mode, cwd_s =
     detect_project_mode ~fs ~skip_local:args.skip_local ~targets:args.targets
@@ -1917,13 +1935,38 @@ let upload_archive_arg =
     & info ~docv:"URL"
         ~doc:
           "After the build, mirror every freshly built layer to \
-           $(i,URL)/$(b,<os_key>/<hash>.tar.zst) (plus the matching \
-           $(b,.txt.zst) listing) via $(b,s3cmd put). Only layers actually \
-           built locally are uploaded — anything restored from the local \
-           cache or pulled from $(b,--use-registry) is skipped. Assumes a \
-           working $(b,~/.s3cfg). Typical use: \
+           $(i,URL)/$(b,<os_key>/layers/<hash>.tar.zst) plus its \
+           companion $(b,.json) manifest, every d10ir source-manifest \
+           sidecar to $(i,URL)/$(b,d10ir/<sha>.json), and the \
+           per-invocation build manifest to \
+           $(i,URL)/$(b,<os_key>/builds/...) via $(b,s3cmd put). \
+           Assumes a working $(b,~/.s3cfg). Typical use: \
            $(b,--upload-archive=s3://oiu/)."
         [ "upload-archive" ])
+
+let archive_sources_arg =
+  Arg.(
+    value & flag
+    & info ~doc:
+          "Also upload the consolidated source $(b,.tar.zst) tarballs \
+           to $(i,URL)/$(b,d10ir/<sha>.tar.zst) (in addition to the JSON \
+           sidecars). Default off: the sidecar's resolved $(b,commit_sha) \
+           + upstream URLs are enough for reproducibility while upstream \
+           git remotes remain alive. Flip on for self-contained, \
+           upstream-deletion-proof buckets."
+        [ "archive-sources" ])
+
+let snapshot_reporepo_arg =
+  Arg.(
+    value & flag
+    & info ~doc:
+          "After the build, tarball the local reporepo at the \
+           solve-time HEAD commit and PUT to \
+           $(i,URL)/$(b,reporepo/<commit>.tar.zst). Default off: a \
+           downstream consumer is expected to re-clone the reporepo \
+           from its own URL. Flip on when the reporepo is private and \
+           the bucket should be the canonical archival source."
+        [ "snapshot-reporepo" ])
 
 let cmd_info =
   Cmd.info "build" ~doc:"Build a project, package, overlay, or every overlay"
@@ -1967,7 +2010,8 @@ let cmd =
       $ Terms.use_registry $ Terms.with_repos $ Terms.with_deps $ Terms.jobs
       $ Terms.toolchain $ depext_only_arg $ export_arg $ Sync.envrc_mode_arg
       $ archives_only_arg $ every_version_arg $ save_d10ir_arg $ dist_arg
-      $ upload_archive_arg $ targets_arg)
+      $ upload_archive_arg $ archive_sources_arg $ snapshot_reporepo_arg
+      $ targets_arg)
 
 (* -- oi test ------------------------------------------------------------ *)
 

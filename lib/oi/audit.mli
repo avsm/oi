@@ -56,35 +56,48 @@ val event_codec : event Jsont.t
 
 val log_pointer_codec : log_pointer Jsont.t
 
-(** {1 Storage} *)
+val context_codec : context Jsont.t
+(** Exposed so {!Manifest_build} can embed it inside the per-invocation
+    build manifest. *)
+
+(** {1 Storage}
+
+    Events are staged to a per-invocation JSONL file under
+    [<cache>/registry-staging/<invocation_id>.events.jsonl] during the
+    run, then rolled into a build manifest at
+    [<cache>/registry/<os_key>/builds/<YYYY>/<MM>/<date>-<id>.json]
+    by {!Manifest_build.write} when the invocation finalises. *)
+
+val staging_path : cache_root:string -> invocation_id:string -> string
+(** [staging_path ~cache_root ~invocation_id] is the per-invocation
+    staging file path. *)
 
 val append : fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> event -> unit
 (** [append ~fs ~cache_root e] appends [e] as a single JSON line to
-    {!local_log_path}. Errors are logged and swallowed so logging failure cannot
-    abort the build. *)
+    {!staging_path} (keyed by [e.invocation_id]). Errors are logged and
+    swallowed so logging failure cannot abort the build. *)
 
 val read_all :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   cache_root:string ->
   os_key:string ->
   event list
-(** [read_all ~fs ~cache_root ~os_key] reads every line of {!local_log_path},
-    decodes, and filters by [os_key]. Lines that fail to decode are skipped with
-    a debug log. *)
+(** [read_all ~fs ~cache_root ~os_key] walks every build manifest under
+    [<cache>/registry/<os_key>/builds/] and returns all embedded events,
+    sorted by [event_id]. Replaces the legacy [audit.jsonl] reader. *)
 
-val exported_log_path : output_dir:string -> os_key:string -> string
-(** [exported_log_path ~output_dir ~os_key] is
-    [<output_dir>/<os_key>/audit.jsonl] — the registry-side per-os audit file
-    emitted by [oi build --export]. *)
+val read_staged : cache_root:string -> invocation_id:string -> event list
+(** [read_staged] returns the events written so far during a specific
+    invocation (i.e. that haven't been rolled into a build manifest yet).
+    Used by the finaliser. *)
 
-val write_per_os :
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  output_dir:string ->
-  os_key:string ->
-  event list ->
-  unit
-(** [write_per_os ~fs ~output_dir ~os_key events] writes [events] (sorted by
-    [event_id]) to {!exported_log_path} as jsonl. *)
+val delete_staged : cache_root:string -> invocation_id:string -> unit
+(** [delete_staged] removes the staging file for an invocation. Called
+    after [Manifest_build.write] succeeds. *)
+
+val staged_invocation_ids : cache_root:string -> string list
+(** [staged_invocation_ids] lists invocation IDs whose staging files
+    still exist. Used by the crash-recovery reaper. *)
 
 (** {1 IDs and helpers} *)
 

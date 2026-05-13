@@ -8,6 +8,8 @@ type remote = [ `Http_remote of string ]
 let archives_dir ~cache_root = cache_root / "d10ir" / "archives"
 let archive_path ~cache_root ~sha = archives_dir ~cache_root / (sha ^ ".tar.zst")
 
+let sidecar_path ~cache_root ~sha = archives_dir ~cache_root / (sha ^ ".json")
+
 let trim_trailing_slash s =
   let n = String.length s in
   if n > 0 && s.[n - 1] = '/' then String.sub s 0 (n - 1) else s
@@ -15,6 +17,10 @@ let trim_trailing_slash s =
 let url_of ~remote ~sha =
   let (`Http_remote base) = remote in
   Fmt.str "%s/d10ir-archives/%s.tar.zst" (trim_trailing_slash base) sha
+
+let sidecar_url_of ~remote ~sha =
+  let (`Http_remote base) = remote in
+  Fmt.str "%s/d10ir-archives/%s.json" (trim_trailing_slash base) sha
 
 (* In-process single-flight tracker keyed by sha. Two fibers asking for
    the same archive used to race on a shared tmp path: the loser would
@@ -57,6 +63,27 @@ end
 let sha256_of_file path =
   OpamHash.contents (OpamHash.compute ~kind:`SHA256 path)
 
+(* Best-effort sidecar fetch: companion to the [.tar.zst] download. The
+   [.json] sidecar records HOW the archive was assembled (upstream
+   URL, resolved commit_sha, extra_files, patches, substs) and is what
+   a future indexer walks to stitch binary provenance back to source.
+   Missing sidecars on the server are tolerated — old registries that
+   pre-date this scheme have only tarballs. *)
+let do_fetch_sidecar ~fs ~session ~cache_root ~remote ~sha =
+  let dst = sidecar_path ~cache_root ~sha in
+  if Sys.file_exists dst then ()
+  else
+    let dst_dir = archives_dir ~cache_root in
+    let tmp = Filename.temp_file ~temp_dir:dst_dir (sha ^ ".") ".json.tmp" in
+    let tmp_p = Eio.Path.(fs / tmp) in
+    let unlink_tmp () = try Eio.Path.unlink tmp_p with Eio.Exn.Io _ -> () in
+    let url = sidecar_url_of ~remote ~sha in
+    if D10.Sysops.Http.fetch_session session ~url ~dst:tmp_p then begin
+      try Eio.Path.rename tmp_p Eio.Path.(fs / dst)
+      with Eio.Exn.Io _ -> unlink_tmp ()
+    end
+    else unlink_tmp ()
+
 let do_fetch ~fs ~session ~cache_root ~remote ~sha ~dst =
   let dst_dir = archives_dir ~cache_root in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / dst_dir);
@@ -74,6 +101,7 @@ let do_fetch ~fs ~session ~cache_root ~remote ~sha ~dst =
     if actual = sha then begin
       (try Eio.Path.rename tmp_p Eio.Path.(fs / dst)
        with Eio.Exn.Io _ -> unlink_tmp ());
+      do_fetch_sidecar ~fs ~session ~cache_root ~remote ~sha;
       true
     end
     else begin

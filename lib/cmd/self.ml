@@ -325,7 +325,7 @@ let run_solve_build (b : build_inputs) =
         layer_remote = b.layer_remote;
         source_remote = b.source_remote;
         jobs = b.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved

@@ -108,7 +108,7 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
         layer_remote = c.layer_remote;
         source_remote = c.source_remote;
         jobs = c.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -560,7 +560,7 @@ let solve_and_build (i : run_inputs) (s : state) =
         layer_remote = s.layer_remote;
         source_remote = s.source_remote;
         jobs = i.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   check_sync_outcome ~solved ~build_result;

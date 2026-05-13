@@ -13,6 +13,37 @@ let ( / ) = Filename.concat
 let fetch_log_path_of ~cache_root ~(p : Plan.package_plan) =
   Cache.Logs.path ~cache_root ~kind:"fetch" ~name:p.pkg ~hash:p.layer_hash
 
+(* Public opam cache mirrors that serve content-addressed source
+   blobs by checksum at [<base>/{md5,sha256}/AB/AB1234.../<filename>].
+   Opam's [OpamRepository.pull_tree] tries every entry in [cache_urls]
+   ahead of the primary URL when the package has at least one
+   checksum recorded; for git pins (no checksums) the entries are
+   silently skipped. Used as a fallback when a primary fetch 404s —
+   useful particularly during [oi repo bump] for packages whose
+   upstream tarballs have gone away or moved.
+
+   Override via [OI_OPAM_CACHE_URLS] (comma-separated). Set to empty
+   to disable the fallback entirely. *)
+let default_opam_cache_urls =
+  [ "https://opam.ocaml.org/cache"; "https://opam.robur.coop/cache" ]
+
+let opam_cache_urls () =
+  match Sys.getenv_opt "OI_OPAM_CACHE_URLS" with
+  | None -> default_opam_cache_urls
+  | Some s ->
+      String.split_on_char ',' s
+      |> List.map String.trim
+      |> List.filter (( <> ) "")
+
+let merge_with_cache_fallback cache_urls =
+  let extra =
+    List.filter_map
+      (fun s ->
+        try Some (OpamUrl.parse ~handle_suffix:true s) with _ -> None)
+      (opam_cache_urls ())
+  in
+  cache_urls @ extra
+
 (* Render a [Source.Mirror.origin] for the "Fetching X from Y" log line.
    We can only tell for sure when the local mirror has the blob (a free
    filesystem check); for anything else opam's [pull_tree] resolves the
@@ -46,6 +77,7 @@ let do_fetch_source ~fs ~cache_root ~cache_urls (p : Plan.package_plan)
   let cache_dir =
     OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
   in
+  let cache_urls = merge_with_cache_fallback cache_urls in
   let origin = Source.Mirror.source_origin ~cache_urls ~checksums in
   Log.info (fun m ->
       m "Fetching %s from %s" p.pkg (describe_origin ~src_url:src.url origin));
@@ -91,6 +123,7 @@ let do_fetch_extra_source ~fs ~cache_root ~cache_urls (p : Plan.package_plan)
   let cache_dir =
     OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
   in
+  let cache_urls = merge_with_cache_fallback cache_urls in
   let origin = Source.Mirror.source_origin ~cache_urls ~checksums in
   Log.info (fun m ->
       m "Fetching extra source %s for %s from %s" name p.pkg

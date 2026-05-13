@@ -14,9 +14,6 @@ type slice = {
 let load_text fs path =
   try Some (Eio.Path.load Eio.Path.(fs / path)) with Eio.Exn.Io _ -> None
 
-let split_lines s =
-  String.split_on_char '\n' s |> List.filter (fun l -> l <> "")
-
 let load_manifest ~fs ~output_dir ~os_key =
   let path = output_dir / os_key / "logs" / "manifest.json" in
   match load_text fs path with
@@ -31,21 +28,13 @@ let load_manifest ~fs ~output_dir ~os_key =
           Log.debug (fun m -> m "manifest decode %s: %s" path msg);
           None)
 
-let decode_audit_line ~path line =
-  match
-    Jsont_bytesrw.decode_string ~locs:false ~file:path Audit.event_codec line
-  with
-  | Ok e -> Some e
-  | Error msg ->
-      Log.debug (fun m -> m "audit bad line %s: %s" path msg);
-      None
-
-let load_audit_events ~fs ~output_dir ~os_key =
-  let path = Audit.exported_log_path ~output_dir ~os_key in
-  match load_text fs path with
-  | None -> []
-  | Some content ->
-      split_lines content |> List.filter_map (decode_audit_line ~path)
+let load_audit_events ~fs:_ ~output_dir ~os_key =
+  (* Replaces the legacy [<output_dir>/<os_key>/audit.jsonl] read with a
+     walk over the new per-invocation build manifests. *)
+  let builds_root = Filename.concat (Filename.concat output_dir os_key) "builds" in
+  Manifest_build.read_all_at ~root:builds_root
+  |> List.concat_map (fun (m : Manifest_build.t) -> m.events)
+  |> List.sort (fun (a : Audit.event) b -> String.compare a.event_id b.event_id)
 
 let read_slice ~fs ~output_dir ~os_key =
   match load_manifest ~fs ~output_dir ~os_key with

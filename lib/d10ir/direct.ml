@@ -370,11 +370,14 @@ let store_layer ~d10 (n : Plan.node) ~staging ~files =
     |> List.filter (fun h -> D10.Layer.succeeded d10 ~hash:h)
   in
   let pkg_str = Fmt.str "%s.%s" n.package.name n.package.version in
-  let recipe_json = Plan.encode_node n in
+  (* Recipe info (script + env + substs) now ships inside the unified
+     layer manifest sidecar written by [Oi.Build_pipeline] — at
+     [<cache>/registry/<os_key>/layers/<hash>.json]. No need to write
+     a separate per-layer-dir [recipe.json] any more. *)
   D10.Layer.store d10
     ~hash:(Layer_hash.to_string n.layer_hash)
     ~prefix:staging ~files ~package:pkg_str ~deps:dep_hashes_str
-    ~parent_hashes:dep_hashes_str ~exit_status:0 ~recipe_json ()
+    ~parent_hashes:dep_hashes_str ~exit_status:0 ()
 
 let cleanup_staging ~fs ~(config : Config.t) staging build_dir =
   if not config.keep_staging then begin

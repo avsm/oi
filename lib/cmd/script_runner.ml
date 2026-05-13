@@ -53,7 +53,7 @@ let build_extra_deps_prefix ~sys ~fs ~proc_mgr ~clock ~os_key ~conf ~cache
         layer_remote = None;
         source_remote;
         jobs = None;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   Oi.Pipeline.assemble_prefix ~sys ~fs ~clock ~cache ~os_key

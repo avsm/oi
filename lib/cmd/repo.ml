@@ -645,6 +645,19 @@ module Bump = struct
      Returns (baked, failed) counts. [?on_baked] fires for each
      successful bake with the resulting sha + on-disk path, so callers
      can mirror the archive (e.g. [s3cmd put]) without re-walking. *)
+  (* A bake is "still current" only when both the [.tar.zst] AND its
+     [.json] sidecar exist locally for the recorded x-d10-archive sha.
+     If the sidecar is missing (e.g. archive pre-dates the
+     [Source_manifest] scheme), force a re-bake so the bake path
+     emits the missing JSON. The archive content is deterministic in
+     the inputs, so the re-bake produces the same sha. *)
+  let sidecar_present ~(d10 : D10.Config.t) ~sha =
+    let archives_dir =
+      Filename.concat (Eio.Path.native_exn d10.root)
+        (Filename.concat "d10ir" "archives")
+    in
+    Sys.file_exists (Filename.concat archives_dir (sha ^ ".json"))
+
   let bake_changed_archives ?on_baked ~proc_mgr ~fs ~d10 ~cache_root ~platform
       ~reporepo ~handle () =
     let baked = ref 0 in
@@ -652,7 +665,8 @@ module Bump = struct
     iter_handle_opams ~reporepo ~handle
       (fun ~pkg ~version ~pkg_dir ~opam_path ->
         match read_source_identity_and_sha opam_path with
-        | Some (_, Some _) -> () (* already has x-d10-archive *)
+        | Some (_, Some sha) when sidecar_present ~d10 ~sha -> ()
+            (* already has x-d10-archive AND a sidecar — nothing to do *)
         | _ -> (
             try
               let built =

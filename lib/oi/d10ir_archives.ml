@@ -94,8 +94,13 @@ let publish_files ~src ~dst names =
       else acc)
     zero_counts names
 
-(* Publish every [<sha>.tar.zst] under [<cache>/d10ir/archives/] into
-   [<output>/d10ir-archives/]. Idempotent on repeat invocations. *)
+(* Publish every [<sha>.tar.zst] and its sibling [<sha>.json] source
+   manifest under [<cache>/d10ir/archives/] into
+   [<output>/d10ir-archives/]. Idempotent on repeat invocations. The
+   [.json] sidecars are the unit a future indexer walks when stitching
+   binary provenance back to upstream source, so they MUST ship
+   alongside the tarballs (and unconditionally — see
+   [Oi.Source_manifest]). *)
 let publish_all ~cache ~output =
   let src = local_dir ~cache in
   if not (Sys.file_exists src) then zero_counts
@@ -104,7 +109,9 @@ let publish_all ~cache ~output =
     let entries =
       try
         Sys.readdir src |> Array.to_list
-        |> List.filter (fun n -> Filename.check_suffix n ".tar.zst")
+        |> List.filter (fun n ->
+               Filename.check_suffix n ".tar.zst"
+               || Filename.check_suffix n ".json")
       with Sys_error _ -> []
     in
     publish_files ~src ~dst entries

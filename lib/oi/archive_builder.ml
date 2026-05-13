@@ -243,10 +243,19 @@ let warn_archive_divergence ~p sha =
    source sha and the archive is locally present, reuse it directly. Missing
    archives fall through to the regular fetch path; the regenerated archive
    should hash to the same sha for deterministic builds. *)
+(* A cache hit requires BOTH [<sha>.tar.zst] AND [<sha>.json]. Missing
+   the sidecar forces a fall-through to the bake path so the bake
+   re-emits the JSON. Archives that pre-date the sidecar scheme would
+   otherwise stay sidecar-less forever — [archive_hit_for] returning
+   [None] when the sidecar is missing triggers a re-bake on the next
+   touch, which deterministically reproduces the same content sha and
+   writes the missing sidecar. *)
 let archive_hit_for ~d10 (p : Plan.package_plan) =
   Stdlib.Option.bind p.d10_archive (fun sha ->
-      let path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-      if Sys.file_exists path then Some (sha, path) else None)
+      let tar = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
+      let json = archives_dir ~d10 / Fmt.str "%s.json" sha in
+      if Sys.file_exists tar && Sys.file_exists json then Some (sha, tar)
+      else None)
 
 (* Source fetch + patch + extra-files + version-injection pipeline. Same
    sequence [Execute] runs for the live build, just up to tar time. *)
@@ -265,7 +274,32 @@ let prepare_build_dir ~fs ~cache_root ~cache_urls (p : Plan.package_plan) =
   ensure_dune_project_version ~build_dir:p.build_dir ~opam_version:pkg_version
     ~url_opt
 
-let bake_archive ~proc_mgr ~d10 (p : Plan.package_plan) =
+let pkg_name_version pkg_s =
+  match String.index_opt pkg_s '.' with
+  | None -> (pkg_s, "")
+  | Some i ->
+      ( String.sub pkg_s 0 i,
+        String.sub pkg_s (i + 1) (String.length pkg_s - i - 1) )
+
+let write_source_manifest_for_plan ~proc_mgr ~fs ~d10 (p : Plan.package_plan)
+    ~sha ~size =
+  let name, version = pkg_name_version p.pkg in
+  let overlay_handle =
+    Stdlib.Option.map (fun (o : D10.Overlay.t) -> o.handle) p.overlay
+  in
+  let overlay_version =
+    Stdlib.Option.bind p.overlay (fun (o : D10.Overlay.t) ->
+        if o.version = "" then None else Some o.version)
+  in
+  let m =
+    Source_manifest.make ~proc_mgr ~build_dir:p.build_dir ~name ~version
+      ?overlay_handle ?overlay_version ~sha256:sha ~size ~strip_components:0
+      ~source:p.source ~extra_sources:p.extra_sources
+      ~extra_files:p.extra_files ~patches:p.patches ~substs:p.substs ()
+  in
+  Source_manifest.write ~fs ~archives_dir:(archives_dir ~d10) m
+
+let bake_archive ~proc_mgr ~fs ~d10 (p : Plan.package_plan) =
   let layer_short =
     if String.length p.layer_hash >= 8 then String.sub p.layer_hash 0 8
     else p.layer_hash
@@ -275,8 +309,10 @@ let bake_archive ~proc_mgr ~d10 (p : Plan.package_plan) =
   tar_zst ~proc_mgr ~src_dir:p.build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
   warn_archive_divergence ~p sha;
+  let size = try (Unix.stat tmp_path).Unix.st_size with _ -> 0 in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
   install_or_drop_tmp ~tmp_path ~final_path;
+  write_source_manifest_for_plan ~proc_mgr ~fs ~d10 p ~sha ~size;
   Log.debug (fun m -> m "archive %s -> %s" p.pkg final_path);
   (sha, final_path)
 
@@ -298,7 +334,7 @@ let build ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10 ~cache_root
       }
   | None ->
       prepare_build_dir ~fs ~cache_root ~cache_urls p;
-      let sha, final_path = bake_archive ~proc_mgr ~d10 p in
+      let sha, final_path = bake_archive ~proc_mgr ~fs ~d10 p in
       {
         path = final_path;
         sha256 = sha;
@@ -471,9 +507,20 @@ let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
   (try Sys.remove tmp_path with Sys_error _ -> ());
   tar_zst ~proc_mgr ~src_dir:build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
+  let size = try (Unix.stat tmp_path).Unix.st_size with _ -> 0 in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
   install_or_drop_tmp ~tmp_path ~final_path;
-  (sha, final_path)
+  (sha, final_path, size)
+
+let write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size =
+  let name, version = pkg_name_version b.pkg in
+  let m =
+    Source_manifest.make ~proc_mgr ~build_dir:b.build_dir ~name ~version
+      ~sha256:sha ~size ~strip_components:0 ~source:b.source
+      ~extra_sources:b.extra_sources ~extra_files:b.extra_files
+      ~patches:b.patches ~substs:b.substs ()
+  in
+  Source_manifest.write ~fs ~archives_dir:(archives_dir ~d10) m
 
 let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
     ~cache_root ?(cache_urls = []) ~platform ~name ~version ~pkg_dir ~opam_path
@@ -493,9 +540,10 @@ let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
       opam_path
   in
   prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir ~version;
-  let sha, final_path =
+  let sha, final_path, size =
     bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir
   in
+  write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size;
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
   Log.debug (fun m -> m "no-solve bake %s -> %s" b.pkg final_path);
   {

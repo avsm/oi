@@ -197,26 +197,64 @@ let event_codec =
   |> Object.opt_mem "log" log_pointer_codec ~enc:(fun e -> e.log)
   |> Object.finish
 
-(* -- Storage ------------------------------------------------------------- *)
+(* -- Storage -------------------------------------------------------------
 
-let local_log_path ~cache_root = cache_root / "build" / "audit.jsonl"
+   Per-invocation staging: each [oi …] process appends single-line JSON
+   events to [<cache>/registry-staging/<invocation_id>.events.jsonl].
+   On clean exit, {!finalize} rolls the staging file into a build
+   manifest under [<cache>/registry/<os_key>/builds/<YYYY>/<MM>/]; on
+   crash, the next invocation's {!reap_orphans} finalises any orphaned
+   staging files as [crashed=true]. JSONL is the on-disk transient
+   format because POSIX [O_APPEND] gives atomic concurrent appends for
+   record sizes under [PIPE_BUF] (~4 KiB); the final S3-bound artifact
+   is a single pretty-printed JSON. *)
 
-let ensure_dir ~fs ~cache_root =
+let staging_dir ~cache_root = cache_root / "registry-staging"
+
+let staging_path ~cache_root ~invocation_id =
+  staging_dir ~cache_root / (invocation_id ^ ".events.jsonl")
+
+let ensure_staging_dir ~fs ~cache_root =
   try
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-      Eio.Path.(fs / cache_root / "build")
+      Eio.Path.(fs / staging_dir ~cache_root)
   with Eio.Exn.Io _ -> ()
 
-(* Encode the event as a single line of JSON (no pretty-printing) plus a
-   trailing newline, then append it to the audit file. POSIX guarantees
-   atomic writes for sizes below [PIPE_BUF] when the file is opened with
-   [O_APPEND]; a single event is well under 4 KiB, so concurrent appenders
-   from multiple [oi build] processes don't need explicit locking. *)
+let collect_dir dir =
+  try Sys.readdir dir |> Array.to_list with Sys_error _ -> []
+
+let reap_orphan_staging_files ~cache_root ~current =
+  let now = Unix.gettimeofday () in
+  let one_hour = 3600.0 in
+  let dir = staging_dir ~cache_root in
+  if Sys.file_exists dir then
+    collect_dir dir
+    |> List.iter (fun name ->
+           if Filename.check_suffix name ".events.jsonl" then
+             let inv = Filename.chop_suffix name ".events.jsonl" in
+             if inv <> current then
+               let path = dir / name in
+               match try Some (Unix.stat path).Unix.st_mtime with _ -> None with
+               | Some mtime when now -. mtime > one_hour ->
+                   (try Sys.remove path with Sys_error _ -> ())
+               | _ -> ())
+
+let reaper_done = ref false
+
+let maybe_reap ~cache_root =
+  if not !reaper_done then begin
+    reaper_done := true;
+    try reap_orphan_staging_files ~cache_root ~current:(invocation_id ())
+    with exn ->
+      Log.debug (fun m -> m "audit reap: %s" (Printexc.to_string exn))
+  end
+
 let append ~fs ~cache_root e =
-  let dst = local_log_path ~cache_root in
+  maybe_reap ~cache_root;
+  let dst = staging_path ~cache_root ~invocation_id:e.invocation_id in
   match Jsont_bytesrw.encode_string event_codec e with
   | Ok line -> (
-      ensure_dir ~fs ~cache_root;
+      ensure_staging_dir ~fs ~cache_root;
       let body = line ^ "\n" in
       try
         Eio.Path.save ~append:true ~create:(`If_missing 0o644)
@@ -227,47 +265,96 @@ let append ~fs ~cache_root e =
       )
   | Error msg -> Log.warn (fun m -> m "audit encode: %s" msg)
 
-(* -- Read --------------------------------------------------------------- *)
+(* -- Read --------------------------------------------------------------
+
+   Replaces the old single-jsonl reader: walks the rolled-up build
+   manifests under [<cache>/registry/<os_key>/builds/] and flattens out
+   every embedded event. Used by [oi cache], [oi show], and the legacy
+   [Manifest] / [Handle_report] aggregators. *)
 
 let split_lines s =
   String.split_on_char '\n' s |> List.filter (fun l -> l <> "")
 
-let decode_event_for ~os_key ~file line =
+let decode_event ~file line =
   match Jsont_bytesrw.decode_string ~locs:false ~file event_codec line with
-  | Ok e when e.os_key = os_key -> Some e
-  | Ok _ -> None
+  | Ok e -> Some e
   | Error msg ->
       Log.debug (fun m -> m "audit bad line: %s" msg);
       None
 
-let read_all ~(fs : Eio.Fs.dir_ty Eio.Path.t) ~cache_root ~os_key =
-  let p = local_log_path ~cache_root in
-  match
-    try Some (Eio.Path.load Eio.Path.(fs / p)) with Eio.Exn.Io _ -> None
-  with
-  | None -> []
-  | Some content ->
-      split_lines content |> List.filter_map (decode_event_for ~os_key ~file:p)
+let read_one_build ~os_key path =
+  if not (Filename.check_suffix path ".json") then []
+  else
+    try
+      let s = In_channel.with_open_text path In_channel.input_all in
+      (* Pull just the [events] array via a streaming codec would be
+         ideal; for now we let the full build manifest go through
+         [Jsont_bytesrw] and extract its events field. To avoid a hard
+         dependency cycle on [Manifest_build], we decode just the
+         [events] array via a minimal local codec. *)
+      let events_only =
+        let open Jsont in
+        Object.map ~kind:"build_events_only" (fun events os -> (events, os))
+        |> Object.mem "events" (list event_codec) ~dec_absent:[]
+             ~enc:(fun (es, _) -> es)
+        |> Object.mem "os_key" string ~enc:(fun (_, k) -> k)
+        |> Object.finish
+      in
+      match Jsont_bytesrw.decode_string ~locs:false ~file:path events_only s with
+      | Ok (events, k) when k = os_key -> events
+      | Ok _ -> []
+      | Error msg ->
+          Log.debug (fun m -> m "audit build bad %s: %s" path msg);
+          []
+    with exn ->
+      Log.debug (fun m ->
+          m "audit build read %s: %s" path (Printexc.to_string exn));
+      []
 
-(* -- Per-os export ------------------------------------------------------- *)
-
-let exported_log_path ~output_dir ~os_key = output_dir / os_key / "audit.jsonl"
-
-let write_per_os ~fs ~output_dir ~os_key events =
-  let dst = exported_log_path ~output_dir ~os_key in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-    Eio.Path.(fs / output_dir / os_key);
-  (* Sort by event_id (ULIDs are timestamp-prefixed so this also sorts by
-     time) for deterministic output across cross-host registry merges. *)
-  let body =
-    events
+let read_all ~(fs : _ Eio.Path.t) ~cache_root ~os_key =
+  ignore fs;
+  let root = cache_root / "layers" / os_key / "builds" in
+  if not (Sys.file_exists root) then []
+  else
+    collect_dir root
+    |> List.concat_map (fun y ->
+           let yd = root / y in
+           collect_dir yd
+           |> List.concat_map (fun m ->
+                  let md = yd / m in
+                  collect_dir md
+                  |> List.concat_map (fun e ->
+                         read_one_build ~os_key (md / e))))
     |> List.sort (fun a b -> String.compare a.event_id b.event_id)
-    |> List.filter_map (fun e ->
-        match Jsont_bytesrw.encode_string event_codec e with
-        | Ok line -> Some (line ^ "\n")
-        | Error msg ->
-            Log.debug (fun m -> m "per-os audit encode: %s" msg);
-            None)
-    |> String.concat ""
-  in
-  Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / dst) body
+
+(* Read all events written during this invocation (i.e. that still live
+   in the staging file). Used by {!finalize}. *)
+let read_staged ~cache_root ~invocation_id : event list =
+  let p = staging_path ~cache_root ~invocation_id in
+  if not (Sys.file_exists p) then []
+  else
+    try
+      let content = In_channel.with_open_text p In_channel.input_all in
+      split_lines content |> List.filter_map (decode_event ~file:p)
+    with exn ->
+      Log.debug (fun m ->
+          m "audit staged read %s: %s" p (Printexc.to_string exn));
+      []
+
+let delete_staged ~cache_root ~invocation_id =
+  try Sys.remove (staging_path ~cache_root ~invocation_id)
+  with Sys_error _ -> ()
+
+(* List orphan staging files (i.e. invocations from prior runs that
+   didn't get finalised cleanly). Caller passes them to [finalize] with
+   [crashed=true]. *)
+let staged_invocation_ids ~cache_root =
+  let dir = staging_dir ~cache_root in
+  if not (Sys.file_exists dir) then []
+  else
+    collect_dir dir
+    |> List.filter_map (fun name ->
+           if Filename.check_suffix name ".events.jsonl" then
+             Some (Filename.chop_suffix name ".events.jsonl")
+           else None)
+

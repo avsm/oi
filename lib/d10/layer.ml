@@ -269,6 +269,27 @@ let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir ~layer_dir
     end
   end
 
+(* Best-effort companion fetch for the layer-manifest sidecar JSON. The
+   sidecar lives at [<URL>/<os_key>/<hash>.json] and downloads into
+   [<cache>/layers/<os_key>/<hash>.json], next to the [<hash>/] layer
+   dir that [pull_remote] just published. Old registries that
+   pre-date the sidecar scheme have only tarballs, so any HTTP error
+   is silently swallowed. *)
+let fetch_layer_sidecar (c : Config.t) ~session ~remote ~hash =
+  let url =
+    match remote with
+    | `Http_remote base_url ->
+        Fmt.str "%s/%s/%s.json" base_url c.os_key hash
+  in
+  let os_layer_dir = Eio.Path.(c.root / "layers" / c.os_key) in
+  let dst = Eio.Path.(os_layer_dir / (hash ^ ".json")) in
+  let tmp = Eio.Path.(os_layer_dir / (hash ^ ".json.tmp")) in
+  if Sysops.file_exists dst then ()
+  else if Sysops.Http.fetch_session session ~url ~dst:tmp then
+    try Eio.Path.rename tmp dst
+    with Eio.Exn.Io _ -> (try Eio.Path.unlink tmp with Eio.Exn.Io _ -> ())
+  else try Eio.Path.unlink tmp with Eio.Exn.Io _ -> ()
+
 let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     ?sha256 () =
   if succeeded c ~hash then true
@@ -294,51 +315,18 @@ let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     let phase p = match on_phase with Some f -> f p | None -> () in
     phase Fetching;
     if Sysops.Http.fetch_session ?on_progress session ~url ~dst:tmp_file then
-      finalize_remote_layer c ~hash ~tmp_file ~staging_dir ~layer_dir ~sha256
-        ~phase
+      let ok =
+        finalize_remote_layer c ~hash ~tmp_file ~staging_dir ~layer_dir ~sha256
+          ~phase
+      in
+      if ok then fetch_layer_sidecar c ~session ~remote ~hash;
+      ok
     else begin
       (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
       false
     end
 
 (* -- Export -------------------------------------------------------------- *)
-
-let list_files_under root =
-  let root_s = Eio.Path.native_exn root in
-  let prefix_len = String.length root_s + 1 in
-  let files = ref [] in
-  let record_file path =
-    files :=
-      String.sub path prefix_len (String.length path - prefix_len) :: !files
-  in
-  let rec visit dir name =
-    let path = Filename.concat dir name in
-    if Sys.is_directory path then scan path else record_file path
-  and scan dir =
-    if Sys.file_exists dir && Sys.is_directory dir then
-      Array.iter (visit dir) (Sys.readdir dir)
-  in
-  scan root_s;
-  List.sort String.compare !files
-
-let write_file_listing (c : Config.t) ~hash ~os_dir =
-  let fs_dir = fs_path c ~hash in
-  if not (Sysops.file_exists fs_dir) then ()
-  else
-    let files = list_files_under fs_dir in
-    let content = String.concat "\n" files ^ "\n" in
-    let txt_tmp = Eio.Path.(os_dir / (hash ^ ".txt.tmp")) in
-    Eio.Path.save ~create:(`Or_truncate 0o644) txt_tmp content;
-    Sysops.Cmd.run c.sys
-      [
-        "zstd";
-        "-q";
-        "-f";
-        Eio.Path.native_exn txt_tmp;
-        "-o";
-        Eio.Path.native_exn Eio.Path.(os_dir / (hash ^ ".txt.zst"));
-      ];
-    try Eio.Path.unlink txt_tmp with Eio.Exn.Io _ -> ()
 
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
@@ -356,7 +344,6 @@ let export (c : Config.t) ~hash ~dst =
       (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
       Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:tmp_file;
       Eio.Path.rename tmp_file dst_file;
-      write_file_listing c ~hash ~os_dir;
       true
     end
 

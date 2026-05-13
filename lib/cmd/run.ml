@@ -529,7 +529,7 @@ let drive_solve_and_build ~ctx ~target ~req =
         layer_remote = ctx.layer_remote;
         source_remote = ctx.source_remote;
         jobs = ctx.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   interpret_build_result ~sys:ctx.sys ~fs:ctx.fs ~clock:ctx.clock
@@ -672,7 +672,7 @@ let script_solve ~ctx ~req ~target =
         layer_remote = ctx.layer_remote;
         source_remote = ctx.source_remote;
         jobs = ctx.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved

@@ -163,9 +163,52 @@ let try_decode ~fs ~path : t option =
         m "provenance read %s: %s" path (Printexc.to_string exn));
     None
 
+(* Path of the unified layer-manifest sidecar (the new home of the
+   [provenance] sub-object). Kept in sync with
+   [Manifest_layer.path_for]. We deliberately don't import
+   [Manifest_layer] here to keep [Provenance] free of the dependency
+   cycle that would create. *)
+let sidecar_path ~cache_root ~os_key ~hash =
+  cache_root / "layers" / os_key / (hash ^ ".json")
+
+(* Codec for "just the [provenance] field of a layer manifest", used
+   by the sidecar-fallback path below. The rest of the manifest is
+   ignored. *)
+let sidecar_provenance_codec =
+  let open Jsont in
+  Object.map ~kind:"layer_manifest_provenance" Fun.id
+  |> Object.opt_mem "provenance" codec ~enc:Fun.id
+  |> Object.finish
+
+let try_decode_from_sidecar ~fs ~path : t option =
+  try
+    let s = Eio.Path.load Eio.Path.(fs / path) in
+    match
+      Jsont_bytesrw.decode_string ~locs:false ~file:path
+        sidecar_provenance_codec s
+    with
+    | Ok r -> r
+    | Error e ->
+        Log.debug (fun m -> m "sidecar provenance bad %s: %s" path e);
+        None
+  with exn ->
+    Log.debug (fun m ->
+        m "sidecar provenance read %s: %s" path (Printexc.to_string exn));
+    None
+
+(* Read [provenance] for a single layer. Looks first at the legacy
+   per-layer [provenance.json] sidecar (still present in older caches)
+   and falls back to the unified [<cache>/registry/<os_key>/layers/<hash>.json]
+   sidecar that build_pipeline now writes. The legacy path will fade
+   out as users rebuild; new builds emit only the unified one. *)
 let read_one ~fs ~cache_root ~os_key ~hash =
   let p = path ~cache_root ~os_key ~hash in
-  if Eio.Path.is_file Eio.Path.(fs / p) then try_decode ~fs ~path:p else None
+  if Eio.Path.is_file Eio.Path.(fs / p) then try_decode ~fs ~path:p
+  else
+    let sp = sidecar_path ~cache_root ~os_key ~hash in
+    if Eio.Path.is_file Eio.Path.(fs / sp) then
+      try_decode_from_sidecar ~fs ~path:sp
+    else None
 
 let overlay_of_layer ~fs ~cache_root ~os_key ~hash =
   match read_one ~fs ~cache_root ~os_key ~hash with

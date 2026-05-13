@@ -59,6 +59,26 @@ val indexer_stamp : db -> os_key:string -> string option
     [None] when no rebuild has run for that platform yet (e.g. on a legacy
     [index.db] that pre-dates the [index_meta] table). *)
 
+(** {1 Layer-fs scanners}
+
+    Exposed so the [oi]-level layer manifest writer can reuse the same
+    findlib-meta parser the SQLite indexer uses, without duplicating the
+    META scanning logic. *)
+
+val parse_meta_file :
+  package_dir:string -> string -> (string * string option) list
+(** [parse_meta_file ~package_dir contents] parses a findlib [META] file
+    and returns [(findlib_pkg, archive_opt)] pairs — one for the top-level
+    [package_dir] package and one per nested [package "X" (...)] block. *)
+
+val scan_meta :
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  string ->
+  (string * string * string option) list
+(** [scan_meta ~fs fs_dir] walks every [<fs_dir>/lib/<dir>/META] and
+    returns [(package_dir, findlib_pkg, archive_opt)] triples for each
+    findlib subpackage declared in those files. *)
+
 (** {1 Indexing} *)
 
 val rebuild :

@@ -253,7 +253,7 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs
         layer_remote;
         source_remote;
         jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   (solved, result)

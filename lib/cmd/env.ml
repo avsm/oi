@@ -101,7 +101,7 @@ let build_oneshot_prefix (i : oneshot_inputs) =
         layer_remote = None;
         source_remote = None;
         jobs = i.jobs;
-        upload_archive_url = None;
+        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
       }
   in
   Oi.Pipeline.assemble_prefix ~sys ~fs ~clock ~cache ~os_key

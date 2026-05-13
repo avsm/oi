@@ -126,26 +126,111 @@ let write_manifest_file ~fs ~output ~os_key manifest =
       Oi.Say.field "manifest" "%d entry(ies) at %s" manifest.n_packages path
   | Error e -> Log.warn (fun m -> m "manifest encode failed: %s" e)
 
+let copy_file ~fs ~src ~dst =
+  let s = Eio.Path.load Eio.Path.(fs / src) in
+  let parent = Filename.dirname dst in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / parent);
+  Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / dst) s
+
+let copy_builds_subtree ~fs ~cache_root ~output ~os_key =
+  let src_root =
+    Filename.concat cache_root
+      (Filename.concat "layers" (Filename.concat os_key "builds"))
+  in
+  let dst_root =
+    Filename.concat output (Filename.concat os_key "builds")
+  in
+  if not (Sys.file_exists src_root) then 0
+  else
+    let n = ref 0 in
+    let rec walk rel =
+      let abs_src = if rel = "" then src_root else src_root / rel in
+      if Sys.is_directory abs_src then
+        Array.iter
+          (fun name ->
+            let rel' = if rel = "" then name else rel / name in
+            walk rel')
+          (try Sys.readdir abs_src with Sys_error _ -> [||])
+      else if Filename.check_suffix abs_src ".json" then begin
+        let dst = dst_root / rel in
+        copy_file ~fs ~src:abs_src ~dst;
+        incr n
+      end
+    in
+    walk "";
+    !n
+
+(* Copy [<cache>/layers/<os_key>/*.json] (the new layer manifests,
+   stored flat next to each [<hash>/] dir) into
+   [<output>/<os_key>/*.json] — alongside each
+   [<hash>.tar.zst] that [D10.Layer.export_all] writes. *)
+let copy_layer_manifests ~fs ~cache_root ~output ~os_key =
+  let src_root =
+    Filename.concat cache_root (Filename.concat "layers" os_key)
+  in
+  let dst_root = Filename.concat output os_key in
+  if not (Sys.file_exists src_root) then 0
+  else
+    let n = ref 0 in
+    let entries =
+      try Sys.readdir src_root |> Array.to_list with Sys_error _ -> []
+    in
+    List.iter
+      (fun name ->
+        (* Top-level [registry.json] is copied by its own helper; skip
+           the [builds/] subdir + the hash-named layer dirs; pick up
+           only [<hash>.json] sidecars. *)
+        if
+          Filename.check_suffix name ".json"
+          && name <> "registry.json"
+        then begin
+          let abs = src_root / name in
+          if (try (Unix.lstat abs).st_kind = Unix.S_REG with _ -> false) then begin
+            copy_file ~fs ~src:abs ~dst:(dst_root / name);
+            incr n
+          end
+        end)
+      entries;
+    !n
+
+(* Copy [<cache>/layers/<os_key>/registry.json] (the schema-version
+   pointer) into [<output>/<os_key>/registry.json]. *)
+let copy_registry_pointer ~fs ~cache_root ~output ~os_key =
+  let src =
+    Filename.concat cache_root
+      (Filename.concat "layers" (Filename.concat os_key "registry.json"))
+  in
+  if not (Sys.file_exists src) then false
+  else
+    let dst = Filename.concat output (Filename.concat os_key "registry.json") in
+    copy_file ~fs ~src ~dst;
+    true
+
 (* Manifest = Provenance ⨝ Audit. Provenance gives us one entry per
-   successfully committed layer with its content fields; the audit log
-   gives us a [callers[]] history per layer. Failed-build events that
-   have no corresponding layer surface as separate entries. *)
+   successfully committed layer with its content fields; the build
+   manifests under [registry/<os_key>/builds/] supply the [callers[]]
+   history. Failed-build events surface either as caller entries or as
+   the [outcome] field on the new layer manifest (P2). *)
 let write_manifest_and_audit ~fs ~cache_root ~output ~os_key =
   let provs = Oi.Provenance.read_all ~fs ~cache_root ~os_key in
   let events = Oi.Audit.read_all ~fs ~cache_root ~os_key in
-  if provs = [] && events = [] then ()
-  else begin
+  if provs <> [] || events <> [] then begin
     let manifest =
       Oi.Manifest.from_logs ~os_key ~exported_at:(Unix.gettimeofday ()) provs
         events
     in
-    write_manifest_file ~fs ~output ~os_key manifest;
-    if events <> [] then begin
-      Oi.Audit.write_per_os ~fs ~output_dir:output ~os_key events;
-      Oi.Say.field "audit" "%d event(s) at %s/audit.jsonl" (List.length events)
-        (output / os_key)
-    end
-  end
+    write_manifest_file ~fs ~output ~os_key manifest
+  end;
+  let n_layers = copy_layer_manifests ~fs ~cache_root ~output ~os_key in
+  if n_layers > 0 then
+    Oi.Say.field "layers.json" "%d layer manifest(s) at %s/<hash>.json"
+      n_layers (output / os_key);
+  let n_builds = copy_builds_subtree ~fs ~cache_root ~output ~os_key in
+  if n_builds > 0 then
+    Oi.Say.field "builds" "%d invocation manifest(s) at %s/builds/" n_builds
+      (output / os_key);
+  if copy_registry_pointer ~fs ~cache_root ~output ~os_key then
+    Oi.Say.field "registry" "%s/registry.json" (output / os_key)
 
 let run ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
   let d10 = Oi.Pipeline.d10 ~sys ~fs ~clock ~cache ~os_key in
