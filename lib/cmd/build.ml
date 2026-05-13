@@ -527,7 +527,7 @@ let print_dry_run_test_plan target_display =
 (* Overlay handles must flow through so [solve_uncached] can
    resolve them into [packages/] dirs — [extra_repos] alone
    isn't read by the per-group solve. *)
-let make_target_test_request ~names ~req_with_repos ~pins ~all_extras
+let target_test_request ~names ~req_with_repos ~pins ~all_extras
     ~extra_constraints ~toolchain ~conf ~local_packages_dir ~refresh :
     Oi.Build_pipeline.request =
   {
@@ -561,7 +561,7 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
       http_session = session }
   in
   let req =
-    make_target_test_request ~names ~req_with_repos ~pins ~all_extras
+    target_test_request ~names ~req_with_repos ~pins ~all_extras
       ~extra_constraints ~toolchain ~conf ~local_packages_dir ~refresh
   in
   Progress_ui.with_ui ~target
@@ -758,7 +758,7 @@ let mirror_archives ~fs ~cache ~label archives =
 (* Per-run accumulators populated inside [Progress_ui.with_ui] and read
    from the post-bar summary block on a clean terminal. Threaded by
    reference so the bucket loop can mutate as solves finish. *)
-type build_acc = {
+type acc = {
   mutable targets : string list;
   target_handle : (string, string) Hashtbl.t;
   solve_failures : (string, string * string) Hashtbl.t;
@@ -767,7 +767,7 @@ type build_acc = {
   mutable dist_mapping : (string * string * string) list;
 }
 
-let new_build_acc () =
+let new_acc () =
   {
     targets = [];
     target_handle = Hashtbl.create 16;
@@ -1429,7 +1429,7 @@ type bucket_inputs = {
   cache_root : string;
 }
 
-let make_bucket_req ~bi ~refresh ~override tgs : Oi.Build_pipeline.request =
+let bucket_req ~bi ~refresh ~override tgs : Oi.Build_pipeline.request =
   let bp_targets : Oi.Build_pipeline.target list =
     List.map
       (fun (toks, handles) : Oi.Build_pipeline.target ->
@@ -1549,7 +1549,7 @@ let materialise_handles_and_pins ~fs ~sys ~cache ~data_dir ~refresh tk =
   in
   Oi.Source.Pin.materialize ~fs ~sys ~cache ~refresh tk.url_project.pins
 
-let build_target_groups ~acc tk =
+let target_groups_of ~acc tk =
   let raw_target_groups =
     List.concat_map
       (expand_raw_target_group ~target_handle:acc.target_handle)
@@ -1582,7 +1582,7 @@ let prepare_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~registry
   let pin_dir =
     materialise_handles_and_pins ~fs ~sys ~cache ~data_dir ~refresh tk
   in
-  let target_groups = build_target_groups ~acc tk in
+  let target_groups = target_groups_of ~acc tk in
   acc.targets <- List.concat_map fst target_groups;
   let reporepo_entries =
     lazy
@@ -1622,7 +1622,7 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
     ~depext_only ~archives_only ~save_d10ir ~dist ~jobs ~upload_archive
     ~gi_offset_ref (override, bucket_groups) =
   let gi_offset = !gi_offset_ref in
-  let req = make_bucket_req ~bi ~refresh ~override bucket_groups in
+  let req = bucket_req ~bi ~refresh ~override bucket_groups in
   let solved = Oi.Build_pipeline.solve bi.pipeline_env ~reporter:ui_reporter req in
   record_solve_results ~fs ~cache ~os_key ~acc ~gi_offset solved;
   let any_solved =
@@ -1658,10 +1658,10 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
 
 (* -- oi build dispatcher ------------------------------------------------ *)
 
-(* Capture every CLI input into a record so [build_run] sub-helpers
+(* Capture every CLI input into a record so [run] sub-helpers
    accept one parameter instead of 20+. [refresh] and [use_registry]
    are pre-normalised against [--locked]. *)
-type build_args = {
+type args = {
   refresh : bool;
   skip_local : bool;
   all : bool;
@@ -1710,7 +1710,7 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
         buckets)
 
 (* Dispatch any spec-less or short-circuit flag combination first; if
-   none apply, fall through and return [`Continue] so [build_run] runs
+   none apply, fall through and return [`Continue] so [run] runs
    the full multi-bucket flow. *)
 let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform
     ~proc_mgr ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s
@@ -1739,7 +1739,7 @@ let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform
     exit ec
   end
 
-let mk_build_args refresh locked skip_local all only skip registry
+let mk_args refresh locked skip_local all only skip registry
     use_registry with_repos with_deps jobs toolchain_override depext_only
     export envrc_mode archives_only every_version save_d10ir dist
     upload_archive targets =
@@ -1767,8 +1767,8 @@ let mk_build_args refresh locked skip_local all only skip registry
     targets;
   }
 
-let finalise_build_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
-    ~(acc : build_acc) ~run_start_time ~registry ~export =
+let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
+    ~(acc : acc) ~run_start_time ~registry ~export =
   print_build_summary ~targets:acc.targets ~target_handle:acc.target_handle
     ~solve_failures:acc.solve_failures ~target_group:acc.target_group
     ~group_results:acc.group_results;
@@ -1776,7 +1776,7 @@ let finalise_build_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
   do_export_if_set ~fs ~clock ~sys ~os_key ~cache ~registry ~export ~ok:true;
   print_dist_artifacts acc.dist_mapping
 
-let build_run (c : Terms.common) refresh locked skip_local all only skip
+let run (c : Terms.common) refresh locked skip_local all only skip
     registry use_registry with_repos with_deps jobs toolchain_override
     depext_only export envrc_mode archives_only every_version save_d10ir dist
     upload_archive targets =
@@ -1797,7 +1797,7 @@ let build_run (c : Terms.common) refresh locked skip_local all only skip
   in
   let data_dir = c.data_dir in
   let args =
-    mk_build_args refresh locked skip_local all only skip registry
+    mk_args refresh locked skip_local all only skip registry
       use_registry with_repos with_deps jobs toolchain_override depext_only
       export envrc_mode archives_only every_version save_d10ir dist
       upload_archive targets
@@ -1818,10 +1818,10 @@ let build_run (c : Terms.common) refresh locked skip_local all only skip
     ~args;
   let run_start_time = Unix.time () in
   let cache_root = Oi.Cache.root_s cache in
-  let acc = new_build_acc () in
+  let acc = new_acc () in
   run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh:args.refresh
     ~platform ~proc_mgr ~clock ~os_key ~http_session ~cache_root ~acc ~args;
-  finalise_build_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~acc
+  finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~acc
     ~run_start_time ~registry:args.registry ~export:args.export
 
 let targets_arg =
@@ -1962,7 +1962,7 @@ let cmd_info =
 let cmd =
   Cmd.v cmd_info
     Term.(
-      const build_run $ Terms.common $ Terms.refresh $ Terms.locked
+      const run $ Terms.common $ Terms.refresh $ Terms.locked
       $ Terms.skip_local $ all_arg $ only_arg $ skip_arg $ Terms.registry
       $ Terms.use_registry $ Terms.with_repos $ Terms.with_deps $ Terms.jobs
       $ Terms.toolchain $ depext_only_arg $ export_arg $ Sync.envrc_mode_arg

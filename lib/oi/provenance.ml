@@ -86,7 +86,7 @@ let build_env_codec =
   |> Object.mem "ocaml_version" string ~enc:(fun e -> e.ocaml_version)
   |> Object.finish
 
-let make_provenance schema layer_hash os_key pkg method_ built_at duration_s
+let of_fields schema layer_hash os_key pkg method_ built_at duration_s
     phases opam source deps depexts_declared build_env =
   {
     schema;
@@ -106,7 +106,7 @@ let make_provenance schema layer_hash os_key pkg method_ built_at duration_s
 
 let codec =
   let open Jsont in
-  Object.map ~kind:"provenance" make_provenance
+  Object.map ~kind:"provenance" of_fields
   |> Object.mem "schema" int ~enc:(fun r -> r.schema)
   |> Object.mem "layer_hash" string ~enc:(fun r -> r.layer_hash)
   |> Object.mem "os_key" string ~enc:(fun r -> r.os_key)

@@ -484,7 +484,7 @@ let pipeline_env_of_ctx ctx : Oi.Build_pipeline.env =
     http_session = ctx.http_session;
   }
 
-let make_solve_request ctx ~names : Oi.Build_pipeline.request =
+let solve_request ctx ~names : Oi.Build_pipeline.request =
   {
     targets =
       [
@@ -582,7 +582,7 @@ let solve_and_exec ~ctx ~binary_name ~target_pin ~unfound_bins ~args pkg_names =
     |> Oi.Pipeline.strip_compiler_roots_for_override
          ~override:ctx.toolchain_override ~toolchain:ctx.toolchain
   in
-  let req = make_solve_request ctx ~names in
+  let req = solve_request ctx ~names in
   let layer_hashes = drive_solve_and_build ~ctx ~target:binary_name ~req in
   Log.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
   let prefix =
@@ -653,7 +653,7 @@ let script_solve_request ctx ~dep_opam_names ~constraints :
     refresh = ctx.refresh;
   }
 
-let run_script_solve ~ctx ~req ~target =
+let script_solve ~ctx ~req ~target =
   Progress_ui.with_ui ~target
     ~clock:(ctx.clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
@@ -681,9 +681,9 @@ let solve_script_deps ~ctx ~target ~dep_opam_names ~constraints =
   if dep_opam_names = [] then []
   else
     let req = script_solve_request ctx ~dep_opam_names ~constraints in
-    run_script_solve ~ctx ~req ~target
+    script_solve ~ctx ~req ~target
 
-let run_script ~(ctx : ctx) ~target ~args =
+let script ~(ctx : ctx) ~target ~args =
   if not (Workspace.path_exists ctx.cwd target) then
     Oi.Error.fail_not_found target "file not found: %s" target;
   let all_script_deps =
@@ -864,7 +864,7 @@ let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names
       Oi.Error.fail_not_found target "no package provides bin/%s" target
   end
 
-let run_binary ~ctx ~env ~pt ~unfound_bins ~args =
+let binary ~ctx ~env ~pt ~unfound_bins ~args =
   let ocaml_name = OpamPackage.Name.of_string "ocaml" in
   let extra_names =
     List.filter_map
@@ -931,10 +931,10 @@ let impl (c : Terms.common) (flags : flags) registry use_registry
       save_d10ir jobs ~fast_key ~data_dir:c.data_dir
   in
   let target = fetch_script_url ~fs:ctx.fs ~sys:ctx.sys pt.target in
-  if Filename.check_suffix target ".ml" then run_script ~ctx ~target ~args
+  if Filename.check_suffix target ".ml" then script ~ctx ~target ~args
   else
     let unfound_bins = ref [] in
-    run_binary ~ctx ~env ~pt:{ pt with target } ~unfound_bins ~args
+    binary ~ctx ~env ~pt:{ pt with target } ~unfound_bins ~args
 
 (* -- cmdliner term + cmd --------------------------------------------- *)
 
@@ -968,7 +968,7 @@ let save_d10ir =
            $(b,DIR/<root>.d10ir.json). Does not skip the build."
         [ "save-d10ir" ])
 
-let run_man_targets =
+let man_targets =
   [
     `S Manpage.s_description;
     `P
@@ -987,7 +987,7 @@ let run_man_targets =
          run; cached by content hash." );
   ]
 
-let run_man_binaries =
+let man_binaries =
   [
     `S "BINARIES";
     `Pre
@@ -996,7 +996,7 @@ let run_man_binaries =
       \  oi run --with=crockford roguedoi";
   ]
 
-let run_man_scripts =
+let man_scripts =
   [
     `S "SCRIPTS";
     `P "Declare deps on the first line:";
@@ -1012,7 +1012,7 @@ let run_man_scripts =
       \  oi run https://gist.example.com/hello.ml";
   ]
 
-let run_man_overlays =
+let man_overlays =
   [
     `S "OVERLAYS";
     `P
@@ -1033,7 +1033,7 @@ let run_man_overlays =
       );
   ]
 
-let run_man_toolchain =
+let man_toolchain =
   [
     `S "TOOLCHAIN";
     `P "Picked in order:";
@@ -1044,7 +1044,7 @@ let run_man_toolchain =
     `I ("3.", "Reporepo's $(b,x-oi-default-toolchain).");
   ]
 
-let run_man_urls =
+let man_urls =
   [
     `S "GIT URLS";
     `P
@@ -1071,8 +1071,8 @@ let run_man_urls =
 let info_run =
   Cmd.info "run" ~doc:"Run an opam-packaged binary or OCaml script"
     ~man:
-      (run_man_targets @ run_man_binaries @ run_man_scripts @ run_man_overlays
-      @ run_man_toolchain @ run_man_urls)
+      (man_targets @ man_binaries @ man_scripts @ man_overlays
+      @ man_toolchain @ man_urls)
 
 let info_oix =
   Cmd.info "oix" ~doc:"Run a binary from opam overlays"

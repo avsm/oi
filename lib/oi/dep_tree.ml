@@ -11,7 +11,7 @@ let child_indent_string ~is_root ~is_last parent_indent =
   if is_root then ""
   else parent_indent ^ if is_last then "    " else "│   "
 
-let make_label ~label_first ~label_ref ~repeated n =
+let label_of ~label_first ~label_ref ~repeated n =
   if repeated then
     Fmt.str "%a"
       (fun ppf () ->
@@ -37,7 +37,7 @@ let render ~label_first ~label_ref ~key_of ~children roots =
         let key = key_of n in
         let repeated = Hashtbl.mem expanded key in
         let branch = branch_string ~is_root ~is_last in
-        let label = make_label ~label_first ~label_ref ~repeated n in
+        let label = label_of ~label_first ~label_ref ~repeated n in
         Fmt.pr "%s%s%s@." parent_indent branch label;
         if not repeated then begin
           Hashtbl.add expanded key ();

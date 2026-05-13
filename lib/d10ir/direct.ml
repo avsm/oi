@@ -471,7 +471,7 @@ type counts_t = <
   snapshot : int * int * int * int * failure list
 >
 
-let make_counts () : counts_t =
+let new_counts () : counts_t =
   object
     val mutable built = 0
     val mutable cached = 0
@@ -597,7 +597,7 @@ let run ~(config : Config.t) ~d10 ~fs ~proc_mgr ~clock
   let mount_env = prepare_mounts ~fs plan.mounts in
   reporter.event (Plan_started { total = List.length plan.nodes });
   let tables = build_node_tables plan in
-  let counts = make_counts () in
+  let counts = new_counts () in
   let mutex = Eio.Mutex.create () in
   let bump f = Eio.Mutex.use_rw ~protect:false mutex (fun () -> f ()) in
   let build_sem = Eio.Semaphore.make config.build_parallelism in
