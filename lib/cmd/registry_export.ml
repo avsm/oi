@@ -149,6 +149,6 @@ let run ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
   end
 (* No per-distro [handles/] report. Each export only sees its own
      oskey's slice of the build, so the report would be incomplete and
-     [s3cmd sync --skip-existing] would pin the first distro's slice in
+     [s3cmd put --skip-existing] would pin the first distro's slice in
      S3 forever. The cross-distro view belongs in a server-side process
      that scans the merged bucket. *)

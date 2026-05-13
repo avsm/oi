@@ -29,7 +29,7 @@ val run :
 
     Note: the cross-distro [handles/<handle>.md] report is not written here.
     Each export only sees its own oskey, so a per-distro write would race with
-    parallel exports and [s3cmd sync --skip-existing] would pin the first
+    parallel exports and [s3cmd put --skip-existing] would pin the first
     distro's incomplete view in S3. The handle report belongs in a server-side
     process that scans the merged bucket.
 

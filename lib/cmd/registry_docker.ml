@@ -291,6 +291,12 @@ let build_sync_shell ?(s3 = default_s3_config) () =
   validate_s3_field ~field:"--s3-host-bucket" s3.host_bucket;
   validate_s3_field ~field:"--s3-bucket-location" s3.bucket_location;
   let enable_multipart = if s3.enable_multipart then "True" else "False" in
+  (* Upload-only: [s3cmd sync] is bidirectional once the destination
+     already has some objects — newer mtimes on the remote pull files
+     *down* into the container's [/registry], which we don't want. The
+     container's filesystem is the authoritative producer for this build,
+     so use [put --recursive] + [--skip-existing] to write new objects
+     only and never read existing ones back. *)
   Fmt.str
     "set -eu; S3CFG=/tmp/oi-s3cfg; ACCESS=$(cat /run/secrets/%s); SECRET=$(cat \
      /run/secrets/%s); [ -n \"$ACCESS\" ] && [ -n \"$SECRET\" ] || { echo 'oi \
@@ -301,16 +307,17 @@ let build_sync_shell ?(s3 = default_s3_config) () =
      \"$ACCESS\" \"$SECRET\" > \"$S3CFG\"; chmod 600 \"$S3CFG\"; set +e; \
      OI_BUILD_PARALLELISM=$(nproc) oi build --refresh --all \
      --use-registry=archives --export /registry; RC=$?; [ $RC -eq 0 ] && { \
-     s3cmd -c \"$S3CFG\" sync --skip-existing /registry/ %s; RC=$?; }; rm -f \
-     \"$S3CFG\"; exit $RC"
+     s3cmd -c \"$S3CFG\" put --recursive --skip-existing /registry/ %s; \
+     RC=$?; }; rm -f \"$S3CFG\"; exit $RC"
     s3_access_key_secret s3_secret_key_secret s3_access_key_secret
     s3_secret_key_secret s3.bucket_location s3.host_base s3.host_bucket
     enable_multipart s3.bucket
 
 (* Single-distro Dockerfile: distro stage with oi + s3cmd, then one
    final RUN that uses BuildKit secret + cache mounts to bake the
-   registry tree into [/registry] and sync it to S3. The secrets are
-   only readable inside this RUN — they never persist in the image. *)
+   registry tree into [/registry] and upload it to S3 with
+   [s3cmd put --recursive --skip-existing]. The secrets are only
+   readable inside this RUN — they never persist in the image. *)
 let dockerfile_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d =
   let resolved = Distro.resolve_alias d in
   let tag = Distro.tag_of_distro (resolved :> Distro.t) in
@@ -319,7 +326,8 @@ let dockerfile_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d =
   @@ DF.comment
        "Usage: S3_ACCESS_KEY=… S3_SECRET_KEY=… docker compose build (BuildKit \
         secrets carry the keys; the build runs oi build --all \
-        --export=/registry and then s3cmd sync to %s)."
+        --export=/registry and then s3cmd put --recursive --skip-existing to \
+        %s)."
        s3.bucket
   @@ distro_stage ~overlay_depexts d
   @@ DF.run
@@ -485,7 +493,7 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
 ;          -f %s.spec --store=zfs:tank .
 ;
 ; Runs `oi build --refresh --all --export /registry`, then
-; `s3cmd sync --skip-existing /registry/ %s` using the mounted secrets.
+; `s3cmd put --recursive --skip-existing /registry/ %s` using the mounted secrets.
 
 ((from "%s:%s")
  (env CI "true")

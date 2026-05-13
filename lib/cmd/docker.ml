@@ -109,7 +109,7 @@ let emit_all ~fs ~sys ~platform ~cache ~data_dir ~refresh ~src_context ~s3
   Oi.Say.step "Run the build + sync (Docker)";
   Oi.Say.info "S3_ACCESS_KEY=… S3_SECRET_KEY=… docker compose build   %a"
     Oi.Style.pp_dim_string
-    "# builds each image, runs oi build --all and s3cmd sync"
+    "# builds each image, runs oi build --all and s3cmd put --recursive"
 
 let cmd =
   let run (c : Terms.common) refresh registry oi_version no_recipe
@@ -296,8 +296,8 @@ let cmd =
       & opt string Registry_docker.default_s3_config.bucket
       & info ~docv:"URI" ~docs:s3_docs
           ~doc:
-            "Target URI passed to the final $(b,s3cmd sync) (e.g. \
-             $(b,s3://my-bucket/))."
+            "Target URI passed to the final $(b,s3cmd put --recursive \
+             --skip-existing) (e.g. $(b,s3://my-bucket/))."
           [ "s3-bucket" ])
   in
   let s3_host_base =

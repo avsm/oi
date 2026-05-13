@@ -5,10 +5,10 @@
     [oi] binary from the GitHub releases page and ships the target's depexts.
     Each per-distro image bakes the full
     [oi build --refresh --all --export /registry] followed by
-    [s3cmd sync --skip-existing /registry/ s3://oiu/] into its build, using
-    BuildKit secrets to supply the S3 credentials. The parallel obuilder spec
-    emitter ({!obuilder_spec_one_distro}) drives the same flow under
-    [obuilder build --secret …]. *)
+    [s3cmd put --recursive --skip-existing /registry/ s3://oiu/] into its
+    build, using BuildKit secrets to supply the S3 credentials. The parallel
+    obuilder spec emitter ({!obuilder_spec_one_distro}) drives the same flow
+    under [obuilder build --secret …]. *)
 
 module Distro = Dockerfile_opam.Distro
 
@@ -19,7 +19,8 @@ val dockerfile_oi : src_context:string -> Dockerfile.t
 
 type s3_config = {
   bucket : string;
-      (** Target URI for the final [s3cmd sync] (e.g. [s3://oiu/]). *)
+      (** Target URI for the final [s3cmd put --recursive --skip-existing]
+          (e.g. [s3://oiu/]). *)
   host_base : string;  (** [s3cmd] [host_base] endpoint. *)
   host_bucket : string;
       (** [s3cmd] [host_bucket] endpoint (typically the same as [host_base] for
@@ -61,8 +62,9 @@ val obuilder_spec_one_distro :
     {!dockerfile_one_distro}. Returns the spec body as an s-expression string;
     emit via {!write_file}. Same flow: install depexts + s3cmd, fetch the static
     oi binary, then one [(run …)] that mounts the cache + secrets and drives
-    [oi build --export /registry] + [s3cmd sync]. Secrets are mounted at
-    [/run/secrets/<id>] matching the Dockerfile path. *)
+    [oi build --export /registry] + [s3cmd put --recursive --skip-existing].
+    Secrets are mounted at [/run/secrets/<id>] matching the Dockerfile path.
+*)
 
 val one_distro_spec_filename : Distro.t -> string
 (** [one_distro_spec_filename] Filename (without directory) for a per-distro
