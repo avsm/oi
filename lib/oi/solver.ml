@@ -782,8 +782,7 @@ module Memo = struct
   let compute_git_signature ~sys packages_dir =
     let head =
       Option.map String.trim
-        (run_out_opt ~sys
-           [ "git"; "-C"; packages_dir; "rev-parse"; "HEAD" ])
+        (run_out_opt ~sys [ "git"; "-C"; packages_dir; "rev-parse"; "HEAD" ])
     in
     let status =
       run_out_opt ~sys
@@ -813,8 +812,8 @@ module Memo = struct
         r
 
   let key ?(test = OpamPackage.Name.Set.empty)
-      ?(doc = OpamPackage.Name.Set.empty) ~sys ~(conf : Ctx.conf)
-      ~packages_dirs ~constraints ~names ?toolchain () =
+      ?(doc = OpamPackage.Name.Set.empty) ~sys ~(conf : Ctx.conf) ~packages_dirs
+      ~constraints ~names ?toolchain () =
     let signatures =
       List.map (fun d -> (d, signature_for_packages_dir ~sys d)) packages_dirs
     in

@@ -478,7 +478,9 @@ let duplicate_node nodes =
 
 let external_layer_set external_layers =
   let h = Hashtbl.create (List.length external_layers) in
-  List.iter (fun lh -> Hashtbl.add h (Layer_hash.to_string lh) ()) external_layers;
+  List.iter
+    (fun lh -> Hashtbl.add h (Layer_hash.to_string lh) ())
+    external_layers;
   h
 
 let dep_in_d10 ~d10 h =
@@ -566,8 +568,6 @@ let validate ?d10 ~fs ~plan_dir t =
   in
   let* () = check_no_cycle t.nodes in
   let external_set = external_layer_set t.external_layers in
-  let* () =
-    opt_to_err (find_unsat_dep ~producers ~external_set ~d10 t.nodes)
-  in
+  let* () = opt_to_err (find_unsat_dep ~producers ~external_set ~d10 t.nodes) in
   opt_to_err
     (find_archive_err ~d10 ~fs ~plan_dir ~archive_root:t.archive_root t.nodes)

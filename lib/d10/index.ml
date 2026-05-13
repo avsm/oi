@@ -282,8 +282,8 @@ module Meta_scan = struct
           let archive = scan_archive ~contents ~len (k + 1) in
           let new_name = qualified_name ~name_stack subname in
           push new_name archive;
-          scan_packages ~contents ~len ~push (depth + 1) (new_name :: name_stack)
-            (k + 1)
+          scan_packages ~contents ~len ~push (depth + 1)
+            (new_name :: name_stack) (k + 1)
         end
         else scan_packages ~contents ~len ~push depth name_stack (k + 1)
 end
@@ -337,8 +337,8 @@ let drop_os_key_rows db ~os_key =
   exec db (scoped "layer_meta");
   execf db "DELETE FROM layers WHERE os_key = %s" (quote os_key)
 
-let insert_layer_row db ~hash ~os_key ~(parts : Os_key.t)
-    ~(info : Layer.meta) ~overlay_for =
+let insert_layer_row db ~hash ~os_key ~(parts : Os_key.t) ~(info : Layer.meta)
+    ~overlay_for =
   let { Os_key.distro; os_version; arch; os } = parts in
   let name, version = parse_pkg_string info.package in
   let oh, ov =
@@ -349,8 +349,8 @@ let insert_layer_row db ~hash ~os_key ~(parts : Os_key.t)
   execf db
     "INSERT OR REPLACE INTO layers (hash, os_key, arch, os, distro, \
      os_version, package_name, package_ver, exit_status, created, \
-     overlay_handle, overlay_version) VALUES (%s, %s, %s, %s, %s, %s, %s, \
-     %s, %d, %f, %s, %s)"
+     overlay_handle, overlay_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, \
+     %d, %f, %s, %s)"
     (quote hash) (quote os_key) (quote arch) (quote os) (quote distro)
     (quote os_version) (quote name) (quote version) info.exit_status
     info.created oh ov
@@ -377,8 +377,7 @@ let binary_name_of_path path =
 
 let insert_file_and_binary db ~hash ~include_files path =
   if include_files then
-    execf db
-      "INSERT INTO layer_files (layer_hash, path) VALUES (%s, %s)"
+    execf db "INSERT INTO layer_files (layer_hash, path) VALUES (%s, %s)"
       (quote hash) (quote path);
   match binary_name_of_path path with
   | None -> ()
@@ -407,8 +406,8 @@ let layer_fs db ~hash ~include_files ~fs ~layers_dir =
     List.iter (insert_meta_row db ~hash) metas
   end
 
-let one_layer db ~os_key ~parts ~overlay_for ~include_files ~fs
-    ~layers_dir hash =
+let one_layer db ~os_key ~parts ~overlay_for ~include_files ~fs ~layers_dir hash
+    =
   match Layer.load_meta Eio.Path.(layers_dir / hash / "layer.json") with
   | None -> ()
   | Some info ->
@@ -430,8 +429,8 @@ let rebuild (c : Config.t) ?(overlay_for = fun ~hash:_ -> None)
     let entries = Eio.Path.read_dir layers_dir in
     exec db "BEGIN TRANSACTION";
     List.iter
-      (one_layer db ~os_key ~parts ~overlay_for ~include_files
-         ~fs:c.Config.fs ~layers_dir)
+      (one_layer db ~os_key ~parts ~overlay_for ~include_files ~fs:c.Config.fs
+         ~layers_dir)
       entries;
     execf db
       "INSERT OR REPLACE INTO index_meta (os_key, indexer_version) VALUES (%s, \

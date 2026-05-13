@@ -484,8 +484,7 @@ let install_extra_roots (info : info) st =
   if extra_atoms = [] then st
   else begin
     Log.info (fun m ->
-        m "Installing %d extra toolchain packages: %s"
-          (List.length extra_atoms)
+        m "Installing %d extra toolchain packages: %s" (List.length extra_atoms)
           (String.concat ", "
              (List.map (fun (n, _) -> OpamPackage.Name.to_string n) extra_atoms)));
     OpamClient.install st extra_atoms
@@ -494,8 +493,7 @@ let install_extra_roots (info : info) st =
 (* Equivalent to [opam switch create <switch_dir> <ocaml_version> --repos
    ...]: opam resolves the compiler family and installs it via
    [install_compiler]. *)
-let switch_and_install gt ~rt ~repos:repo_names ~switch_dir
-    (info : info) =
+let switch_and_install gt ~rt ~repos:repo_names ~switch_dir (info : info) =
   let switch = OpamSwitch.of_string switch_dir in
   let invariant =
     OpamSwitchCommand.guess_compiler_invariant ~repos:repo_names rt
@@ -512,8 +510,8 @@ let switch_and_install gt ~rt ~repos:repo_names ~switch_dir
 (* Drive the actual opam create + install dance. Wraps the
    [with_opam_root] / [OpamGlobalState.with_] / [OpamRepositoryState.with_]
    pile so the caller stays flat. *)
-let perform_opam_install ~root_dir ~repos ~repo_names ~switch_dir
-    (info : info) =
+let perform_opam_install ~root_dir ~repos ~repo_names ~switch_dir (info : info)
+    =
   with_opam_root ~root_dir (fun () ->
       OpamGlobalState.with_ `Lock_write @@ fun gt ->
       OpamRepositoryState.with_ `Lock_write gt @@ fun rt ->
@@ -524,8 +522,7 @@ let write_ready_marker ~fs (info : info) =
   Fmt.kstr
     (Eio.Path.save ~create:(`Or_truncate 0o644)
        Eio.Path.(fs / ready_marker info))
-    "handle: %s\nocaml: %s\nhash: %s\n" info.handle info.ocaml_version
-    info.hash
+    "handle: %s\nocaml: %s\nhash: %s\n" info.handle info.ocaml_version info.hash
 
 let do_install ~fs ~reporter (info : info) =
   Fmt.kstr
@@ -554,8 +551,8 @@ let do_install ~fs ~reporter (info : info) =
   perform_opam_install ~root_dir ~repos ~repo_names ~switch_dir info;
   write_ready_marker ~fs info;
   let elapsed = Unix.gettimeofday () -. started in
-  Fmt.pr "@.%a Toolchain %s ready at %s (%.0fs)@." Style.pp_strong_ok_string
-    "▸" info.handle info.install_prefix elapsed;
+  Fmt.pr "@.%a Toolchain %s ready at %s (%.0fs)@." Style.pp_strong_ok_string "▸"
+    info.handle info.install_prefix elapsed;
   Log.info (fun m ->
       m "Toolchain %s (%s) ready at %s" info.handle info.ocaml_version
         info.install_prefix)

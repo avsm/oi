@@ -1184,7 +1184,8 @@ let copy_files_dir ~fs ~src ~dst =
   if Sys.file_exists src && Sys.is_directory src then begin
     mkdir_p ~fs dst;
     Sys.readdir src
-    |> Array.iter (fun name -> hardlink_or_copy_one ~fs (src / name) (dst / name))
+    |> Array.iter (fun name ->
+        hardlink_or_copy_one ~fs (src / name) (dst / name))
   end
 
 (* Process every package in the scratch clone into the materialised tree:

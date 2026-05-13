@@ -206,8 +206,8 @@ module Memo : sig
   (** MD5 hex digest used as the memo key, or [None] if any [packages_dir] is
       not under a git working tree (in which case the caller should skip both
       {!lookup} and {!store}). [git rev-parse HEAD] results are memoised
-      process-wide. [sys] is needed to spawn [git rev-parse]/[git status]
-      under the Eio fiber tree.
+      process-wide. [sys] is needed to spawn [git rev-parse]/[git status] under
+      the Eio fiber tree.
 
       [test] / [doc] enter the digest so a [+test/+doc] solve and a base solve
       don't collide in the memo — the closures differ. *)

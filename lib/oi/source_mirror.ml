@@ -185,8 +185,8 @@ let deposit_under_checksums ~fs ~mirror_dir ~src checksums =
       let dst = List.fold_left ( / ) mirror_dir (OpamHash.to_path ck) in
       put dst)
     checksums;
-  if not (List.exists (fun ck -> OpamHash.kind ck = `SHA256) checksums) then
-    (try
+  (if not (List.exists (fun ck -> OpamHash.kind ck = `SHA256) checksums) then
+     try
        let sha256_hash = OpamHash.compute ~kind:`SHA256 src in
        let dst =
          List.fold_left ( / ) mirror_dir (OpamHash.to_path sha256_hash)
@@ -368,8 +368,8 @@ let fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a =
   (try Sys.remove tmp with Sys_error _ -> ());
   outcome
 
-let process_one_archive ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir
-    ~fetched ~cached ~failed ~bytes_added a =
+let process_one_archive ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir ~fetched
+    ~cached ~failed ~bytes_added a =
   if mirror_has ~mirror_dir a.checksums then incr cached
   else
     match fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a with

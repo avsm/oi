@@ -49,8 +49,9 @@ let count_files dir =
   if not (Sys.file_exists dir) then 0
   else
     let rec scan acc dir =
-      Array.fold_left (fun a name -> count_entry ~scan a dir name) acc
-        (Sys.readdir dir)
+      Array.fold_left
+        (fun a name -> count_entry ~scan a dir name)
+        acc (Sys.readdir dir)
     in
     scan 0 dir
 
@@ -390,9 +391,7 @@ let run_show (c : Terms.common) package =
     build_events_by_hash ~fs:h.fs ~cache_root ~os_key:d10.os_key ~layers_dir
   in
   let events_for hash =
-    match Hashtbl.find_opt events_by_hash hash with
-    | Some xs -> xs
-    | None -> []
+    match Hashtbl.find_opt events_by_hash hash with Some xs -> xs | None -> []
   in
   let matches =
     matches_for_package ~fs:h.fs ~os_key:d10.os_key ~cache_root ~layers_dir
@@ -444,8 +443,7 @@ let read_indexed_binaries d10 ~index_path =
     let raw = D10.Index.all_binaries db ~os_key:d10.D10.Config.os_key in
     D10.Index.close db;
     List.map
-      (fun (binary, pkg_name, pkg_version) ->
-        { binary; pkg_name; pkg_version })
+      (fun (binary, pkg_name, pkg_version) -> { binary; pkg_name; pkg_version })
       raw
 
 let print_binaries_text ~os_key ~index_present bins =
@@ -682,8 +680,7 @@ let count_d10ir_archives ~cache =
 
 let stats_of_index d10 ~index_path =
   if not (Sys.file_exists index_path) then
-    D10.Index.
-      { layers = 0; binaries = 0; files = 0; findlib = 0; tarballs = 0 }
+    D10.Index.{ layers = 0; binaries = 0; files = 0; findlib = 0; tarballs = 0 }
   else
     let db = D10.Index.open_ ~fs:d10.D10.Config.fs ~path:index_path in
     let s = D10.Index.stats db ~os_key:d10.os_key in
@@ -726,8 +723,7 @@ let run_stats (c : Terms.common) =
   let view = { os_key = d10.os_key; index_present; s; archives } in
   match c.format with
   | Json -> print_stats_json view
-  | Text ->
-      print_stats_text ~os_key:d10.os_key ~index_present ~archives s
+  | Text -> print_stats_text ~os_key:d10.os_key ~index_present ~archives s
 
 let stats_cmd =
   let info = Cmd.info "stats" ~doc:"Summarise the layer cache" in
@@ -768,8 +764,7 @@ let publish_archives_to ~h ~output entries =
   in
   let dst = Oi.D10ir_archives.dst_dir ~output in
   Fmt.pr
-    "%a %d archive(s) at %s (%d new, %d already present; %d total in \
-     cache)@."
+    "%a %d archive(s) at %s (%d new, %d already present; %d total in cache)@."
     Oi.Style.pp_ok_string "✓" (linked + present) dst linked present
     (List.length entries)
 
@@ -789,10 +784,7 @@ let print_archives_text ~dir entries =
     in
     let table =
       Tty.Table.of_rows ~header_style:Oi.Style.header
-        [
-          Tty.Table.column "SHA";
-          Tty.Table.column ~align:`Right "SIZE";
-        ]
+        [ Tty.Table.column "SHA"; Tty.Table.column ~align:`Right "SIZE" ]
         rows
     in
     Oi.Style.pp_table Fmt.stdout table;
@@ -935,8 +927,7 @@ let rec print_explain_tree ~depth (n : explain_node) =
 
 let print_explain_json tree =
   match
-    Jsont_bytesrw.encode_string ~format:Jsont.Indent explain_envelope_codec
-      tree
+    Jsont_bytesrw.encode_string ~format:Jsont.Indent explain_envelope_codec tree
   with
   | Ok s ->
       print_string s;

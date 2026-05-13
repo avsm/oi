@@ -242,12 +242,10 @@ let publish_staging (c : Config.t) ~hash ~staging_dir ~layer_dir =
 
 (* Verify + extract + publish the [<hash>.partial/] staging dir, returning
    [true] iff the layer is now durably present. *)
-let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir
-    ~layer_dir ~sha256 ~phase =
+let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir ~layer_dir
+    ~sha256 ~phase =
   phase Verifying;
-  let cleanup_tmp () =
-    try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ()
-  in
+  let cleanup_tmp () = try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> () in
   let cleanup_staging () =
     try Eio.Path.rmtree ~missing_ok:true staging_dir with Eio.Exn.Io _ -> ()
   in
@@ -372,9 +370,7 @@ let export_one_if_succeeded (c : Config.t) ~os_key ~dst count hash =
 
 let export_for_os_key (c : Config.t) ~layers_dir ~dst count os_key =
   let os_layer_dir = Eio.Path.(layers_dir / os_key) in
-  let hashes =
-    try Eio.Path.read_dir os_layer_dir with Eio.Exn.Io _ -> []
-  in
+  let hashes = try Eio.Path.read_dir os_layer_dir with Eio.Exn.Io _ -> [] in
   List.fold_left (export_one_if_succeeded c ~os_key ~dst) count hashes
 
 let export_all (c : Config.t) ~dst =

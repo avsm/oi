@@ -346,8 +346,8 @@ let cmd =
     let targets = if targets = [] then project.deps else targets in
     if targets = [] then
       Oi.Error.fail_config_error
-        "oi source: at least one TARGET is required (or run from a project \
-         dir with *.opam files)";
+        "oi source: at least one TARGET is required (or run from a project dir \
+         with *.opam files)";
     (* [Eio.Path.mkdirs] mishandles relative paths whose split-parent
        is the empty string (it ends up calling [mkdirat] with [""]).
        Resolve to absolute against cwd before any filesystem op. *)
@@ -435,9 +435,8 @@ let cmd =
     in
     let pkgs =
       match
-        Oi.Solver.solve ~test:test_doc_universe ~doc:test_doc_universe ~sys
-          ~fs ~cache_root ctx ~packages_dirs ~constraints:extra_constraints
-          names
+        Oi.Solver.solve ~test:test_doc_universe ~doc:test_doc_universe ~sys ~fs
+          ~cache_root ctx ~packages_dirs ~constraints:extra_constraints names
       with
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg

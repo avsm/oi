@@ -228,13 +228,12 @@ let buf_add_header buf ~handle ~generated_at =
   buf_addf buf "# Failure report: @%s\n\n" handle;
   buf_addf buf "_Generated %s — for LLM-agent consumption._\n\n"
     (format_iso_utc generated_at);
-  buf_add buf
-    "This file lists every package that failed to build under the `@";
+  buf_add buf "This file lists every package that failed to build under the `@";
   buf_add buf handle;
   buf_add buf
-    "` overlay handle, joined across every distro currently published to \
-     this registry. Each section gives the failing outcome, an embedded tail \
-     of the build log, and a one-liner you can paste to reproduce locally.\n\n"
+    "` overlay handle, joined across every distro currently published to this \
+     registry. Each section gives the failing outcome, an embedded tail of the \
+     build log, and a one-liner you can paste to reproduce locally.\n\n"
 
 let buf_add_summary buf ~n_pkgs ~n_events ~distros ~kinds =
   buf_add buf "## Summary\n\n";
@@ -262,8 +261,8 @@ let buf_add_reproduction buf ~handle =
   buf_addf buf "oi build @%s/<pkg>\n" handle;
   buf_add buf "```\n\n";
   buf_add buf
-    "To rebuild on a specific distro, run inside the matching container \
-     image (e.g. `docker run --rm -it oi:fedora-43`).\n\n"
+    "To rebuild on a specific distro, run inside the matching container image \
+     (e.g. `docker run --rm -it oi:fedora-43`).\n\n"
 
 let buf_add_log_tail buf (e : Audit.event) =
   match Stdlib.Option.bind e.log (fun lp -> lp.tail) with
@@ -271,10 +270,7 @@ let buf_add_log_tail buf (e : Audit.event) =
       buf_add buf "<details><summary>Log tail</summary>\n\n";
       buf_add buf "```\n";
       buf_add buf (trim_tail tail);
-      if
-        not
-          (String.length tail > 0
-          && tail.[String.length tail - 1] = '\n')
+      if not (String.length tail > 0 && tail.[String.length tail - 1] = '\n')
       then buf_add buf "\n";
       buf_add buf "```\n\n";
       buf_add buf "</details>\n\n"
@@ -308,9 +304,7 @@ let buf_add_pkg_section buf ~handle ~slices (pkg, evs) =
   (match source_for_pkg ~pkg slices with
   | Some url -> buf_addf buf "Source: %s\n\n" url
   | None -> ());
-  let by_os =
-    List.sort (fun (a, _) (b, _) -> String.compare a b) evs
-  in
+  let by_os = List.sort (fun (a, _) (b, _) -> String.compare a b) evs in
   List.iter (buf_add_event_block buf) by_os;
   buf_add buf "---\n\n"
 

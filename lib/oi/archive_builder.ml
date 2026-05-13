@@ -290,13 +290,21 @@ let build ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10 ~cache_root
   match archive_hit_for ~d10 p with
   | Some (sha, final_path) ->
       Log.debug (fun m -> m "archive %s (x-d10-archive) -> %s" p.pkg final_path);
-      { path = final_path; sha256 = sha; strip_components = 0;
-        subst_files = p.substs }
+      {
+        path = final_path;
+        sha256 = sha;
+        strip_components = 0;
+        subst_files = p.substs;
+      }
   | None ->
       prepare_build_dir ~fs ~cache_root ~cache_urls p;
       let sha, final_path = bake_archive ~proc_mgr ~d10 p in
-      { path = final_path; sha256 = sha; strip_components = 0;
-        subst_files = p.substs }
+      {
+        path = final_path;
+        sha256 = sha;
+        strip_components = 0;
+        subst_files = p.substs;
+      }
 
 (* -- No-solve bake ------------------------------------------------------ *)
 

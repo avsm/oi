@@ -109,7 +109,9 @@ let expand_targets ~fs ~sys ~reporepo_path ~reporepo_url (targets : target list)
     match Source.Reporepo.latest entries ~handle with
     | None -> Error.fail_config_error "no overlay @%s in reporepo" handle
     | Some e ->
-        List.map (fun group -> (group, [ handle ])) (groups_of_overlay_entry ~handle e)
+        List.map
+          (fun group -> (group, [ handle ]))
+          (groups_of_overlay_entry ~handle e)
   in
   List.concat_map
     (fun t ->
@@ -465,8 +467,7 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
     in
     run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
       ~group_constraints ~stripped_tokens ~group_handles ~force_source
-      ~toolchain ~names
-      { state0 with group }
+      ~toolchain ~names { state0 with group }
 
 (* -- Persistent cache for the [solved] struct ----------------------------- *)
 
@@ -554,7 +555,8 @@ let add_request_body add (req : request) =
     req.constraints;
   add ("override:" ^ Stdlib.Option.value req.toolchain_override ~default:"");
   add
-    ("toolchain_hash:" ^ match req.toolchain with Some i -> i.hash | None -> "");
+    ("toolchain_hash:"
+    ^ match req.toolchain with Some i -> i.hash | None -> "");
   add_conf add req.conf;
   add ("local_pkg_dir:" ^ Stdlib.Option.value req.local_packages_dir ~default:"");
   add ("project_root:" ^ Stdlib.Option.value req.project_root ~default:"");
@@ -701,9 +703,7 @@ let solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
 (* Merge every group's recipe into one [D10ir.Plan.t]; [None] when no
    group produced a recipe. *)
 let merge_group_recipes groups =
-  let recipes =
-    List.filter_map (fun (gr : group_result) -> gr.recipe) groups
-  in
+  let recipes = List.filter_map (fun (gr : group_result) -> gr.recipe) groups in
   match recipes with
   | [] -> None
   | _ -> (
@@ -711,9 +711,9 @@ let merge_group_recipes groups =
       | Ok r -> Some r
       | Error msg ->
           Error.fail_config_error
-            "merging %d recipes failed: %s. This is a bug in \
-             D10ir.Plan.merge: every recipe was produced by the same \
-             toolchain in the same batch."
+            "merging %d recipes failed: %s. This is a bug in D10ir.Plan.merge: \
+             every recipe was produced by the same toolchain in the same \
+             batch."
             (List.length recipes) msg)
 
 let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
@@ -892,9 +892,7 @@ let write_provenance_for_package ~fs ~cache_root ~os_key ~ocaml_version
     let dst = Provenance.path ~cache_root ~os_key ~hash:pp.layer_hash in
     if Sys.file_exists dst then ()
     else
-      let r =
-        provenance_of_package_plan ~os_key ~ocaml_version ~built_at pp
-      in
+      let r = provenance_of_package_plan ~os_key ~ocaml_version ~built_at pp in
       Provenance.write ~fs ~cache_root r
 
 let write_provenance_for_solved ~fs ~cache_root ~os_key ~(d10 : D10.Config.t)
@@ -968,12 +966,12 @@ let direct_reporter_tracking ~reporter built_layers : D10ir.Direct.reporter =
   }
 
 (* Pull every needed remote layer in one go via the unified fetcher. *)
-let fetch_needed_layers ~env ~reporter ~jobs ~d10_cfg
-    (merged : D10ir.Plan.t) merged_layer_index needed_fetches =
+let fetch_needed_layers ~env ~reporter ~jobs ~d10_cfg (merged : D10ir.Plan.t)
+    merged_layer_index needed_fetches =
   match merged_layer_index with
   | None -> ()
   | Some (r, index) ->
-      if needed_fetches <> [] then
+      if needed_fetches <> [] then (
         let pkg_of : (string, string) Hashtbl.t =
           Hashtbl.create (List.length merged.nodes)
         in
@@ -984,7 +982,7 @@ let fetch_needed_layers ~env ~reporter ~jobs ~d10_cfg
             Hashtbl.replace pkg_of h label)
           merged.nodes;
         Pipeline.fetch_layer_hashes ~reporter ?jobs ~session:env.http_session
-          ~remote:r ~d10:d10_cfg ~index ~hashes:needed_fetches ~pkg_of ()
+          ~remote:r ~d10:d10_cfg ~index ~hashes:needed_fetches ~pkg_of ())
 
 let archive_path_for ~cache_root sha =
   Filename.concat cache_root "d10ir" |> fun p ->
@@ -999,7 +997,8 @@ let pkg_archive_summary nodes =
   List.map
     (fun (n : D10ir.Plan.node) ->
       Fmt.str "%s.%s (%s)" n.package.name n.package.version
-        (String.sub n.archive.sha256 0 (min 12 (String.length n.archive.sha256))))
+        (String.sub n.archive.sha256 0
+           (min 12 (String.length n.archive.sha256))))
     nodes
   |> String.concat ", "
 
@@ -1035,8 +1034,8 @@ let ensure_archives_local ~env ~cache_root ~source_remote ~d10_cfg
     if still_missing <> [] then
       Error.fail_config_error
         "%d source archive(s) missing locally and not on the registry: %s.\n\
-         Run [oi repo bump] on the offending overlay to bake the archives, \
-         or point [--registry] at a registry that publishes \
+         Run [oi repo bump] on the offending overlay to bake the archives, or \
+         point [--registry] at a registry that publishes \
          [d10ir-archives/<sha>.tar.zst] for these shas."
         (List.length still_missing)
         (pkg_archive_summary still_missing)
@@ -1050,29 +1049,27 @@ let validate_plan_or_fail ~d10_cfg ~fs ~plan_dir merged =
   match D10ir.Plan.validate ~d10:d10_cfg ~fs ~plan_dir merged with
   | Ok () -> ()
   | Error err ->
-      Error.fail_config_error
-        "d10ir recipe failed validation before build: %a"
+      Error.fail_config_error "d10ir recipe failed validation before build: %a"
         D10ir.Plan.pp_validate_error err
 
 (* Mirror freshly built layers to S3 (or any [s3cmd put]-reachable URL
    prefix) when [--upload-archive=URL] is set. Sequential uploads keep
    chatty output predictable and avoid stampeding the remote. *)
-let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url built_layers
-    =
+let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url
+    built_layers =
   match (upload_archive_url, !built_layers) with
   | None, _ | Some _, [] -> ()
   | Some raw_url, _ ->
       let url_base =
         if
-          String.length raw_url = 0
-          || raw_url.[String.length raw_url - 1] = '/'
+          String.length raw_url = 0 || raw_url.[String.length raw_url - 1] = '/'
         then raw_url
         else raw_url ^ "/"
       in
       let staging = Filename.concat cache_root "upload-staging" in
       let hashes = List.sort_uniq String.compare !built_layers in
-      Say.step "Uploading %d freshly built layer(s) to %s"
-        (List.length hashes) url_base;
+      Say.step "Uploading %d freshly built layer(s) to %s" (List.length hashes)
+        url_base;
       List.iter
         (upload_one_layer ~sys:env.sys ~d10:d10_cfg ~staging ~url_base)
         hashes
@@ -1139,8 +1136,7 @@ let layer_hashes (s : solved) : string list =
 
 let pkg_matches_root_name ~wanted (pp : Plan.package_plan) =
   match OpamPackage.of_string_opt pp.pkg with
-  | Some p ->
-      List.mem (OpamPackage.Name.to_string (OpamPackage.name p)) wanted
+  | Some p -> List.mem (OpamPackage.Name.to_string (OpamPackage.name p)) wanted
   | None -> false
 
 let root_layer_hashes_of_group (gr : group_result) =

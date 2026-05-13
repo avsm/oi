@@ -106,9 +106,7 @@ let scc_cycles g =
    OpamPackage.Map ordering). *)
 let peel_level m =
   let installable, remainder =
-    OpamPackage.Map.partition
-      (fun _ deps -> OpamPackage.Set.is_empty deps)
-      m
+    OpamPackage.Map.partition (fun _ deps -> OpamPackage.Set.is_empty deps) m
   in
   if OpamPackage.Map.is_empty installable then ([], remainder)
   else
@@ -186,7 +184,8 @@ let extend_transitive_deps ~transitive_deps deps =
       | None -> acc)
     OpamPackage.Name.Set.empty deps
 
-let node_of_pkg ctx ?d10 ~packages_dirs ~in_solution ~transitive_deps ~nodes pkg =
+let node_of_pkg ctx ?d10 ~packages_dirs ~in_solution ~transitive_deps ~nodes pkg
+    =
   let name = OpamPackage.name pkg in
   let dep_set =
     Solver.direct_deps_within ~packages_dirs ~conf:(Solver.Ctx.conf ctx) pkg
@@ -411,7 +410,8 @@ let active_depexts ctx opam =
 
 let overlay_of_pkgs_dir ~name_s ~pkg_s = function
   | None -> None
-  | Some d -> (Origin.of_packages_dir ~pkgs_dir:d ~name:name_s ~full:pkg_s).overlay
+  | Some d ->
+      (Origin.of_packages_dir ~pkgs_dir:d ~name:name_s ~full:pkg_s).overlay
 
 let resolve_node ctx ~packages_dirs ~cache_root ~prefix g (node : node) :
     package_plan =
