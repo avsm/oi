@@ -195,6 +195,7 @@ module Memo : sig
   val key :
     ?test:OpamPackage.Name.Set.t ->
     ?doc:OpamPackage.Name.Set.t ->
+    sys:D10.Sysops.t ->
     conf:Ctx.conf ->
     packages_dirs:string list ->
     constraints:OpamFormula.version_constraint OpamTypes.name_map ->
@@ -205,7 +206,8 @@ module Memo : sig
   (** MD5 hex digest used as the memo key, or [None] if any [packages_dir] is
       not under a git working tree (in which case the caller should skip both
       {!lookup} and {!store}). [git rev-parse HEAD] results are memoised
-      process-wide.
+      process-wide. [sys] is needed to spawn [git rev-parse]/[git status]
+      under the Eio fiber tree.
 
       [test] / [doc] enter the digest so a [+test/+doc] solve and a base solve
       don't collide in the memo — the closures differ. *)
@@ -230,6 +232,7 @@ val solve :
   ?test:OpamPackage.Name.Set.t ->
   ?doc:OpamPackage.Name.Set.t ->
   ?reporter:Build_progress.reporter ->
+  sys:D10.Sysops.t ->
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   cache_root:string ->
   Ctx.t ->

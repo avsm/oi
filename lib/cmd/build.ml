@@ -373,8 +373,8 @@ let gather_overlay_solves ~fs ~sys ~cache ~data_dir ~refresh ~host_conf
                       OpamPackage.Name.Map.empty items
                   in
                   match
-                    Oi.Solver.solve ~fs ~cache_root ctx ~packages_dirs:pkg_dirs
-                      ~constraints names
+                    Oi.Solver.solve ~sys ~fs ~cache_root ctx
+                      ~packages_dirs:pkg_dirs ~constraints names
                   with
                   | Ok solved -> Some (pkg_dirs, solved)
                   | Error msg ->

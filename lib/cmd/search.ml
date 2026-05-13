@@ -192,7 +192,7 @@ let cmd =
             state = st;
             hash = Some hash;
           })
-        (D10.Index.find_meta db ~findlib_pkg:pattern ~os_key)
+        (D10.Index.meta_for db ~findlib_pkg:pattern ~os_key)
     in
     (* Declared-package matches scanned from overlay clones. *)
     let pkg_declared_rows =

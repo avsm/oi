@@ -460,109 +460,114 @@ let cycles_in (nodes : node list) : Layer_hash.t list list =
 let sha256_of_file ~fs:_ path =
   OpamHash.contents (OpamHash.compute ~kind:`SHA256 path)
 
-let validate ?d10 ~fs ~plan_dir t =
-  if t.schema_version <> current_schema_version then
+(* Build a [layer_hash → node] producer map; returns [Some n] for the first
+   duplicate, [None] if all hashes are unique. *)
+let duplicate_node nodes =
+  let producers = Hashtbl.create (List.length nodes) in
+  let dup =
+    List.find_opt
+      (fun n ->
+        if Hashtbl.mem producers n.layer_hash then true
+        else begin
+          Hashtbl.add producers n.layer_hash n;
+          false
+        end)
+      nodes
+  in
+  (producers, dup)
+
+let external_layer_set external_layers =
+  let h = Hashtbl.create (List.length external_layers) in
+  List.iter (fun lh -> Hashtbl.add h (Layer_hash.to_string lh) ()) external_layers;
+  h
+
+let dep_in_d10 ~d10 h =
+  match d10 with
+  | None -> false
+  | Some c ->
+      D10.Layer.exists c ~hash:(Layer_hash.to_string h)
+      && D10.Layer.succeeded c ~hash:(Layer_hash.to_string h)
+
+let unsat_dep_for ~producers ~external_set ~d10 n h =
+  if Hashtbl.mem producers h then None
+  else if Hashtbl.mem external_set (Layer_hash.to_string h) then None
+  else if dep_in_d10 ~d10 h then None
+  else Some (Unsatisfiable_dep { node = n.layer_hash; missing_dep = h })
+
+let find_unsat_dep ~producers ~external_set ~d10 nodes =
+  List.find_map
+    (fun n ->
+      List.find_map
+        (unsat_dep_for ~producers ~external_set ~d10 n)
+        n.dep_layer_hashes)
+    nodes
+
+let absolute_archive_path ~plan_dir ~archive_root path =
+  let rel_or_abs =
+    if Filename.is_relative path then Filename.concat archive_root path
+    else path
+  in
+  if Filename.is_relative rel_or_abs then Filename.concat plan_dir rel_or_abs
+  else rel_or_abs
+
+(* Skip the archive check for nodes whose layer is already succeeded in d10:
+   the build path's [needs_archive] predicate doesn't fetch in that case, so
+   requiring the archive here would reject a perfectly buildable plan
+   whenever [d10ir-archives/<sha>.tar.zst] has been pruned. *)
+let archive_err_for ~d10 ~fs ~plan_dir ~archive_root n =
+  let already_built =
+    match d10 with
+    | None -> false
+    | Some c -> D10.Layer.succeeded c ~hash:(Layer_hash.to_string n.layer_hash)
+  in
+  if already_built then None
+  else
+    let abs = absolute_archive_path ~plan_dir ~archive_root n.archive.path in
+    if not (Sys.file_exists abs) then
+      Some (Archive_missing { node = n.layer_hash; path = abs })
+    else
+      let actual = sha256_of_file ~fs abs in
+      if String.equal actual n.archive.sha256 then None
+      else
+        Some
+          (Archive_sha_mismatch
+             {
+               node = n.layer_hash;
+               path = abs;
+               expected = n.archive.sha256;
+               actual;
+             })
+
+let find_archive_err ~d10 ~fs ~plan_dir ~archive_root nodes =
+  List.find_map (archive_err_for ~d10 ~fs ~plan_dir ~archive_root) nodes
+
+let check_schema t =
+  if t.schema_version = current_schema_version then Ok ()
+  else
     Error
       (Schema_mismatch
          { found = t.schema_version; expected = current_schema_version })
-  else
-    let producers = Hashtbl.create (List.length t.nodes) in
-    let dup =
-      List.find_opt
-        (fun n ->
-          if Hashtbl.mem producers n.layer_hash then true
-          else begin
-            Hashtbl.add producers n.layer_hash n;
-            false
-          end)
-        t.nodes
-    in
+
+let check_no_cycle nodes =
+  match cycles_in nodes with
+  | _ :: _ as cycles -> Error (Cycle cycles)
+  | [] -> Ok ()
+
+let opt_to_err = function Some err -> Error err | None -> Ok ()
+
+let validate ?d10 ~fs ~plan_dir t =
+  let ( let* ) = Result.bind in
+  let* () = check_schema t in
+  let producers, dup = duplicate_node t.nodes in
+  let* () =
     match dup with
     | Some n -> Error (Duplicate_layer n.layer_hash)
-    | None -> (
-        match cycles_in t.nodes with
-        | _ :: _ as cycles -> Error (Cycle cycles)
-        | [] -> (
-            let external_set =
-              let h = Hashtbl.create (List.length t.external_layers) in
-              List.iter
-                (fun lh -> Hashtbl.add h (Layer_hash.to_string lh) ())
-                t.external_layers;
-              h
-            in
-            let dep_unsat =
-              List.find_map
-                (fun n ->
-                  List.find_map
-                    (fun h ->
-                      if Hashtbl.mem producers h then None
-                      else if Hashtbl.mem external_set (Layer_hash.to_string h)
-                      then None
-                      else
-                        let in_d10 =
-                          match d10 with
-                          | None -> false
-                          | Some c ->
-                              D10.Layer.exists c ~hash:(Layer_hash.to_string h)
-                              && D10.Layer.succeeded c
-                                   ~hash:(Layer_hash.to_string h)
-                        in
-                        if in_d10 then None
-                        else
-                          Some
-                            (Unsatisfiable_dep
-                               { node = n.layer_hash; missing_dep = h }))
-                    n.dep_layer_hashes)
-                t.nodes
-            in
-            match dep_unsat with
-            | Some err -> Error err
-            | None -> (
-                let archive_err =
-                  List.find_map
-                    (fun n ->
-                      (* Skip the archive check for nodes whose layer is
-                         already succeeded in d10: the build path's
-                         [needs_archive] predicate doesn't fetch in that
-                         case, so requiring the archive here would reject
-                         a perfectly buildable plan whenever
-                         [d10ir-archives/<sha>.tar.zst] has been pruned. *)
-                      let already_built =
-                        match d10 with
-                        | None -> false
-                        | Some c ->
-                            D10.Layer.succeeded c
-                              ~hash:(Layer_hash.to_string n.layer_hash)
-                      in
-                      if already_built then None
-                      else
-                        (* archive_root may be absolute (in-memory plans) or
-                           relative to plan_dir (portable plans). *)
-                        let rel_or_abs =
-                          if Filename.is_relative n.archive.path then
-                            Filename.concat t.archive_root n.archive.path
-                          else n.archive.path
-                        in
-                        let abs =
-                          if Filename.is_relative rel_or_abs then
-                            Filename.concat plan_dir rel_or_abs
-                          else rel_or_abs
-                        in
-                        if not (Sys.file_exists abs) then
-                          Some
-                            (Archive_missing { node = n.layer_hash; path = abs })
-                        else
-                          let actual = sha256_of_file ~fs abs in
-                          if String.equal actual n.archive.sha256 then None
-                          else
-                            Some
-                              (Archive_sha_mismatch
-                                 {
-                                   node = n.layer_hash;
-                                   path = abs;
-                                   expected = n.archive.sha256;
-                                   actual;
-                                 }))
-                    t.nodes
-                in
-                match archive_err with Some err -> Error err | None -> Ok ())))
+    | None -> Ok ()
+  in
+  let* () = check_no_cycle t.nodes in
+  let external_set = external_layer_set t.external_layers in
+  let* () =
+    opt_to_err (find_unsat_dep ~producers ~external_set ~d10 t.nodes)
+  in
+  opt_to_err
+    (find_archive_err ~d10 ~fs ~plan_dir ~archive_root:t.archive_root t.nodes)

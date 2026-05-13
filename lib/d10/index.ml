@@ -36,7 +36,7 @@ let exec_rows db ~cb fmt =
    shape without a manual [rm index.db]. *)
 let indexer_version = "2"
 
-let schema =
+let schema_layers =
   {|
   CREATE TABLE IF NOT EXISTS layers (
     hash            TEXT PRIMARY KEY,
@@ -51,15 +51,16 @@ let schema =
     created         REAL NOT NULL,
     overlay_handle  TEXT,
     overlay_version TEXT,
-    -- [tarball_sha256] / [tarball_size] are populated when a [.tar.zst]
-    -- exists in the registry alongside this index. Both NULL on a
-    -- bin-index registry (lookup-only — no layer restore possible);
-    -- both set on a layer-cache registry. Replaces the old OINDEX.txt
-    -- sidecar so [index.db] is the single source of truth.
+    -- [tarball_sha256] / [tarball_size] populated when a [.tar.zst] exists
+    -- alongside this index. Both NULL on a bin-index registry; both set on a
+    -- layer-cache registry. Replaces the old OINDEX.txt sidecar.
     tarball_sha256  TEXT,
     tarball_size    INTEGER
   );
+|}
 
+let schema_layer_aux =
+  {|
   CREATE TABLE IF NOT EXISTS layer_deps (
     layer_hash    TEXT NOT NULL,
     dep_name      TEXT NOT NULL,
@@ -74,11 +75,10 @@ let schema =
     FOREIGN KEY (layer_hash) REFERENCES layers(hash)
   );
 
-  -- Ocamlfind package metadata. Populated for every [lib/<dir>/META]
-  -- file found in a layer. Lets [oi search] answer "what opam package
-  -- provides ocamlfind library X" without storing every file path.
-  -- Multiple rows per (layer_hash, package_dir) are possible because
-  -- META can declare nested subpackages.
+  -- Ocamlfind package metadata. Populated for every [lib/<dir>/META] file.
+  -- Lets [oi search] answer "what opam package provides ocamlfind library X"
+  -- without storing every file path. Multiple rows per (layer_hash,
+  -- package_dir) are possible because META declares nested subpackages.
   CREATE TABLE IF NOT EXISTS layer_meta (
     layer_hash      TEXT NOT NULL,
     package_dir     TEXT NOT NULL, -- e.g. "cohttp" — the dir under lib/
@@ -87,17 +87,19 @@ let schema =
     FOREIGN KEY (layer_hash) REFERENCES layers(hash)
   );
 
-  -- Optional: file path index for tools that need the exact ship-list
-  -- of a layer. Populated only when [rebuild ~include_files:true]; the
-  -- default false keeps [index.db] under a megabyte for typical tool
-  -- sets, since [oi search] / [find_binary] / [find_meta] don't read
-  -- this table.
+  -- Optional file path index, populated only when
+  -- [rebuild ~include_files:true]. Default false keeps [index.db] under a
+  -- megabyte for typical tool sets, since [oi search] / [binaries_for] /
+  -- [meta_for] don't read this table.
   CREATE TABLE IF NOT EXISTS layer_files (
     layer_hash    TEXT NOT NULL,
     path          TEXT NOT NULL,
     FOREIGN KEY (layer_hash) REFERENCES layers(hash)
   );
+|}
 
+let schema_indices =
+  {|
   CREATE INDEX IF NOT EXISTS idx_layers_os_key ON layers(os_key);
   CREATE INDEX IF NOT EXISTS idx_layers_arch ON layers(arch);
   CREATE INDEX IF NOT EXISTS idx_layers_distro ON layers(distro);
@@ -108,17 +110,21 @@ let schema =
   CREATE INDEX IF NOT EXISTS idx_files_hash ON layer_files(layer_hash);
   CREATE INDEX IF NOT EXISTS idx_meta_findlib ON layer_meta(findlib_pkg);
   CREATE INDEX IF NOT EXISTS idx_meta_hash ON layer_meta(layer_hash);
+|}
 
-  -- Per-os_key stamp of which indexer code shape last wrote the rows
-  -- for that platform. [Layer_index.ensure_local] consults this and
-  -- forces a full rebuild when the on-disk version doesn't match the
-  -- current code's [indexer_version] constant. One row per os_key so
-  -- platforms can be re-indexed independently as machines see them.
+let schema_index_meta =
+  {|
+  -- Per-os_key stamp of which indexer code shape last wrote the rows for
+  -- that platform. [Layer_index.ensure_local] consults this and forces a
+  -- full rebuild when on-disk doesn't match [indexer_version].
   CREATE TABLE IF NOT EXISTS index_meta (
     os_key          TEXT PRIMARY KEY,
     indexer_version TEXT NOT NULL
   );
 |}
+
+let schema =
+  schema_layers ^ schema_layer_aux ^ schema_indices ^ schema_index_meta
 
 let open_ ~fs ~path =
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
@@ -137,29 +143,36 @@ let quote s =
 
 (* -- Indexing ------------------------------------------------------------- *)
 
+(* Classify a single fs/ entry: returns the action [scan_files] should take.
+   Splitting this out keeps the [scan] body flat (the [match st.kind] used to
+   live nested inside two iter+try clauses). *)
+let classify_fs_entry ~dir name : [ `Skip | `File | `Recurse ] =
+  try
+    let st = Eio.Path.stat ~follow:false Eio.Path.(dir / name) in
+    (* Symlinks count as files — many layers ship [bin/ocamlc] as a symlink
+       to [bin/ocamlc.opt], and a regular-file-only scan would silently drop
+       the user-facing name from the binary index. *)
+    match st.kind with
+    | `Regular_file | `Symbolic_link -> `File
+    | `Directory -> `Recurse
+    | _ -> `Skip
+  with Eio.Exn.Io _ -> `Skip
+
 let scan_files ~fs fs_dir =
   let files = ref [] in
   let base = Eio.Path.(fs / fs_dir) in
+  let rel_of rel_dir name =
+    if rel_dir = "" then name else Filename.concat rel_dir name
+  in
   let rec scan rel_dir =
     let dir = if rel_dir = "" then base else Eio.Path.(base / rel_dir) in
     if Sysops.file_exists dir then
-      List.iter
-        (fun name ->
-          let rel =
-            if rel_dir = "" then name else Filename.concat rel_dir name
-          in
-          try
-            let st = Eio.Path.stat ~follow:false Eio.Path.(dir / name) in
-            (* Symlinks count as files for indexing — many layers ship
-               [bin/ocamlc] as a symlink to [bin/ocamlc.opt], and a
-               regular-file-only scan would silently drop the
-               user-facing name from the binary index. *)
-            match st.kind with
-            | `Regular_file | `Symbolic_link -> files := rel :: !files
-            | `Directory -> scan rel
-            | _ -> ()
-          with Eio.Exn.Io _ -> ())
-        (Eio.Path.read_dir dir)
+      List.iter (visit_entry ~dir ~rel_dir) (Eio.Path.read_dir dir)
+  and visit_entry ~dir ~rel_dir name =
+    match classify_fs_entry ~dir name with
+    | `File -> files := rel_of rel_dir name :: !files
+    | `Recurse -> scan (rel_of rel_dir name)
+    | `Skip -> ()
   in
   scan "";
   !files
@@ -184,102 +197,123 @@ let parse_pkg_string s =
    only needs the name graph. Lines starting with [#] are comments;
    sub-packages that span multiple lines are caught by a simple
    brace counter. *)
+(* Tiny scanner over a findlib [META] file. Each helper closes over the
+   buffer; [contents]/[len] are passed in once via {!parse_meta_file} so the
+   public entry point stays flat. *)
+module Meta_scan = struct
+  let rec eol_after ~contents ~len j =
+    if j >= len then j
+    else if contents.[j] = '\n' then j + 1
+    else eol_after ~contents ~len (j + 1)
+
+  let rec skip_ws ~contents ~len i =
+    if i >= len then i
+    else
+      match contents.[i] with
+      | ' ' | '\t' | '\n' | '\r' -> skip_ws ~contents ~len (i + 1)
+      | '#' -> skip_ws ~contents ~len (eol_after ~contents ~len i)
+      | _ -> i
+
+  let rec read_quoted_loop ~contents ~len j buf =
+    if j >= len then None
+    else
+      match contents.[j] with
+      | '"' -> Some (Buffer.contents buf, j + 1)
+      | '\\' when j + 1 < len ->
+          Buffer.add_char buf contents.[j + 1];
+          read_quoted_loop ~contents ~len (j + 2) buf
+      | c ->
+          Buffer.add_char buf c;
+          read_quoted_loop ~contents ~len (j + 1) buf
+
+  let read_quoted ~contents ~len i =
+    if i >= len || contents.[i] <> '"' then None
+    else read_quoted_loop ~contents ~len (i + 1) (Buffer.create 16)
+
+  let starts_with ~contents ~len p i =
+    i + String.length p <= len && String.sub contents i (String.length p) = p
+
+  let skip_parens ~contents ~len j =
+    if j < len && contents.[j] = '(' then
+      let rec close k =
+        if k >= len || contents.[k] = ')' then k + 1 else close (k + 1)
+      in
+      close j
+    else j
+
+  (* Match [archive(byte) = "X"] / [archive(native) = "X"] / [archive = "X"];
+     return the first hit found in this scope. *)
+  let rec scan_archive ~contents ~len i =
+    if i >= len then None
+    else if starts_with ~contents ~len "archive" i then
+      let j = skip_ws ~contents ~len (i + 7) in
+      let j = skip_parens ~contents ~len j in
+      let j = skip_ws ~contents ~len j in
+      let j = if j < len && contents.[j] = '=' then j + 1 else j in
+      let j = skip_ws ~contents ~len j in
+      match read_quoted ~contents ~len j with
+      | Some (s, _) -> Some s
+      | None -> scan_archive ~contents ~len (i + 1)
+    else scan_archive ~contents ~len (i + 1)
+
+  let qualified_name ~name_stack subname =
+    match name_stack with [] -> subname | top :: _ -> top ^ "." ^ subname
+
+  let rec scan_packages ~contents ~len ~push depth name_stack i =
+    if i >= len then ()
+    else
+      let i = skip_ws ~contents ~len i in
+      if i >= len then ()
+      else if starts_with ~contents ~len "package" i then
+        scan_package_decl ~contents ~len ~push depth name_stack i
+      else if i < len && contents.[i] = ')' then
+        scan_packages ~contents ~len ~push (depth - 1)
+          (match name_stack with [] -> [] | _ :: t -> t)
+          (i + 1)
+      else scan_packages ~contents ~len ~push depth name_stack (i + 1)
+
+  and scan_package_decl ~contents ~len ~push depth name_stack i =
+    let j = skip_ws ~contents ~len (i + 7) in
+    match read_quoted ~contents ~len j with
+    | None -> scan_packages ~contents ~len ~push depth name_stack (i + 1)
+    | Some (subname, k) ->
+        let k = skip_ws ~contents ~len k in
+        if k < len && contents.[k] = '(' then begin
+          let archive = scan_archive ~contents ~len (k + 1) in
+          let new_name = qualified_name ~name_stack subname in
+          push new_name archive;
+          scan_packages ~contents ~len ~push (depth + 1) (new_name :: name_stack)
+            (k + 1)
+        end
+        else scan_packages ~contents ~len ~push depth name_stack (k + 1)
+end
+
 let parse_meta_file ~package_dir contents =
   let len = String.length contents in
   let acc = ref [] in
   let push name archive = acc := (name, archive) :: !acc in
-  let rec skip_ws i =
-    if i >= len then i
-    else
-      match contents.[i] with
-      | ' ' | '\t' | '\n' | '\r' -> skip_ws (i + 1)
-      | '#' ->
-          let rec eol j =
-            if j >= len then j
-            else if contents.[j] = '\n' then j + 1
-            else eol (j + 1)
-          in
-          skip_ws (eol i)
-      | _ -> i
-  in
-  let read_quoted i =
-    if i >= len || contents.[i] <> '"' then None
-    else
-      let rec loop j buf =
-        if j >= len then None
-        else
-          match contents.[j] with
-          | '"' -> Some (Buffer.contents buf, j + 1)
-          | '\\' when j + 1 < len ->
-              Buffer.add_char buf contents.[j + 1];
-              loop (j + 2) buf
-          | c ->
-              Buffer.add_char buf c;
-              loop (j + 1) buf
-      in
-      loop (i + 1) (Buffer.create 16)
-  in
-  let starts_with p i =
-    i + String.length p <= len && String.sub contents i (String.length p) = p
-  in
-  let read_archive_at i =
-    (* Match [archive(byte) = "X"] or [archive(native) = "X"] or
-       [archive = "X"]. Take the first match found in this scope. *)
-    let rec scan i =
-      if i >= len then None
-      else if starts_with "archive" i then
-        let j = skip_ws (i + 7) in
-        let j =
-          if j < len && contents.[j] = '(' then
-            let rec close k =
-              if k >= len || contents.[k] = ')' then k + 1 else close (k + 1)
-            in
-            close j
-          else j
-        in
-        let j = skip_ws j in
-        let j = if j < len && contents.[j] = '=' then j + 1 else j in
-        let j = skip_ws j in
-        match read_quoted j with Some (s, _) -> Some s | None -> scan (i + 1)
-      else scan (i + 1)
-    in
-    scan i
-  in
-  let rec scan_top_level depth name_stack i =
-    if i >= len then ()
-    else
-      let i = skip_ws i in
-      if i >= len then ()
-      else if starts_with "package" i then begin
-        let j = skip_ws (i + 7) in
-        match read_quoted j with
-        | Some (subname, k) ->
-            (* Find the opening '(' *)
-            let k = skip_ws k in
-            if k < len && contents.[k] = '(' then begin
-              let archive = read_archive_at (k + 1) in
-              let new_name =
-                match name_stack with
-                | [] -> subname
-                | top :: _ -> top ^ "." ^ subname
-              in
-              push new_name archive;
-              scan_top_level (depth + 1) (new_name :: name_stack) (k + 1)
-            end
-            else scan_top_level depth name_stack (k + 1)
-        | None -> scan_top_level depth name_stack (i + 1)
-      end
-      else if i < len && contents.[i] = ')' then
-        scan_top_level (depth - 1)
-          (match name_stack with [] -> [] | _ :: t -> t)
-          (i + 1)
-      else scan_top_level depth name_stack (i + 1)
-  in
-  (* Top-level package = directory name *)
-  let archive = read_archive_at 0 in
+  (* Top-level package = directory name. *)
+  let archive = Meta_scan.scan_archive ~contents ~len 0 in
   push package_dir archive;
-  scan_top_level 0 [ package_dir ] 0;
+  Meta_scan.scan_packages ~contents ~len ~push 0 [ package_dir ] 0;
   List.rev !acc
+
+let load_meta_file_at meta_path =
+  try
+    let st = Eio.Path.stat ~follow:false meta_path in
+    match st.kind with
+    | `Regular_file | `Symbolic_link -> Some (Eio.Path.load meta_path)
+    | _ -> None
+  with Eio.Exn.Io _ -> None
+
+let metas_of_pkg_dir ~lib_dir pkg_dir =
+  let meta_path = Eio.Path.(lib_dir / pkg_dir / "META") in
+  match load_meta_file_at meta_path with
+  | None -> []
+  | Some contents ->
+      parse_meta_file ~package_dir:pkg_dir contents
+      |> List.map (fun (findlib_pkg, archive) ->
+          (pkg_dir, findlib_pkg, archive))
 
 (* Walk [<fs_dir>/lib/<dir>/META] for every immediate subdir of lib/.
    Returns [(package_dir, findlib_pkg, archive_opt)] triples. *)
@@ -288,133 +322,116 @@ let scan_meta ~fs fs_dir =
   if not (Sysops.file_exists lib_dir) then []
   else
     let entries = try Eio.Path.read_dir lib_dir with Eio.Exn.Io _ -> [] in
-    List.concat_map
-      (fun pkg_dir ->
-        let meta_path = Eio.Path.(lib_dir / pkg_dir / "META") in
-        match
-          try
-            let st = Eio.Path.stat ~follow:false meta_path in
-            match st.kind with
-            | `Regular_file | `Symbolic_link -> Some (Eio.Path.load meta_path)
-            | _ -> None
-          with Eio.Exn.Io _ -> None
-        with
-        | None -> []
-        | Some contents ->
-            parse_meta_file ~package_dir:pkg_dir contents
-            |> List.map (fun (findlib_pkg, archive) ->
-                (pkg_dir, findlib_pkg, archive)))
-      entries
+    List.concat_map (metas_of_pkg_dir ~lib_dir) entries
+
+let drop_os_key_rows db ~os_key =
+  let scoped table =
+    Fmt.str
+      "DELETE FROM %s WHERE layer_hash IN (SELECT hash FROM layers WHERE \
+       os_key = %s)"
+      table (quote os_key)
+  in
+  exec db (scoped "layer_files");
+  exec db (scoped "layer_binaries");
+  exec db (scoped "layer_deps");
+  exec db (scoped "layer_meta");
+  execf db "DELETE FROM layers WHERE os_key = %s" (quote os_key)
+
+let insert_layer_row db ~hash ~os_key ~(parts : Os_key.t)
+    ~(info : Layer.meta) ~overlay_for =
+  let { Os_key.distro; os_version; arch; os } = parts in
+  let name, version = parse_pkg_string info.package in
+  let oh, ov =
+    match overlay_for ~hash with
+    | None -> ("NULL", "NULL")
+    | Some (o : Overlay.t) -> (quote o.handle, quote o.version)
+  in
+  execf db
+    "INSERT OR REPLACE INTO layers (hash, os_key, arch, os, distro, \
+     os_version, package_name, package_ver, exit_status, created, \
+     overlay_handle, overlay_version) VALUES (%s, %s, %s, %s, %s, %s, %s, \
+     %s, %d, %f, %s, %s)"
+    (quote hash) (quote os_key) (quote arch) (quote os) (quote distro)
+    (quote os_version) (quote name) (quote version) info.exit_status
+    info.created oh ov
+
+let insert_dep_rows db ~hash (info : Layer.meta) =
+  List.iteri
+    (fun i dep_s ->
+      let dep_name, dep_version = parse_pkg_string dep_s in
+      let dep_hash =
+        if i < List.length info.hashes then List.nth info.hashes i else ""
+      in
+      execf db
+        "INSERT INTO layer_deps (layer_hash, dep_name, dep_version, dep_hash) \
+         VALUES (%s, %s, %s, %s)"
+        (quote hash) (quote dep_name) (quote dep_version) (quote dep_hash))
+    info.deps
+
+let binary_name_of_path path =
+  if String.length path > 4 && String.sub path 0 4 = "bin/" then
+    Some (String.sub path 4 (String.length path - 4))
+  else if String.length path > 5 && String.sub path 0 5 = "sbin/" then
+    Some (String.sub path 5 (String.length path - 5))
+  else None
+
+let insert_file_and_binary db ~hash ~include_files path =
+  if include_files then
+    execf db
+      "INSERT INTO layer_files (layer_hash, path) VALUES (%s, %s)"
+      (quote hash) (quote path);
+  match binary_name_of_path path with
+  | None -> ()
+  | Some name ->
+      execf db
+        "INSERT INTO layer_binaries (layer_hash, binary_name) VALUES (%s, %s)"
+        (quote hash) (quote name)
+
+let insert_meta_row db ~hash (package_dir, findlib_pkg, archive) =
+  let archive_q = match archive with None -> "NULL" | Some a -> quote a in
+  execf db
+    "INSERT INTO layer_meta (layer_hash, package_dir, findlib_pkg, archive) \
+     VALUES (%s, %s, %s, %s)"
+    (quote hash) (quote package_dir) (quote findlib_pkg) archive_q
+
+(* Scan a single layer's fs/ tree: always extracts binaries + META
+   (the primary "what does this layer ship" answer); records the full file
+   path list only when [include_files=true] (the layer-cache mode). *)
+let layer_fs db ~hash ~include_files ~fs ~layers_dir =
+  let fs_dir = Eio.Path.(layers_dir / hash / "fs") in
+  if not (Sysops.file_exists fs_dir) then ()
+  else begin
+    let files = scan_files ~fs (Eio.Path.native_exn fs_dir) in
+    List.iter (insert_file_and_binary db ~hash ~include_files) files;
+    let metas = scan_meta ~fs (Eio.Path.native_exn fs_dir) in
+    List.iter (insert_meta_row db ~hash) metas
+  end
+
+let one_layer db ~os_key ~parts ~overlay_for ~include_files ~fs
+    ~layers_dir hash =
+  match Layer.load_meta Eio.Path.(layers_dir / hash / "layer.json") with
+  | None -> ()
+  | Some info ->
+      insert_layer_row db ~hash ~os_key ~parts ~info ~overlay_for;
+      insert_dep_rows db ~hash info;
+      layer_fs db ~hash ~include_files ~fs ~layers_dir
 
 let rebuild (c : Config.t) ?(overlay_for = fun ~hash:_ -> None)
     ?(include_files = false) db =
   let layers_dir = Eio.Path.(c.root / "layers" / c.os_key) in
   let os_key = c.os_key in
   if not (Sysops.file_exists layers_dir) then ()
-  else begin
+  else
     let parts = Os_key.of_string os_key in
-    let { Os_key.distro; os_version; arch; os } = parts in
     Log.info (fun m ->
-        m "Indexing layers for %s (%s/%s/%s)" os_key distro arch os);
-    let scoped table =
-      Fmt.str
-        "DELETE FROM %s WHERE layer_hash IN (SELECT hash FROM layers WHERE \
-         os_key = %s)"
-        table (quote os_key)
-    in
-    exec db (scoped "layer_files");
-    exec db (scoped "layer_binaries");
-    exec db (scoped "layer_deps");
-    exec db (scoped "layer_meta");
-    execf db "DELETE FROM layers WHERE os_key = %s" (quote os_key);
+        m "Indexing layers for %s (%s/%s/%s)" os_key parts.distro parts.arch
+          parts.os);
+    drop_os_key_rows db ~os_key;
     let entries = Eio.Path.read_dir layers_dir in
     exec db "BEGIN TRANSACTION";
     List.iter
-      (fun hash ->
-        let info =
-          Layer.load_meta Eio.Path.(layers_dir / hash / "layer.json")
-        in
-        match info with
-        | None -> ()
-        | Some info ->
-            let name, version = parse_pkg_string info.package in
-            let oh, ov =
-              match overlay_for ~hash with
-              | None -> ("NULL", "NULL")
-              | Some (o : Overlay.t) -> (quote o.handle, quote o.version)
-            in
-            execf db
-              "INSERT OR REPLACE INTO layers (hash, os_key, arch, os, distro, \
-               os_version, package_name, package_ver, exit_status, created, \
-               overlay_handle, overlay_version) VALUES (%s, %s, %s, %s, %s, \
-               %s, %s, %s, %d, %f, %s, %s)"
-              (quote hash) (quote os_key) (quote arch) (quote os) (quote distro)
-              (quote os_version) (quote name) (quote version) info.exit_status
-              info.created oh ov;
-            List.iteri
-              (fun i dep_s ->
-                let dep_name, dep_version = parse_pkg_string dep_s in
-                let dep_hash =
-                  if i < List.length info.hashes then List.nth info.hashes i
-                  else ""
-                in
-                execf db
-                  "INSERT INTO layer_deps (layer_hash, dep_name, dep_version, \
-                   dep_hash) VALUES (%s, %s, %s, %s)"
-                  (quote hash) (quote dep_name) (quote dep_version)
-                  (quote dep_hash))
-              info.deps;
-            (* Scan files in fs/. Two passes: always extract
-               binaries + ocamlfind META metadata (small, the
-               primary 'what does this layer ship' answer); only
-               record the full file path list under
-               [include_files = true] (the layer-cache mode). *)
-            let fs_dir = Eio.Path.(layers_dir / hash / "fs") in
-            if Sysops.file_exists fs_dir then begin
-              let files =
-                scan_files ~fs:c.Config.fs (Eio.Path.native_exn fs_dir)
-              in
-              List.iter
-                (fun path ->
-                  if include_files then
-                    execf db
-                      "INSERT INTO layer_files (layer_hash, path) VALUES (%s, \
-                       %s)"
-                      (quote hash) (quote path);
-                  let bin_name =
-                    if String.length path > 4 && String.sub path 0 4 = "bin/"
-                    then Some (String.sub path 4 (String.length path - 4))
-                    else if
-                      String.length path > 5 && String.sub path 0 5 = "sbin/"
-                    then Some (String.sub path 5 (String.length path - 5))
-                    else None
-                  in
-                  Option.iter
-                    (fun name ->
-                      execf db
-                        "INSERT INTO layer_binaries (layer_hash, binary_name) \
-                         VALUES (%s, %s)"
-                        (quote hash) (quote name))
-                    bin_name)
-                files;
-              (* Findlib META: record one row per (package_dir,
-                 findlib_pkg, archive) triple so [oi search ocamlfind:X]
-                 can map back to its opam producer. *)
-              let metas =
-                scan_meta ~fs:c.Config.fs (Eio.Path.native_exn fs_dir)
-              in
-              List.iter
-                (fun (package_dir, findlib_pkg, archive) ->
-                  let archive_q =
-                    match archive with None -> "NULL" | Some a -> quote a
-                  in
-                  execf db
-                    "INSERT INTO layer_meta (layer_hash, package_dir, \
-                     findlib_pkg, archive) VALUES (%s, %s, %s, %s)"
-                    (quote hash) (quote package_dir) (quote findlib_pkg)
-                    archive_q)
-                metas
-            end)
+      (one_layer db ~os_key ~parts ~overlay_for ~include_files
+         ~fs:c.Config.fs ~layers_dir)
       entries;
     execf db
       "INSERT OR REPLACE INTO index_meta (os_key, indexer_version) VALUES (%s, \
@@ -423,7 +440,6 @@ let rebuild (c : Config.t) ?(overlay_for = fun ~hash:_ -> None)
     exec db "COMMIT";
     Log.info (fun m ->
         m "Indexed %d layers for %s" (List.length entries) os_key)
-  end
 
 let indexer_stamp db ~os_key : string option =
   let stmt =
@@ -464,7 +480,7 @@ let find_layer db ~name ~version ~os_key =
 let overlay_of_cols oh ov =
   if oh = "" then None else Some { Overlay.handle = oh; version = ov }
 
-let find_binary db ~binary ~os_key =
+let binaries_for db ~binary ~os_key =
   let results = ref [] in
   let cb row =
     match row with
@@ -544,7 +560,7 @@ let search_binary db ~pattern ~os_key =
           (OpamPackage.Version.of_string v1))
     (List.rev !results)
 
-let find_meta db ~findlib_pkg ~os_key =
+let meta_for db ~findlib_pkg ~os_key =
   let results = ref [] in
   let cb row =
     match row with

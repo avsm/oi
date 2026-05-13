@@ -227,32 +227,39 @@ module Ctx = struct
   let load_cache : (string, OpamFile.OPAM.t OpamPackage.Map.t) Hashtbl.t =
     Hashtbl.create 8
 
+  let try_parse_opam ~opams ~opam_path pkg_s =
+    if not (Sys.file_exists opam_path) then ()
+    else
+      try
+        let opam =
+          OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw opam_path))
+        in
+        let pkg = OpamPackage.of_string pkg_s in
+        opams := OpamPackage.Map.add pkg opam !opams
+      with Failure _ | Sys_error _ ->
+        Log.debug (fun m -> m "Could not parse %s" opam_path)
+
+  let load_versions_for ~opams name_dir =
+    Array.iter
+      (fun pkg_s ->
+        let pkg_dir = name_dir / pkg_s in
+        let opam_path = pkg_dir / "opam" in
+        try_parse_opam ~opams ~opam_path pkg_s)
+      (Sys.readdir name_dir)
+
+  let load_names_under ~opams dir =
+    Array.iter
+      (fun name_s ->
+        let name_dir = dir / name_s in
+        if Sys.is_directory name_dir then load_versions_for ~opams name_dir)
+      (Sys.readdir dir)
+
   let load_opams_from_dir dir =
     match Hashtbl.find_opt load_cache dir with
     | Some m -> m
     | None ->
         let opams = ref OpamPackage.Map.empty in
-        if Sys.file_exists dir then
-          Array.iter
-            (fun name_s ->
-              let name_dir = dir / name_s in
-              if Sys.is_directory name_dir then
-                Array.iter
-                  (fun pkg_s ->
-                    let pkg_dir = name_dir / pkg_s in
-                    let opam_path = pkg_dir / "opam" in
-                    if Sys.file_exists opam_path then
-                      try
-                        let opam =
-                          OpamFile.OPAM.read
-                            (OpamFile.make (OpamFilename.raw opam_path))
-                        in
-                        let pkg = OpamPackage.of_string pkg_s in
-                        opams := OpamPackage.Map.add pkg opam !opams
-                      with Failure _ | Sys_error _ ->
-                        Log.debug (fun m -> m "Could not parse %s" opam_path))
-                  (Sys.readdir name_dir))
-            (Sys.readdir dir);
+        if Sys.file_exists dir then load_names_under ~opams dir;
         let m = !opams in
         Hashtbl.add load_cache dir m;
         m
@@ -751,21 +758,13 @@ module Memo = struct
   let schema_version = Stamp.solver_cache_schema
   let signature_memo : (string, string option) Hashtbl.t = Hashtbl.create 16
 
-  let read_process_output cmd =
-    let ic = Unix.open_process_in cmd in
-    let buf = Buffer.create 256 in
-    let chunk = Bytes.create 4096 in
-    let rec loop () =
-      let n = input ic chunk 0 (Bytes.length chunk) in
-      if n > 0 then begin
-        Buffer.add_subbytes buf chunk 0 n;
-        loop ()
-      end
-    in
-    loop ();
-    match Unix.close_process_in ic with
-    | Unix.WEXITED 0 -> Some (Buffer.contents buf)
-    | _ -> None
+  (* Run an argv via the Eio process manager and return its untrimmed stdout,
+     or [None] on any failure (missing git, non-git dir, signal kill). The old
+     [Unix.open_process_in] route is gone — every external command goes
+     through [D10.Sysops.Cmd.run_out_quiet] so stderr is swallowed and the
+     call lives under the Eio fiber tree. *)
+  let run_out_opt ~sys argv =
+    try Some (D10.Sysops.Cmd.run_out_quiet sys argv) with Eio.Io _ -> None
 
   (* Working-tree-aware signature for [packages_dir]: combines
      [git rev-parse HEAD] (the committed tip) with a hash of
@@ -780,17 +779,17 @@ module Memo = struct
      so the [.git] is several levels up. [git -C <dir>] walks up to find
      the repo root for us; the [WEXITED 0] gate in [read_process_output]
      is what tells us we're inside a git tree at all. *)
-  let compute_git_signature packages_dir =
+  let compute_git_signature ~sys packages_dir =
     let head =
       Option.map String.trim
-        (Fmt.kstr read_process_output "git -C %s rev-parse HEAD 2>/dev/null"
-           (Filename.quote packages_dir))
+        (run_out_opt ~sys
+           [ "git"; "-C"; packages_dir; "rev-parse"; "HEAD" ])
     in
     let status =
-      Fmt.kstr read_process_output
-        "git -C %s status --porcelain -- %s 2>/dev/null"
-        (Filename.quote packages_dir)
-        (Filename.quote packages_dir)
+      run_out_opt ~sys
+        [
+          "git"; "-C"; packages_dir; "status"; "--porcelain"; "--"; packages_dir;
+        ]
     in
     match (head, status) with
     | Some h, Some s when h <> "" ->
@@ -801,12 +800,12 @@ module Memo = struct
      to the absolute path as the signature. Pin set dirs are already
      content-addressed — the hash in the path captures the identity of
      the pin set (name + version + git revision per pin). *)
-  let signature_for_packages_dir packages_dir =
+  let signature_for_packages_dir ~sys packages_dir =
     match Hashtbl.find_opt signature_memo packages_dir with
     | Some r -> r
     | None ->
         let r =
-          match compute_git_signature packages_dir with
+          match compute_git_signature ~sys packages_dir with
           | Some _ as s -> s
           | None -> Some ("path:" ^ Digest.to_hex (Digest.string packages_dir))
         in
@@ -814,10 +813,10 @@ module Memo = struct
         r
 
   let key ?(test = OpamPackage.Name.Set.empty)
-      ?(doc = OpamPackage.Name.Set.empty) ~(conf : Ctx.conf) ~packages_dirs
-      ~constraints ~names ?toolchain () =
+      ?(doc = OpamPackage.Name.Set.empty) ~sys ~(conf : Ctx.conf)
+      ~packages_dirs ~constraints ~names ?toolchain () =
     let signatures =
-      List.map (fun d -> (d, signature_for_packages_dir d)) packages_dirs
+      List.map (fun d -> (d, signature_for_packages_dir ~sys d)) packages_dirs
     in
     if List.exists (fun (_, s) -> s = None) signatures then begin
       List.iter
@@ -1139,54 +1138,57 @@ let log_package_sources ~packages_dirs pkgs =
       end)
     packages_dirs
 
-let solve ?test ?doc ?(reporter = Build_progress.null) ~fs ~cache_root ctx
+(* Extend [names] with the active toolchain's root packages so the solve
+   includes them. *)
+let names_with_toolchain_roots ctx names =
+  match Ctx.toolchain ctx with
+  | None -> names
+  | Some tc ->
+      let existing = OpamPackage.Name.Set.of_list names in
+      let extra =
+        OpamPackage.Name.Set.diff tc.root_names existing
+        |> OpamPackage.Name.Set.elements
+      in
+      names @ extra
+
+let log_selected_versions ctx ~names pkgs =
+  let by_name =
+    List.fold_left
+      (fun m p -> OpamPackage.Name.Map.add (OpamPackage.name p) p m)
+      OpamPackage.Name.Map.empty pkgs
+  in
+  let render n =
+    match OpamPackage.Name.Map.find_opt n by_name with
+    | Some p ->
+        Fmt.kstr
+          (fun s -> Some s)
+          "%s.%s"
+          (OpamPackage.Name.to_string n)
+          (OpamPackage.Version.to_string (OpamPackage.version p))
+    | None -> None
+  in
+  let extra_names =
+    match Ctx.toolchain ctx with
+    | None -> []
+    | Some tc ->
+        OpamPackage.Name.Set.elements tc.root_names
+        |> List.filter (fun n ->
+            not (List.exists (OpamPackage.Name.equal n) names))
+  in
+  let interesting =
+    List.filter_map render names @ List.filter_map render extra_names
+  in
+  if interesting <> [] then
+    Log.info (fun m -> m "Selected: %s" (String.concat ", " interesting))
+
+let solve ?test ?doc ?(reporter = Build_progress.null) ~sys ~fs ~cache_root ctx
     ~packages_dirs ~constraints names =
   let conf = Ctx.conf ctx in
-  let names =
-    match Ctx.toolchain ctx with
-    | None -> names
-    | Some tc ->
-        let existing = OpamPackage.Name.Set.of_list names in
-        let extra =
-          OpamPackage.Name.Set.diff tc.root_names existing
-          |> OpamPackage.Name.Set.elements
-        in
-        names @ extra
-  in
+  let names = names_with_toolchain_roots ctx names in
   Fmt.kstr
     (fun s -> reporter.Build_progress.event (Status s))
     "Solving for %d root%s" (List.length names)
     (if List.length names = 1 then "" else "s");
-  let log_selected_versions pkgs =
-    let by_name =
-      List.fold_left
-        (fun m p -> OpamPackage.Name.Map.add (OpamPackage.name p) p m)
-        OpamPackage.Name.Map.empty pkgs
-    in
-    let render n =
-      match OpamPackage.Name.Map.find_opt n by_name with
-      | Some p ->
-          Fmt.kstr
-            (fun s -> Some s)
-            "%s.%s"
-            (OpamPackage.Name.to_string n)
-            (OpamPackage.Version.to_string (OpamPackage.version p))
-      | None -> None
-    in
-    let extra_names =
-      match Ctx.toolchain ctx with
-      | None -> []
-      | Some tc ->
-          OpamPackage.Name.Set.elements tc.root_names
-          |> List.filter (fun n ->
-              not (List.exists (OpamPackage.Name.equal n) names))
-    in
-    let interesting =
-      List.filter_map render names @ List.filter_map render extra_names
-    in
-    if interesting <> [] then
-      Log.info (fun m -> m "Selected: %s" (String.concat ", " interesting))
-  in
   let run_solve () =
     match
       solve_with_dir_context ?test ?doc ctx ~packages_dirs ~constraints names
@@ -1194,12 +1196,12 @@ let solve ?test ?doc ?(reporter = Build_progress.null) ~fs ~cache_root ctx
     | Ok (pkgs, _) ->
         let pkgs = topo_sort ~packages_dirs ~conf:(Ctx.conf ctx) pkgs in
         log_package_sources ~packages_dirs pkgs;
-        log_selected_versions pkgs;
+        log_selected_versions ctx ~names pkgs;
         Ok pkgs
     | Error _ as e -> e
   in
   match
-    Memo.key ?test ?doc ~conf ~packages_dirs ~constraints ~names
+    Memo.key ?test ?doc ~sys ~conf ~packages_dirs ~constraints ~names
       ?toolchain:(Ctx.toolchain ctx) ()
   with
   | None -> run_solve ()
@@ -1210,7 +1212,7 @@ let solve ?test ?doc ?(reporter = Build_progress.null) ~fs ~cache_root ctx
               m "solve cache hit %s (%d packages)"
                 (String.sub cache_key 0 12)
                 (List.length pkgs));
-          log_selected_versions pkgs;
+          log_selected_versions ctx ~names pkgs;
           Ok pkgs
       | None -> (
           match run_solve () with

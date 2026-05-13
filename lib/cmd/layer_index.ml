@@ -143,7 +143,7 @@ let package_of_binary ?on_phase ~sys ~fs ~clock ~cache ~os_key ~registry name =
   if not (Eio.Path.is_file Eio.Path.(fs / index_path)) then None
   else
     let db = D10.Index.open_ ~fs ~path:index_path in
-    let results = D10.Index.find_binary db ~binary:name ~os_key in
+    let results = D10.Index.binaries_for db ~binary:name ~os_key in
     D10.Index.close db;
     match results with
     | (pkg, _, _, overlay) :: _ ->

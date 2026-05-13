@@ -435,8 +435,9 @@ let cmd =
     in
     let pkgs =
       match
-        Oi.Solver.solve ~test:test_doc_universe ~doc:test_doc_universe ~fs
-          ~cache_root ctx ~packages_dirs ~constraints:extra_constraints names
+        Oi.Solver.solve ~test:test_doc_universe ~doc:test_doc_universe ~sys
+          ~fs ~cache_root ctx ~packages_dirs ~constraints:extra_constraints
+          names
       with
       | Ok pkgs -> pkgs
       | Error msg -> Oi.Error.no_solution msg

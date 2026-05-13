@@ -31,21 +31,21 @@ let load_manifest ~fs ~output_dir ~os_key =
           Log.debug (fun m -> m "manifest decode %s: %s" path msg);
           None)
 
+let decode_audit_line ~path line =
+  match
+    Jsont_bytesrw.decode_string ~locs:false ~file:path Audit.event_codec line
+  with
+  | Ok e -> Some e
+  | Error msg ->
+      Log.debug (fun m -> m "audit bad line %s: %s" path msg);
+      None
+
 let load_audit_events ~fs ~output_dir ~os_key =
   let path = Audit.exported_log_path ~output_dir ~os_key in
   match load_text fs path with
   | None -> []
   | Some content ->
-      split_lines content
-      |> List.filter_map (fun line ->
-          match
-            Jsont_bytesrw.decode_string ~locs:false ~file:path Audit.event_codec
-              line
-          with
-          | Ok e -> Some e
-          | Error msg ->
-              Log.debug (fun m -> m "audit bad line %s: %s" path msg);
-              None)
+      split_lines content |> List.filter_map (decode_audit_line ~path)
 
 let read_slice ~fs ~output_dir ~os_key =
   match load_manifest ~fs ~output_dir ~os_key with
@@ -200,17 +200,16 @@ let group_by_pkg pairs =
    so the agent gets some upstream pointer even if the failing distro's
    manifest doesn't have provenance for that package (typical: build never
    committed). *)
+let url_for_entry ~pkg (e : Manifest.entry) =
+  if e.pkg <> pkg then None
+  else
+    match e.source with
+    | Some src when src.url <> "" -> Some src.url
+    | _ -> None
+
 let source_for_pkg ~pkg slices =
   List.find_map
-    (fun s ->
-      List.find_map
-        (fun (e : Manifest.entry) ->
-          if e.pkg = pkg then
-            match e.source with
-            | Some src when src.url <> "" -> Some src.url
-            | _ -> None
-          else None)
-        s.manifest.results)
+    (fun s -> List.find_map (url_for_entry ~pkg) s.manifest.results)
     slices
 
 (* -- Markdown rendering -------------------------------------------------- *)
@@ -225,108 +224,115 @@ let summarize_kinds events =
     [] events
   |> Outcome.sort_histogram
 
+let buf_add_header buf ~handle ~generated_at =
+  buf_addf buf "# Failure report: @%s\n\n" handle;
+  buf_addf buf "_Generated %s — for LLM-agent consumption._\n\n"
+    (format_iso_utc generated_at);
+  buf_add buf
+    "This file lists every package that failed to build under the `@";
+  buf_add buf handle;
+  buf_add buf
+    "` overlay handle, joined across every distro currently published to \
+     this registry. Each section gives the failing outcome, an embedded tail \
+     of the build log, and a one-liner you can paste to reproduce locally.\n\n"
+
+let buf_add_summary buf ~n_pkgs ~n_events ~distros ~kinds =
+  buf_add buf "## Summary\n\n";
+  buf_addf buf "- %d failing package(s), %d failure event(s)\n" n_pkgs n_events;
+  buf_addf buf "- Distros with at least one failure: %s\n"
+    (String.concat ", " (List.map (fun s -> "`" ^ s ^ "`") distros));
+  buf_add buf "- Outcome mix: ";
+  (match kinds with
+  | [] -> buf_add buf "_(none)_"
+  | _ ->
+      buf_add buf
+        (String.concat ", "
+           (List.map
+              (fun (k, n) -> Fmt.str "%d %s" n (Outcome.string_of_kind k))
+              kinds)));
+  buf_add buf "\n\n"
+
+let buf_add_reproduction buf ~handle =
+  buf_add buf "## Reproduction\n\n";
+  buf_add buf
+    "Build every package that participates in this overlay (host distro):\n\n";
+  buf_addf buf "```sh\noi build @%s\n```\n\n" handle;
+  buf_add buf "Build a single failing package:\n\n";
+  buf_add buf "```sh\n";
+  buf_addf buf "oi build @%s/<pkg>\n" handle;
+  buf_add buf "```\n\n";
+  buf_add buf
+    "To rebuild on a specific distro, run inside the matching container \
+     image (e.g. `docker run --rm -it oi:fedora-43`).\n\n"
+
+let buf_add_log_tail buf (e : Audit.event) =
+  match Stdlib.Option.bind e.log (fun lp -> lp.tail) with
+  | Some tail when String.trim tail <> "" ->
+      buf_add buf "<details><summary>Log tail</summary>\n\n";
+      buf_add buf "```\n";
+      buf_add buf (trim_tail tail);
+      if
+        not
+          (String.length tail > 0
+          && tail.[String.length tail - 1] = '\n')
+      then buf_add buf "\n";
+      buf_add buf "```\n\n";
+      buf_add buf "</details>\n\n"
+  | _ -> ()
+
+let buf_add_event_block buf (os_key, (e : Audit.event)) =
+  buf_addf buf "#### %s — %s\n\n" os_key (outcome_to_kind_string e.outcome);
+  buf_addf buf "- When: %s\n" (format_iso_utc e.ts);
+  (match e.target with
+  | Layer h -> buf_addf buf "- Layer hash: `%s`\n" h
+  | Solve_key h -> buf_addf buf "- Solve key: `%s`\n" h);
+  pp_outcome_detail buf e.outcome;
+  (match e.log with
+  | Some lp ->
+      buf_addf buf "- Log (registry-relative): `%s`\n"
+        (log_relative_path ~os_key lp)
+  | None -> ());
+  buf_add buf "\n";
+  buf_add_log_tail buf e
+
+let buf_add_pkg_section buf ~handle ~slices (pkg, evs) =
+  let pkg_label = Identity.to_string pkg in
+  let kinds_for_pkg =
+    List.map (fun (_, e) -> Outcome.kind_of (e : Audit.event).outcome) evs
+    |> List.sort_uniq compare
+    |> List.map Outcome.string_of_kind
+    |> String.concat ", "
+  in
+  buf_addf buf "### `%s` — %s\n\n" pkg_label kinds_for_pkg;
+  buf_addf buf "Reproduce: `oi build @%s/%s`\n\n" handle pkg_label;
+  (match source_for_pkg ~pkg slices with
+  | Some url -> buf_addf buf "Source: %s\n\n" url
+  | None -> ());
+  let by_os =
+    List.sort (fun (a, _) (b, _) -> String.compare a b) evs
+  in
+  List.iter (buf_add_event_block buf) by_os;
+  buf_add buf "---\n\n"
+
 let markdown ~handle ~generated_at slices =
   let failures = failures_for_handle ~handle slices in
   if failures = [] then ""
   else
     let buf = Buffer.create 4096 in
     let pkg_groups = group_by_pkg failures in
-    let n_pkgs = List.length pkg_groups in
-    let n_events = List.length failures in
-    let kinds = summarize_kinds failures in
     let distros =
       List.fold_left
         (fun acc (os_key, _) -> String_set.add os_key acc)
         String_set.empty failures
       |> String_set.elements
     in
-    buf_addf buf "# Failure report: @%s\n\n" handle;
-    buf_addf buf "_Generated %s — for LLM-agent consumption._\n\n"
-      (format_iso_utc generated_at);
-    buf_add buf
-      "This file lists every package that failed to build under the `@";
-    buf_add buf handle;
-    buf_add buf
-      "` overlay handle, joined across every distro currently published to \
-       this registry. Each section gives the failing outcome, an embedded tail \
-       of the build log, and a one-liner you can paste to reproduce locally.\n\n";
-    buf_add buf "## Summary\n\n";
-    buf_addf buf "- %d failing package(s), %d failure event(s)\n" n_pkgs
-      n_events;
-    buf_addf buf "- Distros with at least one failure: %s\n"
-      (String.concat ", " (List.map (fun s -> "`" ^ s ^ "`") distros));
-    buf_add buf "- Outcome mix: ";
-    (match kinds with
-    | [] -> buf_add buf "_(none)_"
-    | _ ->
-        buf_add buf
-          (String.concat ", "
-             (List.map
-                (fun (k, n) -> Fmt.str "%d %s" n (Outcome.string_of_kind k))
-                kinds)));
-    buf_add buf "\n\n";
-    buf_add buf "## Reproduction\n\n";
-    buf_add buf
-      "Build every package that participates in this overlay (host distro):\n\n";
-    buf_addf buf "```sh\noi build @%s\n```\n\n" handle;
-    buf_add buf "Build a single failing package:\n\n";
-    buf_add buf "```sh\n";
-    buf_addf buf "oi build @%s/<pkg>\n" handle;
-    buf_add buf "```\n\n";
-    buf_add buf
-      "To rebuild on a specific distro, run inside the matching container \
-       image (e.g. `docker run --rm -it oi:fedora-43`).\n\n";
+    buf_add_header buf ~handle ~generated_at;
+    buf_add_summary buf ~n_pkgs:(List.length pkg_groups)
+      ~n_events:(List.length failures) ~distros
+      ~kinds:(summarize_kinds failures);
+    buf_add_reproduction buf ~handle;
     buf_add buf "## Failures\n\n";
-    List.iter
-      (fun (pkg, evs) ->
-        let pkg_label = Identity.to_string pkg in
-        let kinds_for_pkg =
-          List.map (fun (_, e) -> Outcome.kind_of (e : Audit.event).outcome) evs
-          |> List.sort_uniq compare
-          |> List.map Outcome.string_of_kind
-          |> String.concat ", "
-        in
-        buf_addf buf "### `%s` — %s\n\n" pkg_label kinds_for_pkg;
-        buf_addf buf "Reproduce: `oi build @%s/%s`\n\n" handle pkg_label;
-        (match source_for_pkg ~pkg slices with
-        | Some url -> buf_addf buf "Source: %s\n\n" url
-        | None -> ());
-        let by_os =
-          List.sort
-            (fun (a, _) (b, _) -> String.compare a b)
-            (List.map (fun (os_key, ev) -> (os_key, ev)) evs)
-        in
-        List.iter
-          (fun (os_key, (e : Audit.event)) ->
-            buf_addf buf "#### %s — %s\n\n" os_key
-              (outcome_to_kind_string e.outcome);
-            buf_addf buf "- When: %s\n" (format_iso_utc e.ts);
-            (match e.target with
-            | Layer h -> buf_addf buf "- Layer hash: `%s`\n" h
-            | Solve_key h -> buf_addf buf "- Solve key: `%s`\n" h);
-            pp_outcome_detail buf e.outcome;
-            (match e.log with
-            | Some lp ->
-                buf_addf buf "- Log (registry-relative): `%s`\n"
-                  (log_relative_path ~os_key lp)
-            | None -> ());
-            buf_add buf "\n";
-            match Stdlib.Option.bind e.log (fun lp -> lp.tail) with
-            | Some tail when String.trim tail <> "" ->
-                buf_add buf "<details><summary>Log tail</summary>\n\n";
-                buf_add buf "```\n";
-                buf_add buf (trim_tail tail);
-                if
-                  not
-                    (String.length tail > 0
-                    && tail.[String.length tail - 1] = '\n')
-                then buf_add buf "\n";
-                buf_add buf "```\n\n";
-                buf_add buf "</details>\n\n"
-            | _ -> ())
-          by_os;
-        buf_add buf "---\n\n")
-      pkg_groups;
+    List.iter (buf_add_pkg_section buf ~handle ~slices) pkg_groups;
     Buffer.contents buf
 
 (* -- write_all ----------------------------------------------------------- *)

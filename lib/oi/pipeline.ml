@@ -52,6 +52,55 @@ let toolchain_names_of_handle entries handle =
   in
   from_field @ from_self
 
+let no_default_toolchain_fail ~entries ~path =
+  let known =
+    entries
+    |> List.filter_map (fun (e : Source.Reporepo.entry) -> e.toolchain_name)
+    |> List.sort_uniq String.compare
+  in
+  let hint =
+    if known = [] then "the reporepo has no toolchain definitions yet"
+    else
+      Fmt.str
+        "mark one with: oi repo bump <handle> --default. Known toolchains: %s"
+        (String.concat ", " known)
+  in
+  Error.fail_config_error
+    "no default toolchain set in reporepo at %s — %s. Or pass --toolchain=NAME \
+     explicitly."
+    path hint
+
+let pick_default_or_fail ~entries ~path =
+  match Source.Reporepo.default_toolchain entries with
+  | Some e ->
+      let n = Stdlib.Option.value e.toolchain_name ~default:e.handle in
+      Log.debug (fun m -> m "Using default toolchain %s" n);
+      n
+  | None -> no_default_toolchain_fail ~entries ~path
+
+let pick_from_scope_or_default ~entries ~path ~handles =
+  let from_scope =
+    List.concat_map (toolchain_names_of_handle entries) handles
+    |> List.sort_uniq String.compare
+  in
+  match from_scope with
+  | [ n ] ->
+      Log.debug (fun m -> m "Using toolchain %s from handle scope" n);
+      n
+  | many when many <> [] ->
+      Error.fail_config_error
+        "overlays in scope declare conflicting toolchains: %s — pass \
+         --toolchain=NAME to disambiguate"
+        (String.concat ", " many)
+  | _ -> pick_default_or_fail ~entries ~path
+
+let pick_toolchain_handle ~entries ~path ~override ~handles =
+  match override with
+  | Some h ->
+      Log.debug (fun m -> m "Using --toolchain=%s" h);
+      h
+  | None -> pick_from_scope_or_default ~entries ~path ~handles
+
 let pick_toolchain ~fs ~sys ~data_dir ~conf ~install ~override ~handles
     ?(reporter = Build_progress.null) () =
   let path = Source.Reporepo.env_path () in
@@ -60,56 +109,8 @@ let pick_toolchain ~fs ~sys ~data_dir ~conf ~install ~override ~handles
       try Source.Reporepo.load ~path with Error.E _ -> []
     else []
   in
-  (* Pick a toolchain handle by precedence; resolve once at the end. *)
-  let pick () =
-    match override with
-    | Some h ->
-        Log.debug (fun m -> m "Using --toolchain=%s" h);
-        h
-    | None -> (
-        let from_scope =
-          List.concat_map (toolchain_names_of_handle entries) handles
-          |> List.sort_uniq String.compare
-        in
-        match from_scope with
-        | [ n ] ->
-            Log.debug (fun m -> m "Using toolchain %s from handle scope" n);
-            n
-        | many when many <> [] ->
-            Error.fail_config_error
-              "overlays in scope declare conflicting toolchains: %s — pass \
-               --toolchain=NAME to disambiguate"
-              (String.concat ", " many)
-        | _ -> (
-            match Source.Reporepo.default_toolchain entries with
-            | Some e ->
-                let n =
-                  Stdlib.Option.value e.toolchain_name ~default:e.handle
-                in
-                Log.debug (fun m -> m "Using default toolchain %s" n);
-                n
-            | None ->
-                let known =
-                  entries
-                  |> List.filter_map (fun (e : Source.Reporepo.entry) ->
-                      e.toolchain_name)
-                  |> List.sort_uniq String.compare
-                in
-                let hint =
-                  if known = [] then
-                    "the reporepo has no toolchain definitions yet"
-                  else
-                    Fmt.str
-                      "mark one with: oi repo bump <handle> --default. Known \
-                       toolchains: %s"
-                      (String.concat ", " known)
-                in
-                Error.fail_config_error
-                  "no default toolchain set in reporepo at %s — %s. Or pass \
-                   --toolchain=NAME explicitly."
-                  path hint))
-  in
-  let info = Toolchain.resolve ~fs ~sys ~data_dir ~conf ~handle:(pick ()) in
+  let handle = pick_toolchain_handle ~entries ~path ~override ~handles in
+  let info = Toolchain.resolve ~fs ~sys ~data_dir ~conf ~handle in
   if install then Toolchain.ensure_installed ~reporter ~fs info;
   Some info
 
@@ -135,38 +136,36 @@ let classify_with_args ~fs ~sys ~cache ?refresh
   in
   (pkg_deps, url_project)
 
+let overlay_compatible ~entries ~(info : Toolchain.info) h =
+  match Source.Reporepo.latest entries ~handle:h with
+  | None -> true
+  | Some (e : Source.Reporepo.entry) -> (
+      match e.toolchain with
+      | None -> true
+      | Some t when t = info.handle -> true
+      | Some t ->
+          Logs.info (fun m ->
+              m
+                "Dropping overlay @%s: built against toolchain %s, \
+                 incompatible with auto-picked toolchain %s. Pass \
+                 --toolchain=%s to override."
+                h t info.handle t);
+          false)
+
 let filter_compatible_overlays ~reporepo_path ?(override = None) ~toolchain
     handles =
   match (override, (toolchain : Toolchain.info option)) with
   | Some _, _ ->
       (* User explicitly named a toolchain via [--toolchain=NAME]. Honour
-         every declared overlay verbatim — if one is genuinely
-         incompatible the solver will surface the constraint failure,
-         which is a clearer signal than silently dropping a repo the
-         user expected to be in scope. *)
+         every declared overlay verbatim — if one is genuinely incompatible
+         the solver will surface the constraint failure. *)
       handles
   | None, None -> handles
   | None, Some info ->
       let entries =
         try Source.Reporepo.load ~path:reporepo_path with Error.E _ -> []
       in
-      List.filter
-        (fun h ->
-          match Source.Reporepo.latest entries ~handle:h with
-          | None -> true
-          | Some (e : Source.Reporepo.entry) -> (
-              match e.toolchain with
-              | None -> true
-              | Some t when t = info.handle -> true
-              | Some t ->
-                  Logs.info (fun m ->
-                      m
-                        "Dropping overlay @%s: built against toolchain %s, \
-                         incompatible with auto-picked toolchain %s. Pass \
-                         --toolchain=%s to override."
-                        h t info.handle t);
-                  false))
-        handles
+      List.filter (overlay_compatible ~entries ~info) handles
 
 (* -- Build helpers ------------------------------------------------------- *)
 

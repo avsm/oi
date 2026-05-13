@@ -79,7 +79,7 @@ val rebuild :
     lands in [layer_files]. The bin-index registry shape leaves this off — the
     table is the bulk of [index.db]'s on-disk size and is only needed by the
     layer-cache shape (where [oi build] verifies tarball contents). [oi search]
-    / [find_binary] / [find_meta] don't consult [layer_files] and work with
+    / [binaries_for] / [meta_for] don't consult [layer_files] and work with
     [include_files = false].
 
     [overlay_for] supplies the per-layer overlay attribution (defaulted to
@@ -101,12 +101,12 @@ val find_layer :
 (** [find_layer db ~name ~version ~os_key] returns [(hash, exit_status)] for the
     layer matching the given package, or [None]. *)
 
-val find_binary :
+val binaries_for :
   db ->
   binary:string ->
   os_key:string ->
   (string * string * string * Overlay.t option) list
-(** [find_binary db ~binary ~os_key] returns all layers that provide
+(** [binaries_for db ~binary ~os_key] returns all layers that provide
     [bin/<binary>] or [sbin/<binary>], as
     [(package_name, package_version, layer_hash, overlay)], sorted by opam
     version descending (latest version first). [overlay] is set when the layer
@@ -136,12 +136,12 @@ val search_package :
     the [overlay] field have the same semantics as {!search_binary}. Results are
     sorted by package name then opam version descending. *)
 
-val find_meta :
+val meta_for :
   db ->
   findlib_pkg:string ->
   os_key:string ->
   (string * string * string * Overlay.t option) list
-(** [find_meta db ~findlib_pkg ~os_key] returns layers whose findlib metadata
+(** [meta_for db ~findlib_pkg ~os_key] returns layers whose findlib metadata
     declares [findlib_pkg] (e.g. ["cohttp.async"]), as
     [(package_name, package_version, layer_hash, overlay)] sorted by opam
     version descending. Use [*] as a wildcard for substring search. Reads the

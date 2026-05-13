@@ -1170,6 +1170,50 @@ let walk_packages_dir packages_dir =
         |> List.sort String.compare
         |> List.map (fun pkg_ver_dir -> (pkg, pkg_ver_dir)))
 
+(* Hardlink (or fall back to byte copy across filesystems) every regular
+   file under [src] into [dst]. Used to mirror a package's [files/]
+   directory from the upstream clone into the materialised v2/ tree. *)
+let hardlink_or_copy_one ~fs s d =
+  if Sys.file_exists s && not (Sys.is_directory s) then
+    try Unix.link s d
+    with Unix.Unix_error _ ->
+      let bytes = Eio.Path.load Eio.Path.(fs / s) in
+      Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / d) bytes
+
+let copy_files_dir ~fs ~src ~dst =
+  if Sys.file_exists src && Sys.is_directory src then begin
+    mkdir_p ~fs dst;
+    Sys.readdir src
+    |> Array.iter (fun name -> hardlink_or_copy_one ~fs (src / name) (dst / name))
+  end
+
+(* Process every package in the scratch clone into the materialised tree:
+   rewrites each [url{}] block to a content-addressed form, copies [files/]
+   directories. Returns a per-version outcome list. *)
+let process_clone_packages ~fs ~sys ~scratch_packages ~tmp_packages pkgs =
+  Eio.Fiber.List.map ~max_fibers:max_concurrent_url_resolutions
+    (fun (pkg, pkg_ver) ->
+      let src = scratch_packages / pkg / pkg_ver / "opam" in
+      let dst = tmp_packages / pkg / pkg_ver / "opam" in
+      let outcome =
+        process_one_opam ~fs ~sys ~src_opam_path:src ~dst_opam_path:dst
+          ~package:pkg_ver
+      in
+      copy_files_dir ~fs
+        ~src:(scratch_packages / pkg / pkg_ver / "files")
+        ~dst:(tmp_packages / pkg / pkg_ver / "files");
+      (pkg_ver, outcome))
+    pkgs
+
+let tally_outcomes outcomes =
+  List.fold_left
+    (fun (k, r, u) (pkg_ver, outcome) ->
+      match outcome with
+      | Pkg_kept -> (k + 1, r, u)
+      | Pkg_rewrote _ -> (k, r + 1, u)
+      | Pkg_unavailable reason -> (k, r, (pkg_ver, reason) :: u))
+    (0, 0, []) outcomes
+
 let materialise_handle ~fs ~sys ~path ~handle ~url ~commit =
   if commit = "" || url = "" then
     Error.fail_config_error
@@ -1191,50 +1235,12 @@ let materialise_handle ~fs ~sys ~path ~handle ~url ~commit =
   let pkgs = walk_packages_dir scratch_packages in
   Log.info (fun m ->
       m "Materialising %s: %d package versions" handle (List.length pkgs));
-  (* Copy [<pkg-dir>/files/] (patches and other [extra-files:]) from
-     upstream into the materialised tree. opam reads them by relative
-     path during build, so the v2/ snapshot is incomplete without
-     them. Hardlink first, fall back to byte copy across filesystems. *)
-  let copy_files_dir ~src ~dst =
-    if Sys.file_exists src && Sys.is_directory src then begin
-      mkdir_p ~fs dst;
-      Sys.readdir src
-      |> Array.iter (fun name ->
-          let s = src / name in
-          let d = dst / name in
-          if Sys.file_exists s && not (Sys.is_directory s) then
-            try Unix.link s d
-            with Unix.Unix_error _ ->
-              let bytes = Eio.Path.load Eio.Path.(fs / s) in
-              Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / d) bytes)
-    end
-  in
   let outcomes =
-    Eio.Fiber.List.map ~max_fibers:max_concurrent_url_resolutions
-      (fun (pkg, pkg_ver) ->
-        let src = scratch_packages / pkg / pkg_ver / "opam" in
-        let dst = tmp_packages / pkg / pkg_ver / "opam" in
-        let outcome =
-          process_one_opam ~fs ~sys ~src_opam_path:src ~dst_opam_path:dst
-            ~package:pkg_ver
-        in
-        copy_files_dir
-          ~src:(scratch_packages / pkg / pkg_ver / "files")
-          ~dst:(tmp_packages / pkg / pkg_ver / "files");
-        (pkg_ver, outcome))
-      pkgs
+    process_clone_packages ~fs ~sys ~scratch_packages ~tmp_packages pkgs
   in
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / target_root);
   Unix.rename tmp_root target_root;
-  let kept, rewrote, unavailable =
-    List.fold_left
-      (fun (k, r, u) (pkg_ver, outcome) ->
-        match outcome with
-        | Pkg_kept -> (k + 1, r, u)
-        | Pkg_rewrote _ -> (k, r + 1, u)
-        | Pkg_unavailable reason -> (k, r, (pkg_ver, reason) :: u))
-      (0, 0, []) outcomes
-  in
+  let kept, rewrote, unavailable = tally_outcomes outcomes in
   {
     handle;
     total = List.length outcomes;
@@ -1294,6 +1300,62 @@ let add ~fs ~sys ~path ~handle ~url ?ref_ ?toolchain ?base_handles ?depends
     opam_path;
   }
 
+(* Compute the bumped [depends] list. Auto-derive from [base_handles] (or the
+   defaults), then preserve any extras [prev] carried — bumped to their
+   current latest version so a fresh bump never leaves a stale pin. *)
+let compute_bump_depends ~entries ~handle ~base_handles ~prev_depends depends =
+  let auto_derive_depends ~auto ~prev =
+    let auto_handles = List.map fst auto in
+    let extras_from_prev =
+      List.filter_map
+        (fun (h, _) ->
+          if List.mem h auto_handles then None
+          else
+            match latest entries ~handle:h with
+            | Some e -> Some (h, Some e.version)
+            | None -> None)
+        prev
+    in
+    auto @ extras_from_prev
+  in
+  match depends with
+  | Some d -> d
+  | None ->
+      if is_base_handle handle then prev_depends
+      else
+        let auto =
+          match base_handles with
+          | Some bh -> auto_base_depends entries ~handle ~base_handles:bh
+          | None ->
+              auto_base_depends entries ~handle
+                ~base_handles:default_base_handles
+        in
+        if auto = [] then prev_depends
+        else auto_derive_depends ~auto ~prev:prev_depends
+
+let bump_unchanged ~url ~commit ~ref_ ~toolchain ~default_toolchain ~depends
+    ~root_packages (prev : entry) =
+  let eq_as_set a b = List.sort compare a = List.sort compare b in
+  url = prev.url && commit = prev.commit && ref_ = prev.ref_
+  && toolchain = prev.toolchain
+  && default_toolchain = prev.default_toolchain
+  && eq_as_set depends prev.depends
+  && eq_as_set root_packages prev.root_packages
+
+let toolchain_def_of_prev ~default_toolchain (prev : entry) =
+  match prev.toolchain_name with
+  | None -> None
+  | Some name ->
+      Some
+        {
+          td_name = name;
+          td_compiler = prev.toolchain_compiler;
+          td_relocatable = prev.relocatable;
+          td_roots = prev.toolchain_roots;
+          td_tools = prev.toolchain_tools;
+          td_default = default_toolchain;
+        }
+
 let bump ~fs ~sys ~path ~handle ?url ?ref_ ?toolchain ?base_handles ?depends
     ?root_packages ?default () =
   let entries = load ~path in
@@ -1318,68 +1380,20 @@ let bump ~fs ~sys ~path ~handle ?url ?ref_ ?toolchain ?base_handles ?depends
     match toolchain with Some _ -> toolchain | None -> prev.toolchain
   in
   let commit = if url = "" then prev.commit else ls_remote_sha ~sys ?ref_ url in
-  (* Auto-derive a fresh, accurate depends list. The set of handles
-     comes from [auto] (bumped explicitly via [base_handles]) plus any
-     extra handles [prev] carried (preserved as-is in the set). Every
-     handle gets bumped to its current latest version, so a fresh
-     bump never leaves a stale pin behind. *)
-  let auto_derive_depends ~auto ~prev =
-    let auto_handles = List.map fst auto in
-    let extras_from_prev =
-      List.filter_map
-        (fun (h, _) ->
-          if List.mem h auto_handles then None
-          else
-            match latest entries ~handle:h with
-            | Some e -> Some (h, Some e.version)
-            | None -> None)
-        prev
-    in
-    auto @ extras_from_prev
-  in
   let depends =
-    match depends with
-    | Some d -> d
-    | None ->
-        if is_base_handle handle then prev.depends
-        else
-          let auto =
-            match base_handles with
-            | Some bh -> auto_base_depends entries ~handle ~base_handles:bh
-            | None ->
-                auto_base_depends entries ~handle
-                  ~base_handles:default_base_handles
-          in
-          if auto = [] then prev.depends
-          else auto_derive_depends ~auto ~prev:prev.depends
+    compute_bump_depends ~entries ~handle ~base_handles
+      ~prev_depends:prev.depends depends
   in
   let root_packages =
     match root_packages with Some r -> r | None -> prev.root_packages
   in
-  let eq_as_set a b = List.sort compare a = List.sort compare b in
   if
-    url = prev.url && commit = prev.commit && ref_ = prev.ref_
-    && toolchain = prev.toolchain
-    && default_toolchain = prev.default_toolchain
-    && eq_as_set depends prev.depends
-    && eq_as_set root_packages prev.root_packages
+    bump_unchanged ~url ~commit ~ref_ ~toolchain ~default_toolchain ~depends
+      ~root_packages prev
   then `Unchanged prev
   else
     let version = next_version entries ~handle in
-    let toolchain_def =
-      match prev.toolchain_name with
-      | None -> None
-      | Some name ->
-          Some
-            {
-              td_name = name;
-              td_compiler = prev.toolchain_compiler;
-              td_relocatable = prev.relocatable;
-              td_roots = prev.toolchain_roots;
-              td_tools = prev.toolchain_tools;
-              td_default = default_toolchain;
-            }
-    in
+    let toolchain_def = toolchain_def_of_prev ~default_toolchain prev in
     let content =
       render_opam ~synopsis:(default_synopsis handle) ~url ~commit ~ref_
         ~toolchain ?toolchain_def ~depends ~root_packages ()

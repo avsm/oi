@@ -50,76 +50,77 @@ let dst_is_valid dst =
 let unique_tmp dst =
   Fmt.str "%s.%d.%d.tmp" dst (Unix.getpid ()) (Random.bits ())
 
+let rec stream_chunks ~buf ic oc =
+  let n = input ic buf 0 (Bytes.length buf) in
+  if n > 0 then begin
+    output oc buf 0 n;
+    stream_chunks ~buf ic oc
+  end
+
+let stream_ic_to_path ic dst =
+  let oc = open_out_bin dst in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr oc)
+    (fun () -> stream_chunks ~buf:(Bytes.create 65536) ic oc)
+
+(* Stream bytes from [src] to [dst] file path. Returns [true] on success. *)
+let copy_file_bytes_to src dst =
+  try
+    let ic = open_in_bin src in
+    Fun.protect
+      ~finally:(fun () -> close_in_noerr ic)
+      (fun () -> stream_ic_to_path ic dst);
+    true
+  with Sys_error _ | Unix.Unix_error _ -> false
+
+(* Cross-device or filesystem-without-hardlinks fallback: byte-copy via a
+   unique tmp path, then atomically link tmp → dst. *)
+let copy_then_link ~src ~dst =
+  let tmp = unique_tmp dst in
+  (try Unix.unlink tmp with Unix.Unix_error _ -> ());
+  if copy_file_bytes_to src tmp then begin
+    (match Unix.link tmp dst with
+    | () -> ()
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    try Sys.remove tmp with Sys_error _ -> ()
+  end
+  else try Sys.remove tmp with Sys_error _ -> ()
+
 let link_or_copy ~fs ~src ~dst =
   let src = resolve_symlink src in
   if dst_is_valid dst then ()
   else begin
     mkdir_p ~fs (Filename.dirname dst);
-    (* Try the fast path: a single hardlink straight to [dst]. This
-       is atomic; if another writer beat us to it we get EEXIST and
-       we're done. *)
+    (* Fast path: a single hardlink straight to [dst]. Atomic; if another
+       writer beat us we get EEXIST and we're done. *)
     match Unix.link src dst with
     | () -> ()
     | exception Unix.Unix_error (Unix.EEXIST, _, _) -> ()
     | exception
         Unix.Unix_error
-          ((Unix.EXDEV | Unix.EMLINK | Unix.EPERM | Unix.EOPNOTSUPP), _, _) -> (
-        (* Cross-device or filesystem doesn't support hardlinks
-           (typical for some bind-mounted volumes). Fall back to a
-           byte-copy via a unique tmp path, then atomically link
-           tmp → dst. *)
-        let tmp = unique_tmp dst in
-        (try Unix.unlink tmp with Unix.Unix_error _ -> ());
-        let copy_ok =
-          try
-            let ic = open_in_bin src in
-            Fun.protect
-              ~finally:(fun () -> close_in_noerr ic)
-              (fun () ->
-                let oc = open_out_bin tmp in
-                Fun.protect
-                  ~finally:(fun () -> close_out_noerr oc)
-                  (fun () ->
-                    let buf = Bytes.create 65536 in
-                    let rec loop () =
-                      let n = input ic buf 0 (Bytes.length buf) in
-                      if n > 0 then begin
-                        output oc buf 0 n;
-                        loop ()
-                      end
-                    in
-                    loop ()));
-            true
-          with Sys_error _ | Unix.Unix_error _ -> false
-        in
-        if copy_ok then begin
-          (match Unix.link tmp dst with
-          | () -> ()
-          | exception Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-          try Sys.remove tmp with Sys_error _ -> ()
-        end
-        else try Sys.remove tmp with Sys_error _ -> ())
+          ((Unix.EXDEV | Unix.EMLINK | Unix.EPERM | Unix.EOPNOTSUPP), _, _) ->
+        copy_then_link ~src ~dst
   end
 
 (* Disk-walk helpers — no SQLite metadata; the on-disk layout
    [<dir>/<algo>/<XX>/<full-hash>] is the single source of truth. *)
 
+let blobs_under_shard ~algo shard_dir =
+  Sys.readdir shard_dir |> Array.to_list
+  |> List.filter_map (fun hash ->
+      let path = shard_dir / hash in
+      if Sys.is_directory path then None else Some (algo, hash, path))
+
+let blobs_under_algo ~mirror_dir algo =
+  let algo_dir = mirror_dir / algo in
+  if not (Sys.file_exists algo_dir) then []
+  else
+    Sys.readdir algo_dir |> Array.to_list
+    |> List.filter (fun s -> Sys.is_directory (algo_dir / s))
+    |> List.concat_map (fun shard -> blobs_under_shard ~algo (algo_dir / shard))
+
 let walk_blobs ~mirror_dir =
-  let algos = [ "md5"; "sha256"; "sha512" ] in
-  List.concat_map
-    (fun algo ->
-      let algo_dir = mirror_dir / algo in
-      if not (Sys.file_exists algo_dir) then []
-      else
-        Sys.readdir algo_dir |> Array.to_list
-        |> List.filter (fun s -> Sys.is_directory (algo_dir / s))
-        |> List.concat_map (fun shard ->
-            let shard_dir = algo_dir / shard in
-            Sys.readdir shard_dir |> Array.to_list
-            |> List.filter_map (fun hash ->
-                let path = shard_dir / hash in
-                if Sys.is_directory path then None else Some (algo, hash, path))))
-    algos
+  List.concat_map (blobs_under_algo ~mirror_dir) [ "md5"; "sha256"; "sha512" ]
 
 type stats = { count : int; total_size : int64 }
 
@@ -167,6 +168,33 @@ let opam_cached_blob checksums =
       if Sys.file_exists path then Some path else None)
     checksums
 
+(* Deposit [src] under every declared checksum so future lookups against any
+   algo hit the mirror. Always also deposit under the SHA-256 path computed
+   from the actual bytes so [sources/sha256/] is consistent even when the
+   recipe only declared md5. Returns the count of newly-deposited entries. *)
+let deposit_under_checksums ~fs ~mirror_dir ~src checksums =
+  let promoted = ref 0 in
+  let put dst =
+    if not (Sys.file_exists dst) then begin
+      link_or_copy ~fs ~src ~dst;
+      incr promoted
+    end
+  in
+  List.iter
+    (fun ck ->
+      let dst = List.fold_left ( / ) mirror_dir (OpamHash.to_path ck) in
+      put dst)
+    checksums;
+  if not (List.exists (fun ck -> OpamHash.kind ck = `SHA256) checksums) then
+    (try
+       let sha256_hash = OpamHash.compute ~kind:`SHA256 src in
+       let dst =
+         List.fold_left ( / ) mirror_dir (OpamHash.to_path sha256_hash)
+       in
+       put dst
+     with Sys_error _ | Failure _ -> ());
+  !promoted
+
 let import_from_opam_cache ~fs ~cache_root checksums =
   match checksums with
   | [] -> 0
@@ -181,33 +209,7 @@ let import_from_opam_cache ~fs ~cache_root checksums =
           0
       | Some src ->
           let mirror_dir = cache_root / "mirror" in
-          (* Deposit under every declared checksum so future lookups
-             against any algo hit the mirror. Always also deposit under
-             the SHA-256 path computed from the actual bytes, so the
-             sources/sha256/ tree is consistent even when the recipe
-             only declared md5. *)
-          let promoted = ref 0 in
-          let put dst =
-            if not (Sys.file_exists dst) then begin
-              link_or_copy ~fs ~src ~dst;
-              incr promoted
-            end
-          in
-          List.iter
-            (fun ck ->
-              let dst = List.fold_left ( / ) mirror_dir (OpamHash.to_path ck) in
-              put dst)
-            checksums;
-          (if not (List.exists (fun ck -> OpamHash.kind ck = `SHA256) checksums)
-           then
-             try
-               let sha256_hash = OpamHash.compute ~kind:`SHA256 src in
-               let dst =
-                 List.fold_left ( / ) mirror_dir (OpamHash.to_path sha256_hash)
-               in
-               put dst
-             with Sys_error _ | Failure _ -> ());
-          !promoted)
+          deposit_under_checksums ~fs ~mirror_dir ~src checksums)
 
 (* -- Bulk fetch into the mirror (used by [oi build --archives-only]) --- *)
 
@@ -258,20 +260,20 @@ let dedup_by_url archives =
 
 (* Compact progress label: hostname + final path component. The full URL
    is too long for a single-line in-place progress sink. *)
+let rec drop_leading_slashes s =
+  if String.length s > 0 && s.[0] = '/' then
+    drop_leading_slashes (String.sub s 1 (String.length s - 1))
+  else s
+
+let strip_url_scheme s =
+  match String.index_opt s ':' with
+  | None -> s
+  | Some i ->
+      let rest = String.sub s (i + 1) (String.length s - i - 1) in
+      drop_leading_slashes rest
+
 let label_of_url (u : OpamUrl.t) =
-  let strip_scheme s =
-    match String.index_opt s ':' with
-    | None -> s
-    | Some i ->
-        let rest = String.sub s (i + 1) (String.length s - i - 1) in
-        let rec drop_slashes s =
-          if String.length s > 0 && s.[0] = '/' then
-            drop_slashes (String.sub s 1 (String.length s - 1))
-          else s
-        in
-        drop_slashes rest
-  in
-  let no_scheme = strip_scheme (OpamUrl.to_string u) in
+  let no_scheme = strip_url_scheme (OpamUrl.to_string u) in
   let host, rest =
     match String.index_opt no_scheme '/' with
     | None -> (no_scheme, "")
@@ -316,21 +318,23 @@ type origin = Local_mirror of string | Other
    refine a log line is a wasted round-trip. The [Other] case
    therefore means "either the registry or upstream — opam will
    decide" and the actual fetch goes through [cache_urls] as usual. *)
+let probe_local_cache_url checksums (cu : OpamUrl.t) =
+  let s = OpamUrl.to_string cu in
+  if not (String.starts_with ~prefix:"file://" s) then None
+  else
+    let base = String.sub s 7 (String.length s - 7) in
+    List.find_map
+      (fun ck ->
+        let path = List.fold_left ( / ) base (OpamHash.to_path ck) in
+        if Sys.file_exists path then Some (Local_mirror path) else None)
+      checksums
+
 let source_origin ~cache_urls ~checksums =
   if checksums = [] then Other
   else
-    let probe (cu : OpamUrl.t) =
-      let s = OpamUrl.to_string cu in
-      if String.starts_with ~prefix:"file://" s then
-        let base = String.sub s 7 (String.length s - 7) in
-        List.find_map
-          (fun ck ->
-            let path = List.fold_left ( / ) base (OpamHash.to_path ck) in
-            if Sys.file_exists path then Some (Local_mirror path) else None)
-          checksums
-      else None
-    in
-    match List.find_map probe cache_urls with Some o -> o | None -> Other
+    match List.find_map (probe_local_cache_url checksums) cache_urls with
+    | Some o -> o
+    | None -> Other
 
 let fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a =
   let tmp = tmp_dir / Fmt.str "%d.%d.bin" (Unix.getpid ()) (Random.bits ()) in
@@ -364,6 +368,19 @@ let fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a =
   (try Sys.remove tmp with Sys_error _ -> ());
   outcome
 
+let process_one_archive ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir
+    ~fetched ~cached ~failed ~bytes_added a =
+  if mirror_has ~mirror_dir a.checksums then incr cached
+  else
+    match fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a with
+    | `Fetched bytes ->
+        incr fetched;
+        bytes_added := Int64.add !bytes_added bytes
+    | `Failed msg ->
+        Log.info (fun m ->
+            m "fetch failed: %s -> %s" (OpamUrl.to_string a.url) msg);
+        failed := (OpamUrl.to_string a.url, msg) :: !failed
+
 let fetch_archives ~fs ~cache
     ?(on_progress = fun ~fetched:_ ~total:_ ~current:_ -> ()) archives =
   let mirror_dir = dir ~cache in
@@ -382,16 +399,8 @@ let fetch_archives ~fs ~cache
     (fun a ->
       on_progress ~fetched:(done_count ()) ~total
         ~current:(Some (label_of_url a.url));
-      if mirror_has ~mirror_dir a.checksums then incr cached
-      else
-        match fetch_one ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir a with
-        | `Fetched bytes ->
-            incr fetched;
-            bytes_added := Int64.add !bytes_added bytes
-        | `Failed msg ->
-            Log.info (fun m ->
-                m "fetch failed: %s -> %s" (OpamUrl.to_string a.url) msg);
-            failed := (OpamUrl.to_string a.url, msg) :: !failed)
+      process_one_archive ~fs ~mirror_dir ~cache_root ~cache_dir ~tmp_dir
+        ~fetched ~cached ~failed ~bytes_added a)
     archives;
   on_progress ~fetched:total ~total ~current:None;
   (try Unix.rmdir tmp_dir with Unix.Unix_error _ -> ());

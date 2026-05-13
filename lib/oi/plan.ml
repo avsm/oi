@@ -40,6 +40,27 @@ let pp_cycles ppf cycles =
    reported as a length-1 cycle.
 
    Each returned inner list is one cycle in discovery order. *)
+(* Pop the current SCC off [stack] up to and including [v]. *)
+let pop_scc ~stack ~on_stack v =
+  let module N = OpamPackage.Name in
+  let scc = ref [] in
+  let rec pop () =
+    let w = Stack.pop stack in
+    Hashtbl.replace on_stack w false;
+    scc := w :: !scc;
+    if N.compare w v <> 0 then pop ()
+  in
+  pop ();
+  !scc
+
+let names_form_cycle ~deps_of names =
+  let module N = OpamPackage.Name in
+  List.length names > 1
+  ||
+  match names with
+  | [ n ] -> List.exists (fun d -> N.compare d n = 0) (deps_of n)
+  | _ -> false
+
 let scc_cycles g =
   let module N = OpamPackage.Name in
   let index : (N.t, int) Hashtbl.t = Hashtbl.create 16 in
@@ -71,30 +92,125 @@ let scc_cycles g =
           Hashtbl.replace lowlink v (min lv iw)
         end)
       (deps_of v);
-    if Hashtbl.find lowlink v = Hashtbl.find index v then begin
-      let scc = ref [] in
-      let rec pop () =
-        let w = Stack.pop stack in
-        Hashtbl.replace on_stack w false;
-        scc := w :: !scc;
-        if N.compare w v <> 0 then pop ()
-      in
-      pop ();
-      let names = !scc in
-      let is_cycle =
-        List.length names > 1
-        ||
-        match names with
-        | [ n ] -> List.exists (fun d -> N.compare d n = 0) (deps_of n)
-        | _ -> false
-      in
-      if is_cycle then cycles := List.map pkg_of names :: !cycles
-    end
+    if Hashtbl.find lowlink v = Hashtbl.find index v then
+      let names = pop_scc ~stack ~on_stack v in
+      if names_form_cycle ~deps_of names then
+        cycles := List.map pkg_of names :: !cycles
   in
   N.Map.iter
     (fun v _ -> if not (Hashtbl.mem index v) then strongconnect v)
     g.nodes_by_name;
   List.rev !cycles
+
+(* Iteratively peel leaves (alphabetical within each level via
+   OpamPackage.Map ordering). *)
+let peel_level m =
+  let installable, remainder =
+    OpamPackage.Map.partition
+      (fun _ deps -> OpamPackage.Set.is_empty deps)
+      m
+  in
+  if OpamPackage.Map.is_empty installable then ([], remainder)
+  else
+    let installable_list =
+      OpamPackage.Map.bindings installable |> List.map fst
+    in
+    let remainder =
+      OpamPackage.Map.map
+        (fun deps ->
+          List.fold_left
+            (fun acc p -> OpamPackage.Set.remove p acc)
+            deps installable_list)
+        remainder
+    in
+    (installable_list, remainder)
+
+let rec topo_sort_dag m =
+  if OpamPackage.Map.is_empty m then []
+  else
+    match peel_level m with
+    | [], _ -> []
+    | level, remainder -> level @ topo_sort_dag remainder
+
+(* Build the sub-DAG of [pkg]'s transitive closure (keyed by pkg, value =
+   transitive-dep set), topo-sort, reverse so the root comes first, then drop
+   the root itself. Output order must match day10's or the layer_hash
+   diverges. *)
+let topo_sorted_dep_pkgs ~nodes ~transitive_deps pkg trans =
+  let pkg_of_name n =
+    OpamPackage.Name.Map.find_opt n nodes
+    |> Stdlib.Option.map (fun node -> node.pkg)
+  in
+  let names_to_pkg_set s =
+    OpamPackage.Name.Set.elements s
+    |> List.filter_map pkg_of_name
+    |> OpamPackage.Set.of_list
+  in
+  let dag =
+    OpamPackage.Name.Set.fold
+      (fun dep_name acc ->
+        match pkg_of_name dep_name with
+        | None -> acc
+        | Some dep_pkg ->
+            let dep_trans =
+              Hashtbl.find_opt transitive_deps dep_name
+              |> Stdlib.Option.value ~default:OpamPackage.Name.Set.empty
+            in
+            OpamPackage.Map.add dep_pkg (names_to_pkg_set dep_trans) acc)
+      trans OpamPackage.Map.empty
+  in
+  let dag = OpamPackage.Map.add pkg (names_to_pkg_set trans) dag in
+  match topo_sort_dag dag |> List.rev with [] -> [] | _ :: rest -> rest
+
+(* Mix in the toolchain hash for non-relocatable toolchains: they bake their
+   [install_prefix] into the binaries they produce, so the layer hash must
+   include the toolchain identity or stale binaries with dangling shebangs
+   would be reused. *)
+let layer_hash_with_toolchain ctx base_hash =
+  match Solver.Ctx.toolchain ctx with
+  | Some tc when not tc.relocatable ->
+      Digest.string (base_hash ^ ":" ^ tc.hash) |> Digest.to_hex
+  | _ -> base_hash
+
+let method_for ~d10 layer_hash : Identity.method_ =
+  match d10 with
+  | Some d10 when D10.Layer.succeeded d10 ~hash:layer_hash -> Binary
+  | _ -> Source
+
+let extend_transitive_deps ~transitive_deps deps =
+  List.fold_left
+    (fun acc dep_name ->
+      let acc = OpamPackage.Name.Set.add dep_name acc in
+      match Hashtbl.find_opt transitive_deps dep_name with
+      | Some s -> OpamPackage.Name.Set.union acc s
+      | None -> acc)
+    OpamPackage.Name.Set.empty deps
+
+let node_of_pkg ctx ?d10 ~packages_dirs ~in_solution ~transitive_deps ~nodes pkg =
+  let name = OpamPackage.name pkg in
+  let dep_set =
+    Solver.direct_deps_within ~packages_dirs ~conf:(Solver.Ctx.conf ctx) pkg
+      in_solution
+  in
+  let deps =
+    dep_set |> OpamPackage.Name.Set.elements
+    |> List.filter (fun n -> OpamPackage.Name.Set.mem n in_solution)
+  in
+  let opam =
+    Solver.find_opam_file packages_dirs pkg
+    |> Stdlib.Option.value ~default:(OpamFile.OPAM.create pkg)
+  in
+  let trans = extend_transitive_deps ~transitive_deps deps in
+  Hashtbl.replace transitive_deps name trans;
+  let all_dep_pkgs = topo_sorted_dep_pkgs ~nodes ~transitive_deps pkg trans in
+  let layer_hash = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
+  let layer_hash = layer_hash_with_toolchain ctx layer_hash in
+  let method_ = method_for ~d10 layer_hash in
+  Log.debug (fun m ->
+      m "Plan %s: deps=[%s]"
+        (OpamPackage.to_string pkg)
+        (String.concat ", " (List.map OpamPackage.Name.to_string deps)));
+  (name, { pkg; opam; method_; deps; layer_hash })
 
 let of_solution ctx ?d10 ~packages_dirs pkgs =
   let in_solution =
@@ -108,115 +224,21 @@ let of_solution ctx ?d10 ~packages_dirs pkgs =
   let _installed, nodes_by_name, topo_order =
     List.fold_left
       (fun (installed, nodes, order) pkg ->
-        let name = OpamPackage.name pkg in
-        let dep_set =
-          Solver.direct_deps_within ~packages_dirs ~conf:(Solver.Ctx.conf ctx)
-            pkg in_solution
+        let name, node =
+          node_of_pkg ctx ?d10 ~packages_dirs ~in_solution ~transitive_deps
+            ~nodes pkg
         in
-        let deps =
-          dep_set |> OpamPackage.Name.Set.elements
-          |> List.filter (fun n -> OpamPackage.Name.Set.mem n in_solution)
-        in
-        let opam =
-          Solver.find_opam_file packages_dirs pkg
-          |> Stdlib.Option.value ~default:(OpamFile.OPAM.create pkg)
-        in
-        let trans =
-          List.fold_left
-            (fun acc dep_name ->
-              let acc = OpamPackage.Name.Set.add dep_name acc in
-              match Hashtbl.find_opt transitive_deps dep_name with
-              | Some s -> OpamPackage.Name.Set.union acc s
-              | None -> acc)
-            OpamPackage.Name.Set.empty deps
-        in
-        Hashtbl.replace transitive_deps name trans;
-        (* Order must match day10's here:
-           build the sub-DAG of pkg's transitive closure keyed by pkg with each
-           entry's transitive-dep set as its value, iteratively peel leaves
-           (alphabetical within each level via OpamPackage.Map ordering),
-           reverse so the root comes first, then drop the root (pkg itself).
-           Anything else produces a different layer_hash than day10. *)
-        let all_dep_pkgs =
-          let pkg_of_name n =
-            OpamPackage.Name.Map.find_opt n nodes
-            |> Stdlib.Option.map (fun node -> node.pkg)
-          in
-          let names_to_pkg_set s =
-            OpamPackage.Name.Set.elements s
-            |> List.filter_map pkg_of_name
-            |> OpamPackage.Set.of_list
-          in
-          let dag =
-            OpamPackage.Name.Set.fold
-              (fun dep_name acc ->
-                match pkg_of_name dep_name with
-                | None -> acc
-                | Some dep_pkg ->
-                    let dep_trans =
-                      Hashtbl.find_opt transitive_deps dep_name
-                      |> Stdlib.Option.value ~default:OpamPackage.Name.Set.empty
-                    in
-                    OpamPackage.Map.add dep_pkg (names_to_pkg_set dep_trans) acc)
-              trans OpamPackage.Map.empty
-          in
-          let dag = OpamPackage.Map.add pkg (names_to_pkg_set trans) dag in
-          let rec topo_sort m =
-            if OpamPackage.Map.is_empty m then []
-            else
-              let installable, remainder =
-                OpamPackage.Map.partition
-                  (fun _ deps -> OpamPackage.Set.is_empty deps)
-                  m
-              in
-              if OpamPackage.Map.is_empty installable then []
-              else
-                let installable_list =
-                  OpamPackage.Map.bindings installable |> List.map fst
-                in
-                let remainder =
-                  OpamPackage.Map.map
-                    (fun deps ->
-                      List.fold_left
-                        (fun acc p -> OpamPackage.Set.remove p acc)
-                        deps installable_list)
-                    remainder
-                in
-                installable_list @ topo_sort remainder
-          in
-          match topo_sort dag |> List.rev with [] -> [] | _ :: rest -> rest
-        in
-        let layer_hash = D10.Layer.hash ~packages_dirs (pkg :: all_dep_pkgs) in
-        (* Non-relocatable toolchains bake their [install_prefix] into
-           the binaries they produce (e.g. bytecode shebangs), so the
-           layer hash must include the toolchain identity or stale
-           binaries with dangling shebangs get reused from the cache. *)
-        let layer_hash =
-          match Solver.Ctx.toolchain ctx with
-          | Some tc when not tc.relocatable ->
-              Digest.string (layer_hash ^ ":" ^ tc.hash) |> Digest.to_hex
-          | _ -> layer_hash
-        in
-        let method_ : Identity.method_ =
-          match d10 with
-          | Some d10 when D10.Layer.succeeded d10 ~hash:layer_hash -> Binary
-          | _ -> Source
-        in
-        Log.debug (fun m ->
-            m "Plan %s: deps=[%s]"
-              (OpamPackage.to_string pkg)
-              (String.concat ", " (List.map OpamPackage.Name.to_string deps)));
-        let node = { pkg; opam; method_; deps; layer_hash } in
-        let installed = OpamPackage.Name.Set.add name installed in
-        (installed, OpamPackage.Name.Map.add name node nodes, order @ [ name ]))
+        ( OpamPackage.Name.Set.add name installed,
+          OpamPackage.Name.Map.add name node nodes,
+          order @ [ name ] ))
       (OpamPackage.Name.Set.empty, OpamPackage.Name.Map.empty, [])
       pkgs
   in
   let g = { nodes_by_name; topo_order } in
-  (* Detect cycles before returning. opam-0install will solve a
-     cyclic dependency set without complaint (it only checks
-     satisfiability), but [D10ir.Direct.run] then deadlocks because each
-     package's fiber awaits a dep promise that never resolves. *)
+  (* Detect cycles before returning. opam-0install will solve a cyclic
+     dependency set without complaint (it only checks satisfiability), but
+     [D10ir.Direct.run] then deadlocks because each package's fiber awaits a
+     dep promise that never resolves. *)
   (match scc_cycles g with [] -> () | cycles -> raise (Cycle cycles));
   g
 
@@ -298,165 +320,145 @@ let overlay_of_pkg ~packages_dirs pkg =
    topological order from {!resolve}; deps' opam state is marked
    "installed" before each package is resolved so its filter env sees
    the in-plan deps as available. *)
+let resolve_dep_layers g (node : node) =
+  List.filter_map
+    (fun dep_name ->
+      match OpamPackage.Name.Map.find_opt dep_name g.nodes_by_name with
+      | None -> None
+      | Some n -> Some (Identity.dep_of_opam n.pkg ~hash:n.layer_hash))
+    node.deps
+
+let source_info_of_opam opam =
+  OpamFile.OPAM.url opam
+  |> Stdlib.Option.map (fun urlf ->
+      let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
+      let checksums =
+        List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
+      in
+      { url; checksums })
+
+let extra_sources_of_opam opam =
+  List.map
+    (fun (basename, urlf) ->
+      let name = OpamFilename.Base.to_string basename in
+      let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
+      let checksums =
+        List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
+      in
+      (name, { url; checksums }))
+    (OpamFile.OPAM.extra_sources opam)
+
+let extra_file_path ~pkg_source_dir ~pkg pkg_s basename =
+  match pkg_source_dir with
+  | None -> None
+  | Some d ->
+      let src =
+        d
+        / OpamPackage.Name.to_string (OpamPackage.name pkg)
+        / pkg_s / "files" / basename
+      in
+      if Sys.file_exists src then Some (basename, src) else None
+
+let extra_files_of_opam ~packages_dirs pkg pkg_s opam =
+  match OpamFile.OPAM.extra_files opam with
+  | None -> []
+  | Some xs ->
+      let pkg_source_dir = find_pkg_source_dir ~packages_dirs pkg in
+      List.filter_map
+        (fun (base, _hash) ->
+          let basename = OpamFilename.Base.to_string base in
+          extra_file_path ~pkg_source_dir ~pkg pkg_s basename)
+        xs
+
+(* Filter-evaluate per-OS conditional patches against the solver's platform
+   env so [package_plan.patches] reflects only the patches that apply on this
+   target. Without this, [{os = "macos"}]-only patches would land in Linux
+   archives (and vice versa). *)
+let resolve_patches ctx opam =
+  let pf_env = Solver.Ctx.platform_env ctx in
+  List.filter_map
+    (fun (base, filter) ->
+      let keep =
+        match filter with
+        | None -> true
+        | Some f -> OpamFilter.eval_to_bool ~default:false pf_env f
+      in
+      if keep then
+        let file = OpamFilename.Base.to_string base in
+        let filter_str = Stdlib.Option.map OpamFilter.to_string filter in
+        Some { file; filter = filter_str }
+      else None)
+    (OpamFile.OPAM.patches opam)
+
+let install_commands_of ctx opam =
+  let env = Solver.Ctx.resolve ctx opam in
+  OpamFilter.commands env (OpamFile.OPAM.install opam)
+  |> List.filter_map (function [] -> None | cmd -> Some cmd)
+
+(* Active depexts under the solver's filter env: declared [depexts:] entries
+   whose filter evaluates true. *)
+let active_depexts ctx opam =
+  let env = Solver.Ctx.platform_env ctx in
+  List.fold_left
+    (fun acc (pkgs, filter) ->
+      if OpamFilter.eval_to_bool ~default:false env filter then
+        OpamSysPkg.Set.union acc pkgs
+      else acc)
+    OpamSysPkg.Set.empty
+    (OpamFile.OPAM.depexts opam)
+  |> OpamSysPkg.Set.elements
+  |> List.map OpamSysPkg.to_string
+
+let overlay_of_pkgs_dir ~name_s ~pkg_s = function
+  | None -> None
+  | Some d -> (Origin.of_packages_dir ~pkgs_dir:d ~name:name_s ~full:pkg_s).overlay
+
 let resolve_node ctx ~packages_dirs ~cache_root ~prefix g (node : node) :
     package_plan =
   let pkg = node.pkg in
   let opam = node.opam in
   let pkg_s = OpamPackage.to_string pkg in
+  let name_s = OpamPackage.Name.to_string (OpamPackage.name pkg) in
   let layer_hash = node.layer_hash in
-  let method_ = node.method_ in
-  let dep_layers =
-    List.filter_map
-      (fun dep_name ->
-        match OpamPackage.Name.Map.find_opt dep_name g.nodes_by_name with
-        | None -> None
-        | Some n -> Some (Identity.dep_of_opam n.pkg ~hash:n.layer_hash))
-      node.deps
-  in
-  let source =
-    OpamFile.OPAM.url opam
-    |> Stdlib.Option.map (fun urlf ->
-        let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
-        let checksums =
-          List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
-        in
-        { url; checksums })
-  in
-  let extra_sources =
-    List.map
-      (fun (basename, urlf) ->
-        let name = OpamFilename.Base.to_string basename in
-        let url = OpamUrl.to_string (OpamFile.URL.url urlf) in
-        let checksums =
-          List.map OpamHash.to_string (OpamFile.URL.checksum urlf)
-        in
-        (name, { url; checksums }))
-      (OpamFile.OPAM.extra_sources opam)
-  in
-  let extra_files =
-    match OpamFile.OPAM.extra_files opam with
-    | None -> []
-    | Some xs ->
-        let pkg_source_dir = find_pkg_source_dir ~packages_dirs pkg in
-        List.filter_map
-          (fun (base, _hash) ->
-            let basename = OpamFilename.Base.to_string base in
-            match pkg_source_dir with
-            | None -> None
-            | Some d ->
-                let src =
-                  d
-                  / OpamPackage.Name.to_string (OpamPackage.name pkg)
-                  / pkg_s / "files" / basename
-                in
-                if Sys.file_exists src then Some (basename, src) else None)
-          xs
-  in
-  (* Filter-evaluate per-OS conditional patches. Today's [apply_patches]
-     iterates [package_plan.patches] and applies anything whose patch
-     file exists on disk; the [filter] string was kept for reference
-     but never evaluated. That's fine when no package uses conditional
-     patches, but it produces wrong archives whenever a package ships
-     a [{os = "macos"}]-only patch (Linux builds end up with macOS
-     fixes baked in, and vice versa). Evaluate filters here against
-     the solver's platform env so [package_plan.patches] reflects only
-     the patches that actually apply on this target. *)
-  let patches =
-    let pf_env = Solver.Ctx.platform_env ctx in
-    List.filter_map
-      (fun (base, filter) ->
-        let keep =
-          match filter with
-          | None -> true
-          | Some f -> OpamFilter.eval_to_bool ~default:false pf_env f
-        in
-        if keep then
-          let file = OpamFilename.Base.to_string base in
-          let filter_str = Stdlib.Option.map OpamFilter.to_string filter in
-          Some { file; filter = filter_str }
-        else None)
-      (OpamFile.OPAM.patches opam)
-  in
-  let substs =
-    List.map OpamFilename.Base.to_string (OpamFile.OPAM.substs opam)
-  in
   let short_hash =
     String.sub layer_hash 0 (min 12 (String.length layer_hash))
   in
   let build_dir =
     cache_root / "build" / "_build" / (pkg_s ^ "-" ^ short_hash)
   in
+  let pkgs_dir = find_pkg_source_dir ~packages_dirs pkg in
   let build_commands =
     Solver.Ctx.resolve_commands ctx ~test:false ~doc:false ~dev_setup:false
       ~build_dir opam
   in
-  let install_commands =
-    let env = Solver.Ctx.resolve ctx opam in
-    OpamFilter.commands env (OpamFile.OPAM.install opam)
-    |> List.filter_map (function [] -> None | cmd -> Some cmd)
-  in
-  let name_s = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-  let install_file = build_dir / (name_s ^ ".install") in
-  let env = Solver.Ctx.compilation_env ctx opam in
-  let subst_vars = Solver.Ctx.resolve_substs ctx opam in
-  let pkgs_dir = find_pkg_source_dir ~packages_dirs pkg in
-  let overlay =
-    match pkgs_dir with
-    | None -> None
-    | Some d ->
-        (Origin.of_packages_dir ~pkgs_dir:d ~name:name_s ~full:pkg_s).overlay
-  in
-  let opam_path =
-    Stdlib.Option.map (fun d -> d / name_s / pkg_s / "opam") pkgs_dir
-  in
-  (* Active depexts under the solver's filter env: declared [depexts:]
-     entries whose filter evaluates true. Returned as opaque
-     package-name strings — host install status is computed separately
-     by {!Execute}. *)
-  let depexts =
-    let env = Solver.Ctx.platform_env ctx in
-    List.fold_left
-      (fun acc (pkgs, filter) ->
-        if OpamFilter.eval_to_bool ~default:false env filter then
-          OpamSysPkg.Set.union acc pkgs
-        else acc)
-      OpamSysPkg.Set.empty
-      (OpamFile.OPAM.depexts opam)
-    |> OpamSysPkg.Set.elements
-    |> List.map OpamSysPkg.to_string
-  in
-  (* Read x-d10-archive from the opam file's extension fields.
-     Currently supports a bare string (single sha for all OSes):
-       x-d10-archive: "deadbeef..."
-     Filtered-list variants (per-OS) are a planned extension once the
-     bake step lands; until then opam files with multiple OS entries
-     would need one opam variant per OS in the reporepo, which is what
-     [oi repo bump] should produce anyway. When absent, [None] — the
-     build runs the regular fetch / patches / extras / substs pipeline
-     and consolidates inline via {!Archive_builder}. *)
+  (* [x-d10-archive] is a bare string (single sha for all OSes) when present.
+     Filtered-list / per-OS variants are deferred — until they land, the
+     reporepo should produce one opam variant per OS, which is what
+     [oi repo bump] already does. *)
   let d10_archive = Keys.read_string_ext Keys.d10_archive opam in
   {
     pkg = pkg_s;
     opam;
     layer_hash;
-    method_;
-    dep_layers;
-    source;
-    extra_sources;
-    extra_files;
-    patches;
-    substs;
-    subst_vars;
+    method_ = node.method_;
+    dep_layers = resolve_dep_layers g node;
+    source = source_info_of_opam opam;
+    extra_sources = extra_sources_of_opam opam;
+    extra_files = extra_files_of_opam ~packages_dirs pkg pkg_s opam;
+    patches = resolve_patches ctx opam;
+    substs = List.map OpamFilename.Base.to_string (OpamFile.OPAM.substs opam);
+    subst_vars = Solver.Ctx.resolve_substs ctx opam;
     build_commands;
-    install_commands;
-    install_file;
-    env;
+    install_commands = install_commands_of ctx opam;
+    install_file = build_dir / (name_s ^ ".install");
+    env = Solver.Ctx.compilation_env ctx opam;
     build_dir;
     prefix;
-    overlay;
-    opam_path;
+    overlay = overlay_of_pkgs_dir ~name_s ~pkg_s pkgs_dir;
+    opam_path =
+      Stdlib.Option.map (fun d -> d / name_s / pkg_s / "opam") pkgs_dir;
     pkgs_dir;
-    depexts;
+    depexts = active_depexts ctx opam;
     d10_archive;
   }
 
@@ -487,35 +489,25 @@ let elaborate ctx ~packages_dirs ~cache_root ~os_key ~ocaml_version
   let is_toolchain_pkg pkg = OpamPackage.Set.mem pkg tc_pkgs in
   (* Walk the topological order. For each node, resolve it into a
      [package_plan] and immediately mark it installed in the solver's
-     opam state so subsequent dependents see its provided variables.
-     Topological ordering guarantees a node's deps are marked before
-     it is resolved. *)
-  let all_nodes = nodes g in
+     opam state so subsequent dependents see its provided variables. *)
   let external_layer_hashes = ref [] in
-  let packages =
-    List.filter_map
-      (fun (node : node) ->
-        if is_toolchain_pkg node.pkg then begin
-          (* Keep the toolchain packages' layer hashes around so the
-             recipe emitter can mark them as host-provided. Otherwise
-             consumer nodes reference [node.layer_hash] in their
-             [dep_layer_hashes] but there's no producer in the plan
-             and no d10 layer either, and [D10ir.Direct.dep_status]
-             flags them as [`Failed]. *)
-          external_layer_hashes := node.layer_hash :: !external_layer_hashes;
-          None
-        end
-        else begin
-          let p =
-            resolve_node ctx ~packages_dirs ~cache_root ~prefix:build_prefix g
-              node
-          in
-          let config = Solver.Ctx.synthetic_config ctx node.pkg node.opam in
-          Solver.Ctx.mark_installed ctx node.pkg node.opam config;
-          Some p
-        end)
-      all_nodes
+  let process_node (node : node) =
+    if is_toolchain_pkg node.pkg then begin
+      (* Keep the toolchain packages' layer hashes so the recipe emitter can
+         mark them as host-provided. Otherwise [D10ir.Direct.dep_status] would
+         flag the missing producer as [`Failed]. *)
+      external_layer_hashes := node.layer_hash :: !external_layer_hashes;
+      None
+    end
+    else
+      let p =
+        resolve_node ctx ~packages_dirs ~cache_root ~prefix:build_prefix g node
+      in
+      let config = Solver.Ctx.synthetic_config ctx node.pkg node.opam in
+      Solver.Ctx.mark_installed ctx node.pkg node.opam config;
+      Some p
   in
+  let packages = List.filter_map process_node (nodes g) in
   let external_layer_hashes =
     List.sort_uniq String.compare !external_layer_hashes
   in

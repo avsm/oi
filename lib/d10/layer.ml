@@ -202,10 +202,79 @@ type remote_index = (string, index_entry) Hashtbl.t
 
 type fetch_phase = Fetching | Verifying | Extracting
 
+let verify_sha256 ~hash ~tmp_file ~sha256 =
+  match sha256 with
+  | None -> true
+  | Some expected ->
+      let actual =
+        OpamHash.contents
+          (OpamHash.compute ~kind:`SHA256 (Eio.Path.native_exn tmp_file))
+      in
+      if actual = expected then true
+      else begin
+        Log.warn (fun m ->
+            m "Checksum mismatch for %s: expected %s, got %s" hash expected
+              actual);
+        false
+      end
+
+let extract_tarball (c : Config.t) ~hash ~tmp_file ~staging_dir =
+  try
+    Sysops.Tar.extract c.sys ~archive:tmp_file ~dst:staging_dir ();
+    true
+  with Eio.Io (Sysops.Cmd_failed _, _) as exn ->
+    Log.warn (fun m ->
+        m "Failed to extract %s: %s" hash (Printexc.to_string exn));
+    false
+
+let publish_staging (c : Config.t) ~hash ~staging_dir ~layer_dir =
+  (* [rename(2)] on Linux fails with ENOTEMPTY if the destination is a
+     non-empty directory; blow away any pre-existing [<hash>/] (already
+     proved not [succeeded]) before publishing. *)
+  (try Eio.Path.rmtree ~missing_ok:true layer_dir with Eio.Exn.Io _ -> ());
+  try
+    Eio.Path.rename staging_dir layer_dir;
+    succeeded c ~hash
+  with exn ->
+    Log.warn (fun m ->
+        m "Failed to publish layer %s: %s" hash (Printexc.to_string exn));
+    false
+
+(* Verify + extract + publish the [<hash>.partial/] staging dir, returning
+   [true] iff the layer is now durably present. *)
+let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir
+    ~layer_dir ~sha256 ~phase =
+  phase Verifying;
+  let cleanup_tmp () =
+    try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ()
+  in
+  let cleanup_staging () =
+    try Eio.Path.rmtree ~missing_ok:true staging_dir with Eio.Exn.Io _ -> ()
+  in
+  if not (verify_sha256 ~hash ~tmp_file ~sha256) then begin
+    cleanup_tmp ();
+    false
+  end
+  else begin
+    phase Extracting;
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 staging_dir;
+    let extract_ok = extract_tarball c ~hash ~tmp_file ~staging_dir in
+    cleanup_tmp ();
+    if not extract_ok then begin
+      cleanup_staging ();
+      false
+    end
+    else if publish_staging c ~hash ~staging_dir ~layer_dir then true
+    else begin
+      cleanup_staging ();
+      false
+    end
+  end
+
 let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     ?sha256 () =
   if succeeded c ~hash then true
-  else begin
+  else
     let url =
       match remote with
       | `Http_remote base_url ->
@@ -213,95 +282,26 @@ let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     in
     let os_layer_dir = Eio.Path.(c.root / "layers" / c.os_key) in
     let layer_dir = dir c ~hash in
-    (* Atomic publication: extract into [<hash>.partial/] and rename
-       to [<hash>/] only after the tar exits 0. The tarball stores
-       [./layer.json] at the top level (alphabetically before [./fs/]),
-       so a torn [tar xf] into [<hash>/] would leave the dir looking
-       "succeeded" to {!succeeded} while [fs/] is half-empty —
-       exactly the bug that produced corrupt [ppx_sexp_value] layers
-       in the wild. Renaming a freshly-built sibling sidesteps that:
-       either [<hash>/] is whole, or it doesn't exist. *)
+    (* Atomic publication: extract into [<hash>.partial/] and rename to
+       [<hash>/] only after the tar exits 0. A torn [tar xf] into [<hash>/]
+       would leave the dir looking "succeeded" while [fs/] is half-empty —
+       exactly the bug that produced corrupt [ppx_sexp_value] layers in the
+       wild. Renaming a sibling sidesteps that: either [<hash>/] is whole,
+       or it doesn't exist. *)
     let staging_dir = Eio.Path.(os_layer_dir / (hash ^ ".partial")) in
     let tmp_file = Eio.Path.(os_layer_dir / (hash ^ ".tar.zst.tmp")) in
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_layer_dir;
-    (* Wipe any leftover staging dir from a prior interrupted run.
-       Without this, the next [tar xf] would merge new files on top of
-       stale ones, so a previously-corrupt layer would publish corrupt
-       again. *)
+    (* Wipe any leftover staging dir from a prior interrupted run. *)
     (try Eio.Path.rmtree ~missing_ok:true staging_dir with Eio.Exn.Io _ -> ());
     let phase p = match on_phase with Some f -> f p | None -> () in
     phase Fetching;
-    let ok =
-      Sysops.Http.fetch_session ?on_progress session ~url ~dst:tmp_file
-    in
-    let cleanup_tmp () =
-      try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ()
-    in
-    let cleanup_staging () =
-      try Eio.Path.rmtree ~missing_ok:true staging_dir with Eio.Exn.Io _ -> ()
-    in
-    if ok then begin
-      phase Verifying;
-      let checksum_ok =
-        match sha256 with
-        | None -> true
-        | Some expected ->
-            let actual =
-              OpamHash.contents
-                (OpamHash.compute ~kind:`SHA256 (Eio.Path.native_exn tmp_file))
-            in
-            if actual = expected then true
-            else begin
-              Log.warn (fun m ->
-                  m "Checksum mismatch for %s: expected %s, got %s" hash
-                    expected actual);
-              false
-            end
-      in
-      if checksum_ok then begin
-        phase Extracting;
-        Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 staging_dir;
-        let extract_ok =
-          try
-            Sysops.Tar.extract c.sys ~archive:tmp_file ~dst:staging_dir ();
-            true
-          with Eio.Io (Sysops.Cmd_failed _, _) as exn ->
-            Log.warn (fun m ->
-                m "Failed to extract %s: %s" hash (Printexc.to_string exn));
-            false
-        in
-        cleanup_tmp ();
-        if extract_ok then begin
-          (* [rename(2)] on Linux fails with ENOTEMPTY if the
-             destination is a non-empty directory, so blow away any
-             pre-existing [<hash>/] (which we already proved is not
-             [succeeded] above) before publishing the staging dir. *)
-          (try Eio.Path.rmtree ~missing_ok:true layer_dir
-           with Eio.Exn.Io _ -> ());
-          try
-            Eio.Path.rename staging_dir layer_dir;
-            succeeded c ~hash
-          with exn ->
-            Log.warn (fun m ->
-                m "Failed to publish layer %s: %s" hash (Printexc.to_string exn));
-            cleanup_staging ();
-            false
-        end
-        else begin
-          cleanup_staging ();
-          false
-        end
-      end
-      else begin
-        cleanup_tmp ();
-        false
-      end
-    end
+    if Sysops.Http.fetch_session ?on_progress session ~url ~dst:tmp_file then
+      finalize_remote_layer c ~hash ~tmp_file ~staging_dir ~layer_dir ~sha256
+        ~phase
     else begin
-      cleanup_tmp ();
+      (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
       false
     end
-  end
 
 (* -- Export -------------------------------------------------------------- *)
 
@@ -309,20 +309,38 @@ let list_files_under root =
   let root_s = Eio.Path.native_exn root in
   let prefix_len = String.length root_s + 1 in
   let files = ref [] in
-  let rec scan dir =
+  let record_file path =
+    files :=
+      String.sub path prefix_len (String.length path - prefix_len) :: !files
+  in
+  let rec visit dir name =
+    let path = Filename.concat dir name in
+    if Sys.is_directory path then scan path else record_file path
+  and scan dir =
     if Sys.file_exists dir && Sys.is_directory dir then
-      Array.iter
-        (fun name ->
-          let path = Filename.concat dir name in
-          if Sys.is_directory path then scan path
-          else
-            files :=
-              String.sub path prefix_len (String.length path - prefix_len)
-              :: !files)
-        (Sys.readdir dir)
+      Array.iter (visit dir) (Sys.readdir dir)
   in
   scan root_s;
   List.sort String.compare !files
+
+let write_file_listing (c : Config.t) ~hash ~os_dir =
+  let fs_dir = fs_path c ~hash in
+  if not (Sysops.file_exists fs_dir) then ()
+  else
+    let files = list_files_under fs_dir in
+    let content = String.concat "\n" files ^ "\n" in
+    let txt_tmp = Eio.Path.(os_dir / (hash ^ ".txt.tmp")) in
+    Eio.Path.save ~create:(`Or_truncate 0o644) txt_tmp content;
+    Sysops.Cmd.run c.sys
+      [
+        "zstd";
+        "-q";
+        "-f";
+        Eio.Path.native_exn txt_tmp;
+        "-o";
+        Eio.Path.native_exn Eio.Path.(os_dir / (hash ^ ".txt.zst"));
+      ];
+    try Eio.Path.unlink txt_tmp with Eio.Exn.Io _ -> ()
 
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
@@ -332,56 +350,36 @@ let export (c : Config.t) ~hash ~dst =
     if Sysops.file_exists dst_file then false
     else begin
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_dir;
-      (* Atomic publication: stage into .tar.zst.tmp, then rename on
-         success. If the process is interrupted mid-tar, the next
-         export sees no [dst_file] and retries rather than treating a
-         truncated archive as authoritative. *)
+      (* Atomic publication: stage into .tar.zst.tmp, rename on success. If
+         the process is interrupted mid-tar, the next export sees no
+         [dst_file] and retries rather than treating a truncated archive as
+         authoritative. *)
       let tmp_file = Eio.Path.(os_dir / (hash ^ ".tar.zst.tmp")) in
       (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
       Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:tmp_file;
       Eio.Path.rename tmp_file dst_file;
-      (* Write compressed file listing relative to fs/ *)
-      let fs_dir = fs_path c ~hash in
-      if Sysops.file_exists fs_dir then begin
-        let files = list_files_under fs_dir in
-        let content = String.concat "\n" files ^ "\n" in
-        let txt_tmp = Eio.Path.(os_dir / (hash ^ ".txt.tmp")) in
-        Eio.Path.save ~create:(`Or_truncate 0o644) txt_tmp content;
-        Sysops.Cmd.run c.sys
-          [
-            "zstd";
-            "-q";
-            "-f";
-            Eio.Path.native_exn txt_tmp;
-            "-o";
-            Eio.Path.native_exn Eio.Path.(os_dir / (hash ^ ".txt.zst"));
-          ];
-        try Eio.Path.unlink txt_tmp with Eio.Exn.Io _ -> ()
-      end;
+      write_file_listing c ~hash ~os_dir;
       true
     end
+
+let export_one_if_succeeded (c : Config.t) ~os_key ~dst count hash =
+  if String.contains hash '.' then count
+  else
+    let c = { c with os_key } in
+    if not (succeeded c ~hash) then count
+    else if export c ~hash ~dst then count + 1
+    else count
+
+let export_for_os_key (c : Config.t) ~layers_dir ~dst count os_key =
+  let os_layer_dir = Eio.Path.(layers_dir / os_key) in
+  let hashes =
+    try Eio.Path.read_dir os_layer_dir with Eio.Exn.Io _ -> []
+  in
+  List.fold_left (export_one_if_succeeded c ~os_key ~dst) count hashes
 
 let export_all (c : Config.t) ~dst =
   let layers_dir = Eio.Path.(c.root / "layers") in
   if not (Sysops.file_exists layers_dir) then 0
   else
     let os_keys = Eio.Path.read_dir layers_dir in
-    let count =
-      List.fold_left
-        (fun count os_key ->
-          let os_layer_dir = Eio.Path.(layers_dir / os_key) in
-          let hashes =
-            try Eio.Path.read_dir os_layer_dir with Eio.Exn.Io _ -> []
-          in
-          List.fold_left
-            (fun count hash ->
-              if String.contains hash '.' then count
-              else
-                let c = { c with os_key } in
-                if succeeded c ~hash then
-                  if export c ~hash ~dst then count + 1 else count
-                else count)
-            count hashes)
-        0 os_keys
-    in
-    count
+    List.fold_left (export_for_os_key c ~layers_dir ~dst) 0 os_keys

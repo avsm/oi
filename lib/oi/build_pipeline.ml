@@ -93,31 +93,31 @@ let expand_targets ~fs ~sys ~reporepo_path ~reporepo_url (targets : target list)
          Source.Reporepo.load ~path:reporepo_path)
     else lazy []
   in
+  let groups_of_overlay_entry ~handle (e : Source.Reporepo.entry) =
+    if e.root_packages <> [] then e.root_packages
+    else
+      let pkgs_dir =
+        Source.Reporepo.assert_overlay_dir ~path:reporepo_path ~handle
+      in
+      Sys.readdir pkgs_dir |> Array.to_list
+      |> List.filter (fun n -> Sys.is_directory (pkgs_dir / n))
+      |> List.sort String.compare
+      |> List.map (fun p -> [ p ])
+  in
+  let expand_overlay_all handle =
+    let entries = Lazy.force entries_lazy in
+    match Source.Reporepo.latest entries ~handle with
+    | None -> Error.fail_config_error "no overlay @%s in reporepo" handle
+    | Some e ->
+        List.map (fun group -> (group, [ handle ])) (groups_of_overlay_entry ~handle e)
+  in
   List.concat_map
     (fun t ->
       match t with
       | Plain p -> [ ([ p ], []) ]
       | Group { tokens; handles } -> [ (tokens, handles) ]
       | Overlay_pkg { handle; spec } -> [ ([ spec ], [ handle ]) ]
-      | Overlay_all handle -> begin
-          let entries = Lazy.force entries_lazy in
-          match Source.Reporepo.latest entries ~handle with
-          | None -> Error.fail_config_error "no overlay @%s in reporepo" handle
-          | Some (e : Source.Reporepo.entry) ->
-              let groups =
-                if e.root_packages <> [] then e.root_packages
-                else
-                  let pkgs_dir =
-                    Source.Reporepo.assert_overlay_dir ~path:reporepo_path
-                      ~handle
-                  in
-                  Sys.readdir pkgs_dir |> Array.to_list
-                  |> List.filter (fun n -> Sys.is_directory (pkgs_dir / n))
-                  |> List.sort String.compare
-                  |> List.map (fun p -> [ p ])
-              in
-              List.map (fun group -> (group, [ handle ])) groups
-        end)
+      | Overlay_all handle -> expand_overlay_all handle)
     targets
 
 (* -- Per-group toolchain / packages_dirs ---------------------------------- *)
@@ -213,6 +213,213 @@ let packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
 
 (* -- Per-group solve / elaborate / emit ----------------------------------- *)
 
+(* Accumulated state of a single solve_group invocation. Each phase updates
+   one or two fields and either short-circuits with an error or threads the
+   state forward. [finalize] turns it into the externally-visible
+   {!group_result}. *)
+type group_state = {
+  group : group;
+  toolchain : Toolchain.info option;
+  pkgs_dir : string list;
+  pkgs : OpamPackage.t list;
+  exec_plan : Plan.t option;
+  recipe : D10ir.Plan.t option;
+}
+
+let finalize (s : group_state) error : group_result =
+  {
+    group = s.group;
+    toolchain = s.toolchain;
+    pkgs_dir = s.pkgs_dir;
+    pkgs = s.pkgs;
+    exec_plan = s.exec_plan;
+    recipe = s.recipe;
+    error;
+  }
+
+(* Strip compiler-family roots from a group's tokens when a [--toolchain]
+   override is active, so the override's pins land cleanly. *)
+let strip_toolchain_tokens ~toolchain_override ~toolchain tokens =
+  match (toolchain_override, toolchain) with
+  | Some _, Some (info : Toolchain.info) ->
+      List.filter
+        (fun pkg ->
+          let name, _ = Build_request.parse_pkg_target pkg in
+          not (OpamPackage.Name.Set.mem name info.root_names))
+        tokens
+  | _ -> tokens
+
+(* Build a group record + the matching constraints map from the stripped
+   token list. *)
+let build_group_record ~label ~tokens ~stripped_tokens ~base_constraints
+    ~group_handles =
+  let items = List.map Build_request.parse_pkg_target stripped_tokens in
+  let names = List.map fst items in
+  let group_constraints =
+    List.fold_left
+      (fun acc (name, c) ->
+        match c with
+        | None -> acc
+        | Some c -> OpamPackage.Name.Map.add name c acc)
+      base_constraints items
+  in
+  let group =
+    { label; tokens; names; handles = group_handles; group_constraints }
+  in
+  (group, names, group_constraints)
+
+(* Persist the solver failure log under [<cache>/build/logs] and return the
+   path so the user can pick it up from the build summary. *)
+let write_solve_log ~env ~cache_root ~stripped_tokens ~group_handles msg =
+  let key =
+    String.concat " "
+      (stripped_tokens @ List.map (fun h -> "@" ^ h) group_handles)
+  in
+  let hash = Digest.to_hex (Digest.string key) in
+  let first = match stripped_tokens with t :: _ -> t | [] -> "solve" in
+  let path = Cache.Logs.path ~cache_root ~kind:"solve" ~name:first ~hash in
+  let body =
+    Fmt.str "targets: %s\nhandles: %s\n\n%s%s"
+      (String.concat ", " stripped_tokens)
+      (if group_handles = [] then "(base only)"
+       else String.concat ", " (List.map (fun h -> "@" ^ h) group_handles))
+      msg
+      (if msg = "" || msg.[String.length msg - 1] = '\n' then "" else "\n")
+  in
+  Cache.Logs.write ~fs:env.fs ~cache_root path body;
+  path
+
+(* Pick the recipe's informational [base_layer]: prefer external layers
+   (non-relocatable toolchain pkgs), else first consumer package's hash.
+   Empty result means everything was toolchain-provided. *)
+let toolchain_layer_of (p : Plan.t) =
+  match (p.external_layer_hashes, p.packages) with
+  | h :: _, _ -> h
+  | [], q :: _ -> q.layer_hash
+  | [], [] -> ""
+
+(* Pins and local trees don't carry [x-d10-archive] in their opam files —
+   that field is only written by [oi repo bump]. Recipe emit requires an
+   archive sha for every package, so we inline-bake those here. *)
+let bake_inline_archives ~env ~d10 ~cache_root (p : Plan.t) =
+  let bake_one (q : Plan.package_plan) =
+    match (q.d10_archive, q.overlay) with
+    | None, None ->
+        let built =
+          Archive_builder.build ~proc_mgr:env.proc_mgr ~fs:env.fs ~d10
+            ~cache_root q
+        in
+        { q with d10_archive = Some built.sha256 }
+    | _ -> q
+  in
+  { p with packages = List.map bake_one p.packages }
+
+(* Run [Plan.of_solution] under a [Cycle] guard. *)
+let plan_of_solution ~force_source ~d10 ~gctx ~pkgs_dir pkgs =
+  try
+    let plan_d10 = if force_source then None else Some d10 in
+    Ok (Plan.of_solution gctx ?d10:plan_d10 ~packages_dirs:pkgs_dir pkgs)
+  with Plan.Cycle cs -> Error (Cycle cs)
+
+(* Run [Plan.elaborate] under [Error.E] / [Failure] guards. *)
+let elaborate_plan ~env ~cache_root ~gctx ~pkgs_dir ~group_conf build_plan =
+  try
+    Ok
+      (Plan.elaborate gctx ~packages_dirs:pkgs_dir ~cache_root
+         ~os_key:env.os_key ~ocaml_version:group_conf.Solver.Ctx.ocaml_version
+         build_plan)
+  with
+  | Error.E e -> Error (Elaborate_failed { msg = Fmt.str "%a" Error.pp e })
+  | Failure msg -> Error (Elaborate_failed { msg })
+
+(* Bake archives + emit recipe under [Error.E] / [Failure] / [Invalid_argument]
+   guards. Returns the (possibly mutated) exec_plan alongside the recipe. *)
+let emit_recipe ~env ~d10 ~cache_root ~toolchain_name ~toolchain_layer exec_plan
+    =
+  try
+    let exec_plan = bake_inline_archives ~env ~d10 ~cache_root exec_plan in
+    let recipe =
+      Recipe_emitter.emit ~d10 ~cli_invocation:(Array.to_list Sys.argv)
+        ~toolchain_name ~toolchain_layer exec_plan
+    in
+    Ok (exec_plan, recipe)
+  with
+  | Error.E e -> Error (Emit_failed { msg = Fmt.str "%a" Error.pp e })
+  | Failure msg | Invalid_argument msg -> Error (Emit_failed { msg })
+
+let toolchain_handle_or_system (t : Toolchain.info option) =
+  match t with Some i -> i.handle | None -> "system"
+
+(* Stage 2 of the pipeline: post-elaborate handling — handle the
+   all-toolchain-pkgs short-circuit and the recipe emit + archive bake. *)
+let finish_after_elaborate ~env ~d10 ~cache_root ~toolchain exec_plan =
+  let toolchain_name = toolchain_handle_or_system toolchain in
+  let toolchain_layer = toolchain_layer_of exec_plan in
+  if toolchain_layer = "" then
+    (* Every selected package was filtered out by [elaborate] (target
+       reduced entirely to toolchain-provided packages, e.g.
+       [oi build ocaml-variants] under a non-relocatable toolchain).
+       Nothing for the d10ir executor to do. *)
+    Error
+      ( Some exec_plan,
+        Emit_failed
+          {
+            msg =
+              "all selected packages are toolchain-provided; nothing to build";
+          } )
+  else
+    match
+      emit_recipe ~env ~d10 ~cache_root ~toolchain_name ~toolchain_layer
+        exec_plan
+    with
+    | Ok (exec_plan, recipe) -> Ok (exec_plan, recipe)
+    | Error err -> Error (Some exec_plan, err)
+
+(* Combined [of_solution → elaborate → emit_recipe] pipeline. Returns the
+   final [(exec_plan, recipe)] pair on success or [(exec_plan_so_far, err)]
+   on failure so the caller still gets a partial [Plan.t] in the result. *)
+let build_recipe_pipeline ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
+    ~force_source ~toolchain ~pkgs :
+    (Plan.t * D10ir.Plan.t, Plan.t option * group_error) result =
+  match plan_of_solution ~force_source ~d10 ~gctx ~pkgs_dir pkgs with
+  | Error err -> Error (None, err)
+  | Ok build_plan -> (
+      match
+        elaborate_plan ~env ~cache_root ~gctx ~pkgs_dir ~group_conf build_plan
+      with
+      | Error err -> Error (None, err)
+      | Ok exec_plan ->
+          finish_after_elaborate ~env ~d10 ~cache_root ~toolchain exec_plan)
+
+(* Run the solver + recipe pipeline once a group's solver context is
+   prepared. Threads [state] forward, attaching [pkgs] / [exec_plan] /
+   [recipe] as each phase succeeds. *)
+let run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
+    ~group_constraints ~stripped_tokens ~group_handles ~force_source ~toolchain
+    ~names state =
+  let test_for_roots = OpamPackage.Name.Set.of_list names in
+  match
+    Solver.solve ~test:test_for_roots ~sys:env.sys ~fs:env.fs ~cache_root gctx
+      ~packages_dirs:pkgs_dir ~constraints:group_constraints names
+  with
+  | Error msg ->
+      let log_path =
+        write_solve_log ~env ~cache_root ~stripped_tokens ~group_handles msg
+      in
+      finalize state (Error (Solve_failed { msg; log_path }))
+  | Ok pkgs -> (
+      let state = { state with pkgs } in
+      match
+        build_recipe_pipeline ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
+          ~force_source ~toolchain ~pkgs
+      with
+      | Ok (exec_plan, recipe) ->
+          finalize
+            { state with exec_plan = Some exec_plan; recipe = Some recipe }
+            (Ok ())
+      | Error (exec_plan_opt, err) ->
+          finalize { state with exec_plan = exec_plan_opt } (Error err))
+
 let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
     ~pin_dir ?local_packages_dir ~reporepo_path ~base_constraints ~build_prefix
     ~cache_root ~d10 ~force_source (toolchain : Toolchain.info option)
@@ -224,269 +431,42 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
       ~toolchain group_handles
   in
   let group_conf, tc_ctx = Pipeline.solver_inputs toolchain conf in
-  (* Mirror [oi build]'s [--toolchain=NAME] behavior: strip
-     compiler-family roots from the group's tokens so the override's
-     compiler pins land cleanly. *)
   let stripped_tokens =
-    match (toolchain_override, toolchain) with
-    | Some _, Some (info : Toolchain.info) ->
-        List.filter
-          (fun pkg ->
-            let name, _ = Build_request.parse_pkg_target pkg in
-            not (OpamPackage.Name.Set.mem name info.root_names))
-          tokens
-    | _ -> tokens
+    strip_toolchain_tokens ~toolchain_override ~toolchain tokens
   in
-  let make_failure ?(toolchain = toolchain) ?(pkgs = []) ?(exec_plan = None)
-      ?(recipe = None) err =
+  let empty_group =
     {
-      group =
-        {
-          label;
-          tokens;
-          names = [];
-          handles = group_handles;
-          group_constraints = OpamPackage.Name.Map.empty;
-        };
-      toolchain;
-      pkgs_dir;
-      pkgs;
-      exec_plan;
-      recipe;
-      error = Error err;
+      label;
+      tokens;
+      names = [];
+      handles = group_handles;
+      group_constraints = OpamPackage.Name.Map.empty;
     }
   in
-  if stripped_tokens = [] then make_failure Empty_after_strip
+  let state0 =
+    {
+      group = empty_group;
+      toolchain;
+      pkgs_dir;
+      pkgs = [];
+      exec_plan = None;
+      recipe = None;
+    }
+  in
+  if stripped_tokens = [] then finalize state0 (Error Empty_after_strip)
   else
-    let items = List.map Build_request.parse_pkg_target stripped_tokens in
-    let names = List.map fst items in
-    let group_constraints =
-      List.fold_left
-        (fun acc (name, c) ->
-          match c with
-          | None -> acc
-          | Some c -> OpamPackage.Name.Map.add name c acc)
-        base_constraints items
-    in
-    let group =
-      { label; tokens; names; handles = group_handles; group_constraints }
+    let group, names, group_constraints =
+      build_group_record ~label ~tokens ~stripped_tokens ~base_constraints
+        ~group_handles
     in
     let gctx =
       Solver.Ctx.create ~prefix:build_prefix ~packages_dirs:pkgs_dir
         ~conf:group_conf ?toolchain:tc_ctx ()
     in
-    (* Pull [with-test] deps for the group's named roots into the solve
-       closure. The build closure may contain in-tree test stanzas
-       (package-attributed dune libraries inside opam archives) whose
-       compilation needs the test deps in scope. [Plan.resolve_node]
-       still resolves build commands with [~test:false], so [@runtest]
-       never lands in the dune invocation — only [oi test] runs it
-       explicitly afterwards.
-
-       Scope is the roots only (not every package in [packages_dirs]):
-       expanding to the universe pulls in transitive [with-test] deps
-       like [ppx_deriving_yojson]'s [yojson<3] constraint that
-       conflict with toolchain versions. *)
-    let test_for_roots = OpamPackage.Name.Set.of_list names in
-    match
-      Solver.solve ~test:test_for_roots ~fs:env.fs ~cache_root gctx
-        ~packages_dirs:pkgs_dir ~constraints:group_constraints names
-    with
-    | Error msg ->
-        let log_path =
-          let key =
-            String.concat " "
-              (stripped_tokens @ List.map (fun h -> "@" ^ h) group_handles)
-          in
-          let hash = Digest.to_hex (Digest.string key) in
-          let first =
-            match stripped_tokens with t :: _ -> t | [] -> "solve"
-          in
-          let path =
-            Cache.Logs.path ~cache_root ~kind:"solve" ~name:first ~hash
-          in
-          let body =
-            Fmt.str "targets: %s\nhandles: %s\n\n%s%s"
-              (String.concat ", " stripped_tokens)
-              (if group_handles = [] then "(base only)"
-               else
-                 String.concat ", " (List.map (fun h -> "@" ^ h) group_handles))
-              msg
-              (if msg = "" || msg.[String.length msg - 1] = '\n' then ""
-               else "\n")
-          in
-          Cache.Logs.write ~fs:env.fs ~cache_root path body;
-          path
-        in
-        {
-          group;
-          toolchain;
-          pkgs_dir;
-          pkgs = [];
-          exec_plan = None;
-          recipe = None;
-          error = Error (Solve_failed { msg; log_path });
-        }
-    | Ok pkgs -> (
-        match
-          try
-            let plan_d10 = if force_source then None else Some d10 in
-            Ok
-              (Plan.of_solution gctx ?d10:plan_d10 ~packages_dirs:pkgs_dir pkgs)
-          with Plan.Cycle cs -> Error cs
-        with
-        | Error cs ->
-            {
-              group;
-              toolchain;
-              pkgs_dir;
-              pkgs;
-              exec_plan = None;
-              recipe = None;
-              error = Error (Cycle cs);
-            }
-        | Ok build_plan ->
-            begin try
-              let exec_plan =
-                Plan.elaborate gctx ~packages_dirs:pkgs_dir ~cache_root
-                  ~os_key:env.os_key ~ocaml_version:group_conf.ocaml_version
-                  build_plan
-              in
-              let toolchain_name =
-                match toolchain with Some i -> i.handle | None -> "system"
-              in
-              (* [base_layer] in the recipe is informational (see
-                 [d10ir/plan.ml] merge comment): it identifies the toolchain
-                 root for diagnostics. Prefer one of the toolchain's own
-                 layer hashes when present (non-relocatable toolchain — the
-                 toolchain packages are filtered out of [packages] and
-                 surfaced via [external_layer_hashes]); otherwise fall back
-                 to the first consumer package's layer hash. *)
-              let toolchain_layer =
-                match (exec_plan.external_layer_hashes, exec_plan.packages) with
-                | h :: _, _ -> h
-                | [], p :: _ -> p.layer_hash
-                | [], [] -> ""
-              in
-              if toolchain_layer = "" then
-                (* Every selected package was filtered out by [elaborate]
-                   (target reduced entirely to toolchain-provided packages,
-                   e.g. [oi build ocaml-variants] under a non-relocatable
-                   toolchain). Nothing for the d10ir executor to do — record
-                   a clean failure instead of crashing on an empty layer
-                   hash. *)
-                {
-                  group;
-                  toolchain;
-                  pkgs_dir;
-                  pkgs;
-                  exec_plan = Some exec_plan;
-                  recipe = None;
-                  error =
-                    Error
-                      (Emit_failed
-                         {
-                           msg =
-                             "all selected packages are toolchain-provided; \
-                              nothing to build";
-                         });
-                }
-              else
-                begin try
-                  (* Pins and local trees don't carry [x-d10-archive] in
-                     their opam files — that field is only written by
-                     [oi repo bump]. Recipe emit requires an archive sha
-                     for every package, so we inline-bake those here:
-                     fetch + patch + tar, hash the result, and patch the
-                     sha back into the [package_plan] before emit. Bumped
-                     reporepo entries ([overlay = Some]) keep the strict
-                     "must come from a bump pass" behaviour. *)
-                  let exec_plan =
-                    let bake_one (p : Plan.package_plan) =
-                      match (p.d10_archive, p.overlay) with
-                      | None, None ->
-                          let built =
-                            Archive_builder.build ~proc_mgr:env.proc_mgr
-                              ~fs:env.fs ~d10 ~cache_root p
-                          in
-                          { p with d10_archive = Some built.sha256 }
-                      | _ -> p
-                    in
-                    {
-                      exec_plan with
-                      packages = List.map bake_one exec_plan.packages;
-                    }
-                  in
-                  let recipe =
-                    Recipe_emitter.emit ~d10
-                      ~cli_invocation:(Array.to_list Sys.argv) ~toolchain_name
-                      ~toolchain_layer exec_plan
-                  in
-                  {
-                    group;
-                    toolchain;
-                    pkgs_dir;
-                    pkgs;
-                    exec_plan = Some exec_plan;
-                    recipe = Some recipe;
-                    error = Ok ();
-                  }
-                with
-                | Error.E e ->
-                    {
-                      group;
-                      toolchain;
-                      pkgs_dir;
-                      pkgs;
-                      exec_plan = Some exec_plan;
-                      recipe = None;
-                      error =
-                        Error (Emit_failed { msg = Fmt.str "%a" Error.pp e });
-                    }
-                | Failure msg ->
-                    {
-                      group;
-                      toolchain;
-                      pkgs_dir;
-                      pkgs;
-                      exec_plan = Some exec_plan;
-                      recipe = None;
-                      error = Error (Emit_failed { msg });
-                    }
-                | Invalid_argument msg ->
-                    {
-                      group;
-                      toolchain;
-                      pkgs_dir;
-                      pkgs;
-                      exec_plan = Some exec_plan;
-                      recipe = None;
-                      error = Error (Emit_failed { msg });
-                    }
-                end
-            with
-            | Error.E e ->
-                {
-                  group;
-                  toolchain;
-                  pkgs_dir;
-                  pkgs;
-                  exec_plan = None;
-                  recipe = None;
-                  error =
-                    Error (Elaborate_failed { msg = Fmt.str "%a" Error.pp e });
-                }
-            | Failure msg ->
-                {
-                  group;
-                  toolchain;
-                  pkgs_dir;
-                  pkgs;
-                  exec_plan = None;
-                  recipe = None;
-                  error = Error (Elaborate_failed { msg });
-                }
-            end)
+    run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
+      ~group_constraints ~stripped_tokens ~group_handles ~force_source
+      ~toolchain ~names
+      { state0 with group }
 
 (* -- Persistent cache for the [solved] struct ----------------------------- *)
 
@@ -504,31 +484,22 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
    times for the same repo. *)
 let head_memo : (string, string option) Hashtbl.t = Hashtbl.create 8
 
-let read_process_output cmd =
-  let ic = Unix.open_process_in cmd in
-  let buf = Buffer.create 64 in
-  let chunk = Bytes.create 1024 in
-  let rec loop () =
-    let n = input ic chunk 0 (Bytes.length chunk) in
-    if n > 0 then begin
-      Buffer.add_subbytes buf chunk 0 n;
-      loop ()
-    end
-  in
-  loop ();
-  match Unix.close_process_in ic with
-  | Unix.WEXITED 0 -> Some (String.trim (Buffer.contents buf))
-  | _ -> None
+(* Run an argv via the Eio process manager and return its trimmed stdout, or
+   [None] on any failure (non-git directory, missing git, signal kill).
+   Equivalent of the old [Unix.open_process_in + close_process_in WEXITED 0]
+   dance, now routed through [D10.Sysops.Cmd.run_out_quiet] so stderr is
+   swallowed and the whole call lives under the Eio fiber tree. *)
+let run_out_opt ~sys argv =
+  try
+    let s = D10.Sysops.Cmd.run_out_quiet sys argv |> String.trim in
+    if s = "" then None else Some s
+  with Eio.Io _ -> None
 
-let git_head_of dir =
+let git_head_of ~sys dir =
   match Hashtbl.find_opt head_memo dir with
   | Some r -> r
   | None ->
-      let r =
-        Fmt.kstr read_process_output "git -C %s rev-parse HEAD 2>/dev/null"
-          (Filename.quote dir)
-      in
-      let r = match r with Some s when s <> "" -> Some s | _ -> None in
+      let r = run_out_opt ~sys [ "git"; "-C"; dir; "rev-parse"; "HEAD" ] in
       Hashtbl.add head_memo dir r;
       r
 
@@ -537,8 +508,60 @@ let git_head_of dir =
    the reporepo isn't a git tree (the common case in tests / fresh
    installs without [oi repo bump]) — the caller falls back to an
    uncached solve. *)
-let cache_key ~reporepo_path (req : request) : string option =
-  match git_head_of reporepo_path with
+let add_target add t =
+  match t with
+  | Plain p -> add ("Plain:" ^ p)
+  | Group { tokens; handles } ->
+      add "Group:";
+      List.iter add tokens;
+      add "|";
+      List.iter add handles
+  | Overlay_pkg { handle; spec } -> add ("Pkg:" ^ handle ^ "/" ^ spec)
+  | Overlay_all h -> add ("All:" ^ h)
+
+let add_conf add (c : Solver.Ctx.conf) =
+  add ("ocaml:" ^ c.ocaml_version);
+  add ("arch:" ^ c.arch);
+  add ("os:" ^ c.os);
+  add ("os_distribution:" ^ c.os_distribution);
+  add ("os_version:" ^ c.os_version);
+  add ("os_family:" ^ c.os_family)
+
+let add_request_body add (req : request) =
+  add "TARGETS:";
+  List.iter (add_target add) req.targets;
+  add "WITH_REPOS:";
+  List.iter add (List.sort String.compare req.with_repos);
+  add "PINS:";
+  List.iter
+    (fun (p : Project.pin) ->
+      add (OpamPackage.to_string p.pkg);
+      add (OpamUrl.to_string p.url))
+    req.pins;
+  add "EXTRA:";
+  List.iter
+    (fun (e : Project.extra_repo) ->
+      add e.name;
+      add e.url;
+      add (Stdlib.Option.value e.local_packages_dir ~default:""))
+    req.extra_repos;
+  add "CONSTRAINTS:";
+  OpamPackage.Name.Map.iter
+    (fun n (relop, v) ->
+      add (OpamPackage.Name.to_string n);
+      add (OpamPrinter.FullPos.relop_kind relop);
+      add (OpamPackage.Version.to_string v))
+    req.constraints;
+  add ("override:" ^ Stdlib.Option.value req.toolchain_override ~default:"");
+  add
+    ("toolchain_hash:" ^ match req.toolchain with Some i -> i.hash | None -> "");
+  add_conf add req.conf;
+  add ("local_pkg_dir:" ^ Stdlib.Option.value req.local_packages_dir ~default:"");
+  add ("project_root:" ^ Stdlib.Option.value req.project_root ~default:"");
+  add ("force_source:" ^ string_of_bool req.force_source)
+
+let cache_key ~sys ~reporepo_path (req : request) : string option =
+  match git_head_of ~sys reporepo_path with
   | None ->
       Log.info (fun m -> m "cache disabled: no git HEAD at %s" reporepo_path);
       None
@@ -550,56 +573,7 @@ let cache_key ~reporepo_path (req : request) : string option =
       in
       add ("schema:" ^ cache_schema);
       add ("repo:" ^ head);
-      add "TARGETS:";
-      List.iter
-        (fun t ->
-          match t with
-          | Plain p -> add ("Plain:" ^ p)
-          | Group { tokens; handles } ->
-              add "Group:";
-              List.iter add tokens;
-              add "|";
-              List.iter add handles
-          | Overlay_pkg { handle; spec } -> add ("Pkg:" ^ handle ^ "/" ^ spec)
-          | Overlay_all h -> add ("All:" ^ h))
-        req.targets;
-      add "WITH_REPOS:";
-      List.iter add (List.sort String.compare req.with_repos);
-      add "PINS:";
-      List.iter
-        (fun (p : Project.pin) ->
-          add (OpamPackage.to_string p.pkg);
-          add (OpamUrl.to_string p.url))
-        req.pins;
-      add "EXTRA:";
-      List.iter
-        (fun (e : Project.extra_repo) ->
-          add e.name;
-          add e.url;
-          add (Stdlib.Option.value e.local_packages_dir ~default:""))
-        req.extra_repos;
-      add "CONSTRAINTS:";
-      OpamPackage.Name.Map.iter
-        (fun n (relop, v) ->
-          add (OpamPackage.Name.to_string n);
-          add (OpamPrinter.FullPos.relop_kind relop);
-          add (OpamPackage.Version.to_string v))
-        req.constraints;
-      add ("override:" ^ Stdlib.Option.value req.toolchain_override ~default:"");
-      add
-        ("toolchain_hash:"
-        ^ match req.toolchain with Some i -> i.hash | None -> "");
-      add ("ocaml:" ^ req.conf.ocaml_version);
-      add ("arch:" ^ req.conf.arch);
-      add ("os:" ^ req.conf.os);
-      add ("os_distribution:" ^ req.conf.os_distribution);
-      add ("os_version:" ^ req.conf.os_version);
-      add ("os_family:" ^ req.conf.os_family);
-      add
-        ("local_pkg_dir:"
-        ^ Stdlib.Option.value req.local_packages_dir ~default:"");
-      add ("project_root:" ^ Stdlib.Option.value req.project_root ~default:"");
-      add ("force_source:" ^ string_of_bool req.force_source);
+      add_request_body add req;
       Some (Digest.to_hex (Digest.string (Buffer.contents buf)))
 
 let cache_path ~cache_root ~key =
@@ -642,19 +616,9 @@ let cache_store ~fs ~cache_root ~key (s : solved) : unit =
 
 (* -- The top-level entry point -------------------------------------------- *)
 
-let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
-    solved =
-  let reporepo_path = Source.Reporepo.env_path () in
-  let reporepo_url = Source.Reporepo.env_url () in
-  Pipeline.init_opam_root ~fs:env.fs ~data_dir:env.data_dir;
-  let _ : string list =
-    Source.Reporepo.ensure_base ~fs:env.fs ~sys:env.sys ~data_dir:env.data_dir
-      ~refresh:req.refresh ()
-  in
-  (* Determine the union of every handle in scope across the request:
-     [with_repos] (global), [extra_repos] handles, and per-target
-     [@h] tokens. Used both for toolchain selection and for the
-     per-group [packages_dirs] computation below. *)
+(* Union every handle in scope: [with_repos] plus per-target [@h] tokens.
+   Used both for toolchain selection and per-group [packages_dirs]. *)
+let collect_handles (req : request) =
   let token_handles =
     List.concat_map
       (function
@@ -666,24 +630,22 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
   let all_handles =
     List.sort_uniq String.compare (req.with_repos @ token_handles)
   in
-  let toolchain =
-    match req.toolchain with
-    | Some i -> Some i
-    | None ->
-        pick_batch_toolchain ~reporter ~env ~conf:req.conf
-          ~override:req.toolchain_override ~all_handles ()
+  (token_handles, all_handles)
+
+(* Materialise pin sources and resolve [base_pkgs_dirs] / [global_handles] —
+   everything the per-group solver needs to find on disk. *)
+let prepare_sources ~env ~reporter ~req ~toolchain ~token_handles =
+  let _ : string list =
+    Source.Reporepo.ensure_base ~fs:env.fs ~sys:env.sys ~data_dir:env.data_dir
+      ~refresh:req.refresh ()
   in
-  let conf, _tc_ctx = Pipeline.solver_inputs toolchain req.conf in
-  (* Materialise pin sources and CLI / project extras so the
-     per-group [packages_dirs] resolution below has paths it can
-     stat. *)
   let pins =
     Source.Pin.resolve_pins ~fs:env.fs ~sys:env.sys
       ?project_root:req.project_root req.pins
   in
   let pin_dir =
     Source.Pin.materialize ~fs:env.fs ~sys:env.sys ~cache:env.cache
-      ~refresh:req.refresh pins
+      ~refresh:req.refresh ~reporter pins
   in
   let _extra_pkg_dirs : string list =
     Source.Repo.ensure_many ~fs:env.fs ~data_dir:env.data_dir
@@ -694,23 +656,19 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
     | None ->
         Source.Reporepo.ensure_base ~fs:env.fs ~sys:env.sys
           ~data_dir:env.data_dir ()
-    | Some i -> i.packages_dirs
+    | Some (i : Toolchain.info) -> i.packages_dirs
   in
   let global_handles =
     let toks = List.sort_uniq String.compare token_handles in
     List.filter (fun h -> not (List.mem h toks)) req.with_repos
   in
-  let cache_root = Cache.root_s env.cache in
-  let build_prefix = cache_root / "build" / "prefix" in
-  let d10 =
-    Pipeline.d10 ~sys:env.sys ~fs:env.fs
-      ~clock:(env.clock :> D10.Config.clk)
-      ~cache:env.cache ~os_key:env.os_key
-  in
-  let token_groups =
-    expand_targets ~fs:env.fs ~sys:env.sys ~reporepo_path ~reporepo_url
-      req.targets
-  in
+  (pin_dir, base_pkgs_dirs, global_handles)
+
+(* Loop over every solve group, emitting per-group + aggregate progress
+   events, returning the list of per-group results in order. *)
+let solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
+    ~base_pkgs_dirs ~pin_dir ~reporepo_path ~build_prefix ~cache_root ~d10
+    token_groups =
   let n_groups = List.length token_groups in
   reporter.Build_progress.event
     (Phase_started
@@ -738,20 +696,60 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
       token_groups
   in
   reporter.event (Phase_done Solving);
-  let recipes = List.filter_map (fun (gr : group_result) -> gr.recipe) groups in
-  let merged =
-    match recipes with
-    | [] -> None
-    | _ -> (
-        match D10ir.Plan.merge recipes with
-        | Ok r -> Some r
-        | Error msg ->
-            Error.fail_config_error
-              "merging %d recipes failed: %s. This is a bug in \
-               D10ir.Plan.merge: every recipe was produced by the same \
-               toolchain in the same batch."
-              (List.length recipes) msg)
+  groups
+
+(* Merge every group's recipe into one [D10ir.Plan.t]; [None] when no
+   group produced a recipe. *)
+let merge_group_recipes groups =
+  let recipes =
+    List.filter_map (fun (gr : group_result) -> gr.recipe) groups
   in
+  match recipes with
+  | [] -> None
+  | _ -> (
+      match D10ir.Plan.merge recipes with
+      | Ok r -> Some r
+      | Error msg ->
+          Error.fail_config_error
+            "merging %d recipes failed: %s. This is a bug in \
+             D10ir.Plan.merge: every recipe was produced by the same \
+             toolchain in the same batch."
+            (List.length recipes) msg)
+
+let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
+    solved =
+  let reporepo_path = Source.Reporepo.env_path () in
+  let reporepo_url = Source.Reporepo.env_url () in
+  Pipeline.init_opam_root ~fs:env.fs ~data_dir:env.data_dir;
+  let token_handles, all_handles = collect_handles req in
+  let toolchain =
+    match req.toolchain with
+    | Some i -> Some i
+    | None ->
+        pick_batch_toolchain ~reporter ~env ~conf:req.conf
+          ~override:req.toolchain_override ~all_handles ()
+  in
+  let conf, _tc_ctx = Pipeline.solver_inputs toolchain req.conf in
+  let pin_dir, base_pkgs_dirs, global_handles =
+    prepare_sources ~env ~reporter ~req ~toolchain ~token_handles
+  in
+  let cache_root = Cache.root_s env.cache in
+  let build_prefix = cache_root / "build" / "prefix" in
+  let d10 =
+    Pipeline.d10 ~sys:env.sys ~fs:env.fs
+      ~clock:(env.clock :> D10.Config.clk)
+      ~cache:env.cache ~os_key:env.os_key
+  in
+  let token_groups =
+    expand_targets ~fs:env.fs ~sys:env.sys ~reporepo_path ~reporepo_url
+      req.targets
+  in
+  let groups =
+    solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
+      ~base_pkgs_dirs ~pin_dir ~reporepo_path ~build_prefix ~cache_root ~d10
+      token_groups
+  in
+  let merged = merge_group_recipes groups in
   { groups; merged; toolchain }
 
 (* Cache-wrapped public entry point. [request.refresh = true]
@@ -763,7 +761,7 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
 let solve env ?(reporter = Build_progress.null) (req : request) : solved =
   let reporepo_path = Source.Reporepo.env_path () in
   let cache_root = Cache.root_s env.cache in
-  let key_opt = cache_key ~reporepo_path req in
+  let key_opt = cache_key ~sys:env.sys ~reporepo_path req in
   let cached =
     match key_opt with
     | None -> None
@@ -810,17 +808,18 @@ type build_inputs = {
    under [<url_base>/<os_key>/<hash>.*]. Failures log a warning and
    otherwise do nothing — the layer is already in the local cache,
    so the build outcome doesn't depend on the upload succeeding. *)
+let s3_put_quiet ~sys ~src ~dst =
+  try D10.Sysops.Cmd.run sys [ "s3cmd"; "put"; "--quiet"; src; dst ]
+  with exn ->
+    Logs.warn (fun m -> m "upload-archive: %s: %s" dst (Printexc.to_string exn))
+
 let upload_one_layer ~sys ~(d10 : D10.Config.t) ~staging ~url_base hash =
   let os_key = d10.os_key in
   let put rel =
     let src = Filename.concat (Filename.concat staging os_key) (hash ^ rel) in
-    if not (Sys.file_exists src) then ()
-    else
+    if Sys.file_exists src then
       let dst = Fmt.str "%s%s/%s%s" url_base os_key hash rel in
-      try D10.Sysops.Cmd.run sys [ "s3cmd"; "put"; "--quiet"; src; dst ]
-      with exn ->
-        Logs.warn (fun m ->
-            m "upload-archive: %s: %s" dst (Printexc.to_string exn))
+      s3_put_quiet ~sys ~src ~dst
   in
   let staged =
     try D10.Layer.export d10 ~hash ~dst:Eio.Path.(d10.fs / staging)
@@ -886,28 +885,197 @@ let provenance_of_package_plan ~os_key ~ocaml_version ~built_at
     build_env = { ocaml_version };
   }
 
+let write_provenance_for_package ~fs ~cache_root ~os_key ~ocaml_version
+    ~built_at (d10 : D10.Config.t) (pp : Plan.package_plan) =
+  if not (D10.Layer.succeeded d10 ~hash:pp.layer_hash) then ()
+  else
+    let dst = Provenance.path ~cache_root ~os_key ~hash:pp.layer_hash in
+    if Sys.file_exists dst then ()
+    else
+      let r =
+        provenance_of_package_plan ~os_key ~ocaml_version ~built_at pp
+      in
+      Provenance.write ~fs ~cache_root r
+
 let write_provenance_for_solved ~fs ~cache_root ~os_key ~(d10 : D10.Config.t)
     (s : solved) =
-  let now = Unix.gettimeofday () in
+  let built_at = Unix.gettimeofday () in
   List.iter
     (fun (gr : group_result) ->
       match gr.exec_plan with
       | None -> ()
       | Some (ep : Plan.t) ->
           List.iter
-            (fun (pp : Plan.package_plan) ->
-              if D10.Layer.succeeded d10 ~hash:pp.layer_hash then
-                let dst =
-                  Provenance.path ~cache_root ~os_key ~hash:pp.layer_hash
-                in
-                if not (Sys.file_exists dst) then
-                  let r =
-                    provenance_of_package_plan ~os_key
-                      ~ocaml_version:ep.ocaml_version ~built_at:now pp
-                  in
-                  Provenance.write ~fs ~cache_root r)
+            (write_provenance_for_package ~fs ~cache_root ~os_key
+               ~ocaml_version:ep.ocaml_version ~built_at d10)
             ep.packages)
     s.groups
+
+(* Probe the registry index once and figure out which layers we need to fetch
+   and how many bytes that totals. *)
+let plan_remote_fetches ~d10 ~session ~layer_remote (merged : D10ir.Plan.t) =
+  let merged_layer_index =
+    match layer_remote with
+    | None -> None
+    | Some r -> Some (r, D10.Remote_index.fetch d10 ~session ~remote:r)
+  in
+  let needed_fetches, needed_fetch_bytes =
+    match merged_layer_index with
+    | None -> ([], 0L)
+    | Some (_, index) ->
+        List.fold_left
+          (fun (hs, bytes) (n : D10ir.Plan.node) ->
+            let h = D10ir.Layer_hash.to_string n.layer_hash in
+            match Hashtbl.find_opt index h with
+            | Some (e : D10.Layer.index_entry)
+              when not (D10.Layer.succeeded d10 ~hash:h) ->
+                (h :: hs, Int64.add bytes e.size)
+            | _ -> (hs, bytes))
+          ([], 0L) merged.nodes
+  in
+  (merged_layer_index, needed_fetches, needed_fetch_bytes)
+
+let d10_cfg_of_env ~env ~cache_root : D10.Config.t =
+  {
+    sys = env.sys;
+    fs = env.fs;
+    clock = (env.clock :> D10.Config.clk);
+    root = Eio.Path.(env.fs / cache_root);
+    os_key = env.os_key;
+  }
+
+let direct_cfg_with_jobs ~jobs =
+  let base = D10ir.Config.default in
+  let base = D10ir.Config.with_env_overrides base in
+  {
+    base with
+    build_parallelism =
+      (match jobs with Some j -> j | None -> base.build_parallelism);
+  }
+
+(* Track every layer that {!D10ir.Direct} reports as freshly built so the
+   post-run upload step knows what to mirror. *)
+let direct_reporter_tracking ~reporter built_layers : D10ir.Direct.reporter =
+  {
+    event =
+      (fun e ->
+        (match e with
+        | D10ir.Direct.Node_built { node; _ } ->
+            built_layers :=
+              D10ir.Layer_hash.to_string node.layer_hash :: !built_layers
+        | _ -> ());
+        reporter.Build_progress.event (Build e));
+  }
+
+(* Pull every needed remote layer in one go via the unified fetcher. *)
+let fetch_needed_layers ~env ~reporter ~jobs ~d10_cfg
+    (merged : D10ir.Plan.t) merged_layer_index needed_fetches =
+  match merged_layer_index with
+  | None -> ()
+  | Some (r, index) ->
+      if needed_fetches <> [] then
+        let pkg_of : (string, string) Hashtbl.t =
+          Hashtbl.create (List.length merged.nodes)
+        in
+        List.iter
+          (fun (n : D10ir.Plan.node) ->
+            let h = D10ir.Layer_hash.to_string n.layer_hash in
+            let label = Fmt.str "%s.%s" n.package.name n.package.version in
+            Hashtbl.replace pkg_of h label)
+          merged.nodes;
+        Pipeline.fetch_layer_hashes ~reporter ?jobs ~session:env.http_session
+          ~remote:r ~d10:d10_cfg ~index ~hashes:needed_fetches ~pkg_of ()
+
+let archive_path_for ~cache_root sha =
+  Filename.concat cache_root "d10ir" |> fun p ->
+  Filename.concat p "archives" |> fun p -> Filename.concat p (sha ^ ".tar.zst")
+
+let needs_archive ~d10_cfg ~cache_root (n : D10ir.Plan.node) =
+  let h = D10ir.Layer_hash.to_string n.layer_hash in
+  (not (D10.Layer.succeeded d10_cfg ~hash:h))
+  && not (Sys.file_exists (archive_path_for ~cache_root n.archive.sha256))
+
+let pkg_archive_summary nodes =
+  List.map
+    (fun (n : D10ir.Plan.node) ->
+      Fmt.str "%s.%s (%s)" n.package.name n.package.version
+        (String.sub n.archive.sha256 0 (min 12 (String.length n.archive.sha256))))
+    nodes
+  |> String.concat ", "
+
+(* Archive prefetch from the [d10ir-archives/] tree on the remote (if any),
+   then a hard-error for anything still missing locally. Every source
+   archive must come from a [oi repo bump] pass — there's no inline-bake
+   fallback. *)
+let ensure_archives_local ~env ~cache_root ~source_remote ~d10_cfg
+    (merged : D10ir.Plan.t) =
+  let missing_locally =
+    List.filter (needs_archive ~d10_cfg ~cache_root) merged.nodes
+  in
+  if missing_locally = [] then ()
+  else begin
+    (match source_remote with
+    | Some (`Http_remote registry) ->
+        let shas =
+          List.map
+            (fun (n : D10ir.Plan.node) -> n.archive.sha256)
+            missing_locally
+        in
+        let _ : D10ir.Registry.prefetch_summary =
+          D10ir.Registry.prefetch
+            ~clock:(env.clock :> _ Eio.Time.clock_ty Eio.Resource.t)
+            ~fs:env.fs ~session:env.http_session ~cache_root
+            ~remote:(`Http_remote registry) shas
+        in
+        ()
+    | None -> ());
+    let still_missing =
+      List.filter (needs_archive ~d10_cfg ~cache_root) missing_locally
+    in
+    if still_missing <> [] then
+      Error.fail_config_error
+        "%d source archive(s) missing locally and not on the registry: %s.\n\
+         Run [oi repo bump] on the offending overlay to bake the archives, \
+         or point [--registry] at a registry that publishes \
+         [d10ir-archives/<sha>.tar.zst] for these shas."
+        (List.length still_missing)
+        (pkg_archive_summary still_missing)
+  end
+
+(* Pre-flight validation: hoists [oi ir lint]'s plan check so [oi run] /
+   [oi build] surface plan-structure bugs (e.g. a dep_layer_hash with no
+   producer and no d10 entry) as a clear error instead of letting [Direct.run]
+   cascade-skip every node. *)
+let validate_plan_or_fail ~d10_cfg ~fs ~plan_dir merged =
+  match D10ir.Plan.validate ~d10:d10_cfg ~fs ~plan_dir merged with
+  | Ok () -> ()
+  | Error err ->
+      Error.fail_config_error
+        "d10ir recipe failed validation before build: %a"
+        D10ir.Plan.pp_validate_error err
+
+(* Mirror freshly built layers to S3 (or any [s3cmd put]-reachable URL
+   prefix) when [--upload-archive=URL] is set. Sequential uploads keep
+   chatty output predictable and avoid stampeding the remote. *)
+let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url built_layers
+    =
+  match (upload_archive_url, !built_layers) with
+  | None, _ | Some _, [] -> ()
+  | Some raw_url, _ ->
+      let url_base =
+        if
+          String.length raw_url = 0
+          || raw_url.[String.length raw_url - 1] = '/'
+        then raw_url
+        else raw_url ^ "/"
+      in
+      let staging = Filename.concat cache_root "upload-staging" in
+      let hashes = List.sort_uniq String.compare !built_layers in
+      Say.step "Uploading %d freshly built layer(s) to %s"
+        (List.length hashes) url_base;
+      List.iter
+        (upload_one_layer ~sys:env.sys ~d10:d10_cfg ~staging ~url_base)
+        hashes
 
 let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
     D10ir.Direct.result option =
@@ -920,160 +1088,31 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
           ~clock:(env.clock :> D10.Config.clk)
           ~cache:env.cache ~os_key:env.os_key
       in
-      (* Probe the registry index once; the byte-denominator on the
-         agg bar and the fetch list below share one source of truth. *)
-      let merged_layer_index =
-        match inp.layer_remote with
-        | None -> None
-        | Some r ->
-            Some
-              (r, D10.Remote_index.fetch d10 ~session:env.http_session ~remote:r)
+      let merged_layer_index, needed_fetches, needed_fetch_bytes =
+        plan_remote_fetches ~d10 ~session:env.http_session
+          ~layer_remote:inp.layer_remote merged
       in
-      let needed_fetches, needed_fetch_bytes =
-        match merged_layer_index with
-        | None -> ([], 0L)
-        | Some (_, index) ->
-            List.fold_left
-              (fun (hs, bytes) (n : D10ir.Plan.node) ->
-                let h = D10ir.Layer_hash.to_string n.layer_hash in
-                match Hashtbl.find_opt index h with
-                | Some (e : D10.Layer.index_entry)
-                  when not (D10.Layer.succeeded d10 ~hash:h) ->
-                    (h :: hs, Int64.add bytes e.size)
-                | _ -> (hs, bytes))
-              ([], 0L) merged.nodes
-      in
-      let post_total = List.length merged.nodes in
       reporter.Build_progress.event
         (Total_estimate
            {
              fetches = List.length needed_fetches;
-             builds = post_total;
+             builds = List.length merged.nodes;
              fetch_bytes = needed_fetch_bytes;
            });
-      let d10_cfg : D10.Config.t =
-        {
-          sys = env.sys;
-          fs = env.fs;
-          clock = (env.clock :> D10.Config.clk);
-          root = Eio.Path.(env.fs / cache_root);
-          os_key = env.os_key;
-        }
-      in
-      let direct_cfg =
-        let base = D10ir.Config.default in
-        let base = D10ir.Config.with_env_overrides base in
-        {
-          base with
-          build_parallelism =
-            (match inp.jobs with Some j -> j | None -> base.build_parallelism);
-        }
-      in
+      let d10_cfg = d10_cfg_of_env ~env ~cache_root in
+      let direct_cfg = direct_cfg_with_jobs ~jobs:inp.jobs in
       let plan_dir = Eio.Path.native_exn d10_cfg.root in
-      (* Track every layer that {!D10ir.Direct} reports as freshly built
-         (i.e. [Node_built]) so the post-run upload step knows what to
-         mirror. Cached / fetched / failed / skipped layers are skipped
-         — those are already in the remote (or shouldn't be there). *)
       let built_layers : string list ref = ref [] in
-      let direct_reporter : D10ir.Direct.reporter =
-        {
-          event =
-            (fun e ->
-              (match e with
-              | D10ir.Direct.Node_built { node; _ } ->
-                  built_layers :=
-                    D10ir.Layer_hash.to_string node.layer_hash :: !built_layers
-              | _ -> ());
-              reporter.event (Build e));
-        }
-      in
+      let direct_reporter = direct_reporter_tracking ~reporter built_layers in
       reporter.event
         (Phase_started { phase = Fetching; label = "build inputs" });
-      (match merged_layer_index with
-      | None -> ()
-      | Some (r, index) ->
-          if needed_fetches <> [] then begin
-            let pkg_of : (string, string) Hashtbl.t =
-              Hashtbl.create (List.length merged.nodes)
-            in
-            List.iter
-              (fun (n : D10ir.Plan.node) ->
-                let h = D10ir.Layer_hash.to_string n.layer_hash in
-                let label = Fmt.str "%s.%s" n.package.name n.package.version in
-                Hashtbl.replace pkg_of h label)
-              merged.nodes;
-            Pipeline.fetch_layer_hashes ~reporter ?jobs:inp.jobs
-              ~session:env.http_session ~remote:r ~d10:d10_cfg ~index
-              ~hashes:needed_fetches ~pkg_of ()
-          end);
-      (* Archive prefetch from the [d10ir-archives/] tree on the
-         remote (if any), then a hard-error for anything that's still
-         missing locally. The previous inline-bake fallback (running
-         opam fetch + Archive_builder for each missing sha) is gone:
-         every source archive must come from a [oi repo bump] pass.
-         Users who hit "missing archive" should re-bump the offending
-         overlay so the [d10ir-archives/<sha>.tar.zst] entry exists. *)
-      let archive_dir_for sha =
-        Filename.concat
-          (Filename.concat (Filename.concat cache_root "d10ir") "archives")
-          (sha ^ ".tar.zst")
-      in
-      let needs_archive (n : D10ir.Plan.node) =
-        let h = D10ir.Layer_hash.to_string n.layer_hash in
-        (not (D10.Layer.succeeded d10_cfg ~hash:h))
-        && not (Sys.file_exists (archive_dir_for n.archive.sha256))
-      in
-      let missing_locally = List.filter needs_archive merged.nodes in
-      if missing_locally <> [] then begin
-        (match inp.source_remote with
-        | Some (`Http_remote registry) ->
-            let shas =
-              List.map
-                (fun (n : D10ir.Plan.node) -> n.archive.sha256)
-                missing_locally
-            in
-            let _ : D10ir.Registry.prefetch_summary =
-              D10ir.Registry.prefetch
-                ~clock:(env.clock :> _ Eio.Time.clock_ty Eio.Resource.t)
-                ~fs:env.fs ~session:env.http_session ~cache_root
-                ~remote:(`Http_remote registry) shas
-            in
-            ()
-        | None -> ());
-        let still_missing = List.filter needs_archive missing_locally in
-        if still_missing <> [] then
-          let pkg_summary =
-            List.map
-              (fun (n : D10ir.Plan.node) ->
-                Fmt.str "%s.%s (%s)" n.package.name n.package.version
-                  (String.sub n.archive.sha256 0
-                     (min 12 (String.length n.archive.sha256))))
-              still_missing
-            |> String.concat ", "
-          in
-          Error.fail_config_error
-            "%d source archive(s) missing locally and not on the registry: %s.\n\
-             Run [oi repo bump] on the offending overlay to bake the archives, \
-             or point [--registry] at a registry that publishes \
-             [d10ir-archives/<sha>.tar.zst] for these shas."
-            (List.length still_missing)
-            pkg_summary
-      end;
+      fetch_needed_layers ~env ~reporter ~jobs:inp.jobs ~d10_cfg merged
+        merged_layer_index needed_fetches;
+      ensure_archives_local ~env ~cache_root ~source_remote:inp.source_remote
+        ~d10_cfg merged;
       reporter.event (Plan_ready merged);
       reporter.event (Phase_started { phase = Building; label = "build" });
-      (* Pre-flight validation: same check as [oi ir run] / [oi ir lint],
-         hoisted here so [oi run] / [oi build] surface plan structure
-         bugs (e.g. a dep_layer_hash with no producer and no d10 entry —
-         what a non-relocatable toolchain looked like before
-         [external_layers] was added) as a clear error instead of
-         letting [Direct.run] cascade-skip every node and bubble up as
-         a misleading "solved but does not install bin/<X>". *)
-      (match D10ir.Plan.validate ~d10:d10_cfg ~fs:env.fs ~plan_dir merged with
-      | Ok () -> ()
-      | Error err ->
-          Error.fail_config_error
-            "d10ir recipe failed validation before build: %a"
-            D10ir.Plan.pp_validate_error err);
+      validate_plan_or_fail ~d10_cfg ~fs:env.fs ~plan_dir merged;
       let result =
         D10ir.Direct.run ~config:direct_cfg ~d10:d10_cfg ~fs:env.fs
           ~proc_mgr:env.proc_mgr
@@ -1082,30 +1121,8 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
       in
       write_provenance_for_solved ~fs:env.fs ~cache_root ~os_key:env.os_key
         ~d10:d10_cfg inp.solved;
-      (* Mirror freshly built layers to S3 (or any [s3cmd put]-reachable
-         URL prefix) when [--upload-archive=URL] is set. Sequential
-         uploads keep the chatty output predictable and avoid stampeding
-         the remote endpoint; the per-layer payload is small (a single
-         already-zstd-compressed tarball + listing) so wall-clock cost
-         is dominated by network latency, not parallelism. *)
-      (match inp.upload_archive_url with
-      | None -> ()
-      | Some url_base when !built_layers = [] -> ignore url_base
-      | Some raw_url ->
-          let url_base =
-            if
-              String.length raw_url = 0
-              || raw_url.[String.length raw_url - 1] = '/'
-            then raw_url
-            else raw_url ^ "/"
-          in
-          let staging = Filename.concat cache_root "upload-staging" in
-          let hashes = List.sort_uniq String.compare !built_layers in
-          Say.step "Uploading %d freshly built layer(s) to %s"
-            (List.length hashes) url_base;
-          List.iter
-            (upload_one_layer ~sys:env.sys ~d10:d10_cfg ~staging ~url_base)
-            hashes);
+      maybe_upload_built ~env ~cache_root ~d10_cfg
+        ~upload_archive_url:inp.upload_archive_url built_layers;
       reporter.event (Build_summary result);
       Some result
 
@@ -1120,25 +1137,25 @@ let layer_hashes (s : solved) : string list =
       | Some p ->
           List.map (fun (pp : Plan.package_plan) -> pp.layer_hash) p.packages)
 
+let pkg_matches_root_name ~wanted (pp : Plan.package_plan) =
+  match OpamPackage.of_string_opt pp.pkg with
+  | Some p ->
+      List.mem (OpamPackage.Name.to_string (OpamPackage.name p)) wanted
+  | None -> false
+
+let root_layer_hashes_of_group (gr : group_result) =
+  match gr.exec_plan with
+  | None -> []
+  | Some (ep : Plan.t) ->
+      let wanted =
+        List.map OpamPackage.Name.to_string gr.group.names
+        |> List.sort_uniq String.compare
+      in
+      List.filter_map
+        (fun (pp : Plan.package_plan) ->
+          if pkg_matches_root_name ~wanted pp then Some pp.layer_hash else None)
+        ep.packages
+
 let root_layer_hashes (s : solved) : string list =
-  List.concat_map
-    (fun (gr : group_result) ->
-      match gr.exec_plan with
-      | None -> []
-      | Some (ep : Plan.t) ->
-          let wanted =
-            List.map OpamPackage.Name.to_string gr.group.names
-            |> List.sort_uniq String.compare
-          in
-          List.filter_map
-            (fun (pp : Plan.package_plan) ->
-              match OpamPackage.of_string_opt pp.pkg with
-              | Some p
-                when List.mem
-                       (OpamPackage.Name.to_string (OpamPackage.name p))
-                       wanted ->
-                  Some pp.layer_hash
-              | _ -> None)
-            ep.packages)
-    s.groups
+  List.concat_map root_layer_hashes_of_group s.groups
   |> List.sort_uniq String.compare

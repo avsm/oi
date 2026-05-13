@@ -149,7 +149,7 @@ let project_solve ~fs ~sys ~cache ~data_dir ~refresh ~platform ~with_repos
          ~override:toolchain_override ~toolchain
   in
   match
-    Oi.Solver.solve ~fs ~cache_root ctx ~packages_dirs
+    Oi.Solver.solve ~sys ~fs ~cache_root ctx ~packages_dirs
       ~constraints:extra_constraints names
   with
   | Ok pkgs -> (packages_dirs, conf, pkgs)

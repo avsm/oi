@@ -150,24 +150,24 @@ let ensure_dune_project_version ~build_dir ~opam_version ~url_opt =
 
    Format: GNU-style [.gitmodules] with [path = X] keys. We only need
    the [path] values; anything else (url, branch, …) is ignored. *)
+let parse_gitmodules_path line =
+  let line = String.trim line in
+  match String.index_opt line '=' with
+  | None -> None
+  | Some i ->
+      let k = String.trim (String.sub line 0 i) in
+      let v =
+        String.trim (String.sub line (i + 1) (String.length line - i - 1))
+      in
+      if k = "path" && v <> "" then Some v else None
+
 let submodule_paths ~src_dir =
   let gm = Filename.concat src_dir ".gitmodules" in
   if not (Sys.file_exists gm) then []
   else
-    let parse_path_line line =
-      let line = String.trim line in
-      match String.index_opt line '=' with
-      | None -> None
-      | Some i ->
-          let k = String.trim (String.sub line 0 i) in
-          let v =
-            String.trim (String.sub line (i + 1) (String.length line - i - 1))
-          in
-          if k = "path" && v <> "" then Some v else None
-    in
     try
       In_channel.with_open_text gm In_channel.input_lines
-      |> List.filter_map parse_path_line
+      |> List.filter_map parse_gitmodules_path
     with Sys_error _ -> []
 
 let tar_zst ~proc_mgr ~src_dir ~dst_path =
@@ -202,6 +202,84 @@ let tar_zst ~proc_mgr ~src_dir ~dst_path =
        host."
       src_dir (Printexc.to_string exn)
 
+let pkg_version_of pkg_s =
+  match String.index_opt pkg_s '.' with
+  | None -> pkg_s
+  | Some i -> String.sub pkg_s (i + 1) (String.length pkg_s - i - 1)
+
+(* Stream [ic] into [oc] until EOF. Pulled out so [copy_file_bytes] stays
+   flat (the [with_open_bin] callbacks would otherwise stack two nests). *)
+let rec stream_ic_to_oc ~buf ic oc =
+  let n = In_channel.input ic buf 0 (Bytes.length buf) in
+  if n > 0 then begin
+    Out_channel.output oc buf 0 n;
+    stream_ic_to_oc ~buf ic oc
+  end
+
+(* Cross-fs fallback when [Sys.rename] fails: stream bytes from [src] to [dst]. *)
+let copy_file_bytes ~src ~dst =
+  let buf = Bytes.create 65536 in
+  In_channel.with_open_bin src (fun ic ->
+      Out_channel.with_open_bin dst (fun oc -> stream_ic_to_oc ~buf ic oc))
+
+let install_or_drop_tmp ~tmp_path ~final_path =
+  if not (Sys.file_exists final_path) then
+    try Sys.rename tmp_path final_path
+    with Sys_error _ -> copy_file_bytes ~src:tmp_path ~dst:final_path
+  else try Sys.remove tmp_path with Sys_error _ -> ()
+
+let warn_archive_divergence ~p sha =
+  match p.Plan.d10_archive with
+  | Some declared when declared <> sha ->
+      Log.warn (fun m ->
+          m
+            "x-d10-archive divergence for %s: declared %s, regenerated %s. \
+             Re-run [oi ir bake @%s/<pkg>] to update the opam file."
+            p.pkg (String.sub declared 0 12) (String.sub sha 0 12)
+            (match p.overlay with Some o -> o.handle | None -> "<handle>"))
+  | _ -> ()
+
+(* [x-d10-archive] short-circuit: when the opam file declares a pre-baked
+   source sha and the archive is locally present, reuse it directly. Missing
+   archives fall through to the regular fetch path; the regenerated archive
+   should hash to the same sha for deterministic builds. *)
+let archive_hit_for ~d10 (p : Plan.package_plan) =
+  Stdlib.Option.bind p.d10_archive (fun sha ->
+      let path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
+      if Sys.file_exists path then Some (sha, path) else None)
+
+(* Source fetch + patch + extra-files + version-injection pipeline. Same
+   sequence [Execute] runs for the live build, just up to tar time. *)
+let prepare_build_dir ~fs ~cache_root ~cache_urls (p : Plan.package_plan) =
+  (* Clean prior build_dir so patches don't run twice; [fetch_source]
+     short-circuits when [build_dir] exists. We deliberately don't apply opam
+     [substs:] here — the archive ships raw [.in] files for portability. *)
+  Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / p.build_dir);
+  Execute.fetch_phase ~cache_urls ~fs ~cache_root p;
+  Execute.copy_extra_files p;
+  Execute.apply_patches p;
+  let pkg_version = pkg_version_of p.pkg in
+  let url_opt =
+    Stdlib.Option.map (fun (s : Plan.source_info) -> s.url) p.source
+  in
+  ensure_dune_project_version ~build_dir:p.build_dir ~opam_version:pkg_version
+    ~url_opt
+
+let bake_archive ~proc_mgr ~d10 (p : Plan.package_plan) =
+  let layer_short =
+    if String.length p.layer_hash >= 8 then String.sub p.layer_hash 0 8
+    else p.layer_hash
+  in
+  let tmp_path = tmp_dir ~d10 / Fmt.str "%s-%s.tar.zst" p.pkg layer_short in
+  (try Sys.remove tmp_path with Sys_error _ -> ());
+  tar_zst ~proc_mgr ~src_dir:p.build_dir ~dst_path:tmp_path;
+  let sha = sha256_of_file tmp_path in
+  warn_archive_divergence ~p sha;
+  let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
+  install_or_drop_tmp ~tmp_path ~final_path;
+  Log.debug (fun m -> m "archive %s -> %s" p.pkg final_path);
+  (sha, final_path)
+
 let build ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10 ~cache_root
     ?(cache_urls = []) (p : Plan.package_plan) =
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / archives_dir ~d10);
@@ -209,98 +287,16 @@ let build ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10 ~cache_root
   Fmt.kstr
     (fun s -> reporter.Build_progress.event (Status s))
     "Baking archive for %s" p.pkg;
-  (* x-d10-archive short-circuit: when the opam file declares a
-     pre-baked source sha (typically populated by [oi ir bake] /
-     [oi repo bump]), skip the fetch/patches/extras/substs dance and
-     reuse the cached archive directly. The recipe emitter passes the
-     same sha through to the d10ir node; the executor handles per-build
-     sentinel rebasing of substituted files.
-
-     If the declared archive is *missing* locally (e.g. fresh machine
-     after a clone, or after [oi clean]), we don't refuse — we fall
-     through to the regular fetch path. Inputs are deterministic, so
-     the regenerated archive should hash to the same sha; the bake
-     side will overwrite [x-d10-archive] with the new value if it
-     diverges. *)
-  let archive_hit =
-    Stdlib.Option.bind p.d10_archive (fun sha ->
-        let path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-        if Sys.file_exists path then Some (sha, path) else None)
-  in
-  match archive_hit with
+  match archive_hit_for ~d10 p with
   | Some (sha, final_path) ->
       Log.debug (fun m -> m "archive %s (x-d10-archive) -> %s" p.pkg final_path);
-      {
-        path = final_path;
-        sha256 = sha;
-        strip_components = 0;
-        subst_files = p.substs;
-      }
+      { path = final_path; sha256 = sha; strip_components = 0;
+        subst_files = p.substs }
   | None ->
-      (* Clean any prior build_dir so patches don't run twice over the
-     same already-patched tree. fetch_source skips when build_dir
-     exists, so leftover state would otherwise short-circuit fetch
-     and then re-apply patches against a tree that already has them.
-
-     We deliberately do NOT apply opam [substs:] here — the archive
-     contains raw [.in] files and is portable across machines.
-     [D10ir.Direct] applies substs at build time using the
-     [subst_vars] threaded through the recipe. *)
-      Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / p.build_dir);
-      Execute.fetch_phase ~cache_urls ~fs ~cache_root p;
-      Execute.copy_extra_files p;
-      Execute.apply_patches p;
-      let pkg_version =
-        match String.index_opt p.pkg '.' with
-        | None -> p.pkg
-        | Some i -> String.sub p.pkg (i + 1) (String.length p.pkg - i - 1)
-      in
-      let url_opt =
-        Stdlib.Option.map (fun (s : Plan.source_info) -> s.url) p.source
-      in
-      ensure_dune_project_version ~build_dir:p.build_dir
-        ~opam_version:pkg_version ~url_opt;
-      let layer_short =
-        if String.length p.layer_hash >= 8 then String.sub p.layer_hash 0 8
-        else p.layer_hash
-      in
-      let tmp_path = tmp_dir ~d10 / Fmt.str "%s-%s.tar.zst" p.pkg layer_short in
-      (try Sys.remove tmp_path with Sys_error _ -> ());
-      tar_zst ~proc_mgr ~src_dir:p.build_dir ~dst_path:tmp_path;
-      let sha = sha256_of_file tmp_path in
-      (match p.d10_archive with
-      | Some declared when declared <> sha ->
-          Log.warn (fun m ->
-              m
-                "x-d10-archive divergence for %s: declared %s, regenerated %s. \
-                 Re-run [oi ir bake @%s/<pkg>] to update the opam file."
-                p.pkg (String.sub declared 0 12) (String.sub sha 0 12)
-                (match p.overlay with Some o -> o.handle | None -> "<handle>"))
-      | _ -> ());
-      let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-      (if not (Sys.file_exists final_path) then
-         try Sys.rename tmp_path final_path
-         with Sys_error _ ->
-           (* Cross-fs move? fall back to copy. *)
-           In_channel.with_open_bin tmp_path (fun ic ->
-               Out_channel.with_open_bin final_path (fun oc ->
-                   let buf = Bytes.create 65536 in
-                   let rec loop () =
-                     let n = In_channel.input ic buf 0 (Bytes.length buf) in
-                     if n > 0 then begin
-                       Out_channel.output oc buf 0 n;
-                       loop ()
-                     end
-                   in
-                   loop ()))
-       else try Sys.remove tmp_path with Sys_error _ -> ());
-      Log.debug (fun m -> m "archive %s -> %s" p.pkg final_path);
-      {
-        path = final_path;
-        sha256 = sha;
-        strip_components = 0;
-        subst_files = p.substs;
-      }
+      prepare_build_dir ~fs ~cache_root ~cache_urls p;
+      let sha, final_path = bake_archive ~proc_mgr ~d10 p in
+      { path = final_path; sha256 = sha; strip_components = 0;
+        subst_files = p.substs }
 
 (* -- No-solve bake ------------------------------------------------------ *)
 
@@ -446,6 +442,31 @@ let bake_platform_env ~(platform : Osrel.t) =
     | "arch" -> Some (OpamTypes.S arch_str)
     | _ -> None
 
+let prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir
+    ~version =
+  Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
+  let prefix = Filename.concat cache_root (Filename.concat "build" "prefix") in
+  let p = to_min_plan ~prefix b in
+  Execute.fetch_phase ~cache_urls ~fs ~cache_root p;
+  Execute.copy_extra_files p;
+  Execute.apply_patches p;
+  (* No apply_substs at bake time. Archive contains raw .in files; [D10ir.Direct]
+     applies substs at build time so archive content is independent of any
+     per-machine path values. *)
+  let url_opt =
+    Stdlib.Option.map (fun (s : Plan.source_info) -> s.url) b.source
+  in
+  ensure_dune_project_version ~build_dir ~opam_version:version ~url_opt
+
+let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
+  let tmp_path = tmp_dir ~d10 / Fmt.str "%s.%s-bake.tar.zst" name version in
+  (try Sys.remove tmp_path with Sys_error _ -> ());
+  tar_zst ~proc_mgr ~src_dir:build_dir ~dst_path:tmp_path;
+  let sha = sha256_of_file tmp_path in
+  let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
+  install_or_drop_tmp ~tmp_path ~final_path;
+  (sha, final_path)
+
 let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
     ~cache_root ?(cache_urls = []) ~platform ~name ~version ~pkg_dir ~opam_path
     () =
@@ -459,56 +480,14 @@ let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
     Filename.concat cache_root
       (Fmt.kstr (Filename.concat "build/_build") "%s.%s-bake" name version)
   in
-  (* Use the same prefix string [Plan.elaborate] would produce
-     (cache_root/build/prefix). Substituted .in files end up
-     embedding this string; d10ir Direct's rebase replaces it with a
-     per-node staging dir at build time. Same machine = same archive
-     content as the solver-driven path; cross-machine portability of
-     archives is a v2 concern. *)
-  let prefix = Filename.concat cache_root (Filename.concat "build" "prefix") in
   let b =
     inputs_of_opam_file ~platform_env ~name ~version ~build_dir ~pkg_dir
       opam_path
   in
-  Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
-  let p = to_min_plan ~prefix b in
-  Execute.fetch_phase ~cache_urls ~fs ~cache_root p;
-  Execute.copy_extra_files p;
-  Execute.apply_patches p;
-  (* No apply_substs at bake time. Archive contains raw .in files;
-     [D10ir.Direct] applies substs at build time so archive content
-     is independent of any per-machine path values. *)
-  let url_opt =
-    Stdlib.Option.map (fun (s : Plan.source_info) -> s.url) b.source
+  prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir ~version;
+  let sha, final_path =
+    bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir
   in
-  ensure_dune_project_version ~build_dir ~opam_version:version ~url_opt;
-  let tmp_path = tmp_dir ~d10 / Fmt.str "%s.%s-bake.tar.zst" name version in
-  (try Sys.remove tmp_path with Sys_error _ -> ());
-  tar_zst ~proc_mgr ~src_dir:build_dir ~dst_path:tmp_path;
-  let sha = sha256_of_file tmp_path in
-  let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-  (if not (Sys.file_exists final_path) then
-     begin try Sys.rename tmp_path final_path
-     with Sys_error _ ->
-       let ic = open_in_bin tmp_path in
-       Fun.protect
-         ~finally:(fun () -> close_in_noerr ic)
-         (fun () ->
-           let oc = open_out_bin final_path in
-           Fun.protect
-             ~finally:(fun () -> close_out_noerr oc)
-             (fun () ->
-               let buf = Bytes.create 65536 in
-               let rec loop () =
-                 let n = input ic buf 0 (Bytes.length buf) in
-                 if n > 0 then begin
-                   output oc buf 0 n;
-                   loop ()
-                 end
-               in
-               loop ()))
-     end
-   else try Sys.remove tmp_path with Sys_error _ -> ());
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
   Log.debug (fun m -> m "no-solve bake %s -> %s" b.pkg final_path);
   {

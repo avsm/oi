@@ -39,19 +39,19 @@ let classify_repo_token s =
     `Handle (String.sub s 1 (String.length s - 1))
   else `Url s
 
+let rec classify_token_list acc = function
+  | [] -> Some (List.rev acc)
+  | v :: rest -> (
+      match string_of_value v with
+      | Some s -> classify_token_list (classify_repo_token s :: acc) rest
+      | None -> None)
+
 let parse_repos_value (v : OpamParserTypes.FullPos.value) :
     [ `Handle of string | `Url of string ] list option =
   match v.pelem with
   | OpamParserTypes.FullPos.String s -> Some [ classify_repo_token s ]
   | OpamParserTypes.FullPos.List { pelem = items; _ } ->
-      let rec loop acc = function
-        | [] -> Some (List.rev acc)
-        | v :: rest -> (
-            match string_of_value v with
-            | Some s -> loop (classify_repo_token s :: acc) rest
-            | None -> None)
-      in
-      loop [] items
+      classify_token_list [] items
   | _ -> None
 
 let synthetic_repo_name url =
@@ -81,6 +81,14 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
       []
       (OpamFile.OPAM.depends opam)
   in
+  let split_repo_tokens toks =
+    List.fold_left
+      (fun (urls, handles) -> function
+        | `Handle h -> (urls, h :: handles)
+        | `Url u -> ((synthetic_repo_name u, u) :: urls, handles))
+      ([], []) toks
+    |> fun (urls, handles) -> (List.rev urls, List.rev handles)
+  in
   let raw_extra_repos, raw_overlays =
     match
       OpamStd.String.Map.find_opt Keys.repos (OpamFile.OPAM.extensions opam)
@@ -93,13 +101,7 @@ let load_one ~filename (opam : OpamFile.OPAM.t) : raw =
               "%s: %s must be a string or a list of strings (each entry is a \
                [@HANDLE] reporepo handle or a repository URL)"
               filename Keys.repos
-        | Some toks ->
-            List.fold_left
-              (fun (urls, handles) -> function
-                | `Handle h -> (urls, h :: handles)
-                | `Url u -> ((synthetic_repo_name u, u) :: urls, handles))
-              ([], []) toks
-            |> fun (urls, handles) -> (List.rev urls, List.rev handles))
+        | Some toks -> split_repo_tokens toks)
   in
   let raw_pins =
     OpamFile.OPAM.pin_depends opam
@@ -741,21 +743,22 @@ module Tool = struct
     | `Regular_file -> true
     | _ -> false
 
+  let ocamlformat_version_line line =
+    let line = String.trim line in
+    if line = "" || line.[0] = '#' then None
+    else
+      match String.index_opt line '=' with
+      | None -> None
+      | Some i ->
+          let k = String.trim (String.sub line 0 i) in
+          let v =
+            String.trim (String.sub line (i + 1) (String.length line - i - 1))
+          in
+          if k = "version" && v <> "" then Some v else None
+
   let parse_ocamlformat_version path =
-    let is_version_line line =
-      let line = String.trim line in
-      if line = "" || line.[0] = '#' then None
-      else
-        match String.index_opt line '=' with
-        | None -> None
-        | Some i ->
-            let k = String.trim (String.sub line 0 i) in
-            let v =
-              String.trim (String.sub line (i + 1) (String.length line - i - 1))
-            in
-            if k = "version" && v <> "" then Some v else None
-    in
-    String.split_on_char '\n' (read_file path) |> List.find_map is_version_line
+    String.split_on_char '\n' (read_file path)
+    |> List.find_map ocamlformat_version_line
 
   let probe_ocamlformat ~fs dir spec =
     let path = dir / ".ocamlformat" in
