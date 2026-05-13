@@ -472,10 +472,13 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
 (* -- Persistent cache for the [solved] struct ----------------------------- *)
 
 (* Bumped whenever the [solved] / [group_result] / [Plan.t] / [D10ir.Plan.t]
-   shape changes in a way that breaks Marshal compatibility. Folded into
-   the cache key so a stale entry produces a key miss rather than a
-   crash on [Marshal.from_channel]. *)
-let cache_schema = "v2"
+   shape changes in a way that breaks Marshal compatibility, or when
+   [add_target] / [add_request_body] change their canonical byte
+   encoding (so an old cache entry that keyed under a different
+   canonicalisation produces a miss rather than a wrong hit). Folded
+   into the cache key so a stale entry produces a key miss rather than
+   a crash on [Marshal.from_channel]. *)
+let cache_schema = "v3"
 let log_src = Logs.Src.create "oi.build_pipeline.cache"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
@@ -508,10 +511,25 @@ let git_head_of ~sys dir =
    request's targets / scope / constraints / conf. Returns [None] if
    the reporepo isn't a git tree (the common case in tests / fresh
    installs without [oi repo bump]) — the caller falls back to an
-   uncached solve. *)
+   uncached solve.
+
+   The encoding canonicalises equivalent target shapes so the same
+   user-visible target keys identically regardless of how the CLI
+   front-end built it. [Group { tokens = [t]; handles = [h] }] and
+   [Overlay_pkg { handle = h; spec = t }] expand into the same
+   [(tokens, handles)] pair in [expand_targets]; [Group { tokens = [t];
+   handles = [] }] is equivalent to [Plain t]. Without this, [oi build
+   @h/t] (which constructs the [Group] form) and [oi install @h/t]
+   (which constructs [Overlay_pkg]) produced different cache keys for
+   the same solve, so one path could hit a stale marshalled solve while
+   the other freshly re-solved — exactly the divergence we hit with
+   [@samoht/merlint] when its source moved upstream. *)
 let add_target add t =
   match t with
   | Plain p -> add ("Plain:" ^ p)
+  | Group { tokens = [ tok ]; handles = [] } -> add ("Plain:" ^ tok)
+  | Group { tokens = [ tok ]; handles = [ h ] } ->
+      add ("Pkg:" ^ h ^ "/" ^ tok)
   | Group { tokens; handles } ->
       add "Group:";
       List.iter add tokens;

@@ -221,6 +221,16 @@ let cmd =
       promote_to_prefix ~prefix ~bin_dir ~force ~roots:[ install_root ]
     end
     else begin
+      (* Explicit targets bypass cwd project metadata: [oi install] should
+         match what [oi build] would do for the same targets so that
+         [install = build + copy] holds. Build's non-project flow doesn't
+         call [Project.load cwd], so neither should install here. Otherwise
+         a project's [x-repos:] / [pin-depends:] silently expands the solve
+         scope when the user gave an explicit [@h/pkg], producing different
+         layer hashes than [oi build @h/pkg] in the same cwd. [--skip-local]
+         (the CLI flag) still controls project_mode above; here we force
+         project skipping unconditionally because we already decided we're
+         not in project mode. *)
       let {
         Pipeline_setup.env = pipeline_env;
         request = req;
@@ -228,8 +238,8 @@ let cmd =
         source_remote;
         _;
       } =
-        Pipeline_setup.prepare ~harness ~refresh ~locked ~skip_local ~registry
-          ~use_registry ~with_repos ~with_deps ~toolchain_override
+        Pipeline_setup.prepare ~harness ~refresh ~locked ~skip_local:true
+          ~registry ~use_registry ~with_repos ~with_deps ~toolchain_override
           ~targets:(List.map parse_target targets)
           ()
       in
