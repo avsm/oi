@@ -833,8 +833,18 @@ type build_inputs = {
 
 (* -- Upload primitives ------------------------------------------------ *)
 
+(* When [OI_S3CFG] points at a readable file, pass [-c <path>] so s3cmd
+   uses that config instead of [~/.s3cfg]. Lets the [oi docker --all]
+   templates write a synthesised config under [/tmp] and have streaming
+   uploads from inside [oi build] pick it up without depending on the
+   container user's HOME layout. *)
+let s3cmd_argv args =
+  match Sys.getenv_opt "OI_S3CFG" with
+  | Some path when path <> "" -> "s3cmd" :: "-c" :: path :: args
+  | _ -> "s3cmd" :: args
+
 let s3_put_quiet ~sys ~src ~dst =
-  try D10.Sysops.Cmd.run sys [ "s3cmd"; "put"; "--quiet"; src; dst ]
+  try D10.Sysops.Cmd.run sys (s3cmd_argv [ "put"; "--quiet"; src; dst ])
   with exn ->
     Logs.warn (fun m -> m "upload-archive: %s: %s" dst (Printexc.to_string exn))
 
@@ -870,10 +880,11 @@ let patch_layer_manifest_tarball ~fs ~cache_root ~os_key ~hash ~tar_path =
         | _ -> ())
 
 (* Upload one freshly built layer: stage the .tar.zst, patch the local
-   manifest with its real sha256+size, then PUT both blobs to S3 under
-   <url_base>/<os_key>/layers/<hash>.{tar.zst,json}. *)
+   manifest with its real sha256+size, then PUT the tarball, the JSON
+   manifest, and (when present) the per-package build log to
+   <url_base>/<os_key>/layers/<hash>.{tar.zst,json,log}. *)
 let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
-    ~url_base hash =
+    ~url_base ?log_path hash =
   let os_key = d10.os_key in
   let staged =
     try D10.Layer.export d10 ~hash ~dst:Eio.Path.(d10.fs / staging)
@@ -890,7 +901,13 @@ let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
   let manifest_src = Manifest_layer.path_for ~cache_root ~os_key ~hash in
   if Sys.file_exists manifest_src then
     s3_put_quiet ~sys ~src:manifest_src
-      ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash)
+      ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash);
+  match log_path with
+  | None -> ()
+  | Some lp when Sys.file_exists lp ->
+      s3_put_quiet ~sys ~src:lp
+        ~dst:(Fmt.str "%s%s/layers/%s.log" url_base os_key hash)
+  | Some _ -> ()
 
 (* Provenance is written here rather than inside [D10ir.Direct] because the
    richer [Plan.package_plan] (opam_path, pkgs_dir, source, depexts, dep_layers
@@ -989,6 +1006,26 @@ let build_nodes_by_hash (s : solved) =
         m.nodes);
   tbl
 
+(* Layer-hash → [Plan.package_plan] index, used by the streaming
+   uploader to recover the per-layer manifest inputs (recipe, deps,
+   depexts, source_archive sha) at [Node_built] time. Multiple groups
+   can solve the same package; later entries overwrite earlier ones —
+   but the package_plan is keyed by the layer hash, so duplicates are
+   value-equivalent. *)
+let build_pp_by_hash (s : solved) =
+  let tbl = Hashtbl.create 64 in
+  List.iter
+    (fun (gr : group_result) ->
+      match gr.exec_plan with
+      | None -> ()
+      | Some (ep : Plan.t) ->
+          List.iter
+            (fun (pp : Plan.package_plan) ->
+              Hashtbl.replace tbl pp.layer_hash (pp, ep.ocaml_version))
+            ep.packages)
+    s.groups;
+  tbl
+
 let layer_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
     (d10 : D10.Config.t) (pp : Plan.package_plan) : Manifest_layer.t =
   let layer_dir = D10.Layer.dir d10 ~hash:pp.layer_hash in
@@ -1059,6 +1096,21 @@ let write_layer_manifest_for_package ~fs ~cache_root ~os_key ~ocaml_version
     let m =
       layer_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe d10 pp
     in
+    (* Preserve any [tarball] field a streaming-upload reporter has
+       already patched on the on-disk manifest — without this guard
+       the post-build [write_provenance_for_solved] would clobber the
+       sha256+size we just computed when the .tar.zst was staged. *)
+    let m =
+      let existing_path =
+        Manifest_layer.path_for ~cache_root ~os_key ~hash:pp.layer_hash
+      in
+      match Manifest_layer.try_read ~path:existing_path with
+      | Some existing -> (
+          match existing.tarball with
+          | Some t when t.sha256 <> "" -> { m with tarball = Some t }
+          | _ -> m)
+      | None -> m
+    in
     Manifest_layer.write ~fs ~cache_root m
 
 (* Write a layer manifest sidecar for every successfully built layer.
@@ -1126,16 +1178,42 @@ let direct_cfg_with_jobs ~jobs =
       (match jobs with Some j -> j | None -> base.build_parallelism);
   }
 
-(* Track every layer that {!D10ir.Direct} reports as freshly built so the
-   post-run upload step knows what to mirror. *)
-let direct_reporter_tracking ~reporter built_layers : D10ir.Direct.reporter =
+(* Forward d10ir's [Direct] events to the outer [Build_progress.reporter],
+   and (when [stream] is set) PUT each freshly built layer to S3 as soon
+   as its [Node_built] event fires — instead of accumulating hashes for a
+   trailing batch upload. The streamed upload covers the .tar.zst, the
+   patched JSON sidecar, and the per-package build log. *)
+type stream_ctx = {
+  env : env;
+  cache_root : string;
+  d10_cfg : D10.Config.t;
+  url_base : string;
+  staging : string;
+  pp_by_hash : (string, Plan.package_plan * string) Hashtbl.t;
+  nodes_by_hash : (string, D10ir.Plan.node) Hashtbl.t;
+  built_at : float;
+}
+
+let stream_upload_built_layer (ctx : stream_ctx) ~hash ~log_path =
+  let os_key = ctx.env.os_key in
+  (match Hashtbl.find_opt ctx.pp_by_hash hash with
+  | None -> ()
+  | Some (pp, ocaml_version) ->
+      write_layer_manifest_for_package ~fs:ctx.env.fs ~cache_root:ctx.cache_root
+        ~os_key ~ocaml_version ~built_at:ctx.built_at
+        ~nodes_by_hash:ctx.nodes_by_hash ctx.d10_cfg pp);
+  upload_one_layer ~fs:ctx.env.fs ~sys:ctx.env.sys ~d10:ctx.d10_cfg
+    ~staging:ctx.staging ~cache_root:ctx.cache_root ~url_base:ctx.url_base
+    ?log_path hash
+
+let direct_reporter_tracking ~reporter ?stream () : D10ir.Direct.reporter =
   {
     event =
       (fun e ->
-        (match e with
-        | D10ir.Direct.Node_built { node; _ } ->
-            built_layers :=
-              D10ir.Layer_hash.to_string node.layer_hash :: !built_layers
+        (match (e, stream) with
+        | D10ir.Direct.Node_built { node; log_path; _ }, Some ctx ->
+            let hash = D10ir.Layer_hash.to_string node.layer_hash in
+            stream_upload_built_layer ctx ~hash ~log_path:(Some log_path)
         | _ -> ());
         reporter.Build_progress.event (Build e));
   }
@@ -1311,22 +1389,17 @@ let url_base_of raw_url =
     raw_url
   else raw_url ^ "/"
 
-let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url
-    ~archive_sources ~snapshot_reporepo:do_snapshot built_layers solved =
-  match (upload_archive_url, !built_layers) with
-  | None, _ -> ()
-  | Some raw_url, hashes_ref -> (
+(* Post-build PUT of artefacts that aren't tied to a single d10ir node:
+   d10ir source-manifest sidecars (and optional source tarballs) and an
+   optional snapshot of the reporepo at solve-time HEAD. Per-layer
+   .tar.zst / .json / .log mirroring is no longer done here — those
+   stream during the build via {!direct_reporter_tracking}. *)
+let upload_post_build_meta ~env ~cache_root ~upload_archive_url ~archive_sources
+    ~snapshot_reporepo:do_snapshot solved =
+  match upload_archive_url with
+  | None -> ()
+  | Some raw_url -> (
       let url_base = url_base_of raw_url in
-      let hashes = List.sort_uniq String.compare hashes_ref in
-      if hashes <> [] then begin
-        let staging = Filename.concat cache_root "upload-staging" in
-        Say.step "Uploading %d freshly built layer(s) to %s"
-          (List.length hashes) url_base;
-        List.iter
-          (upload_one_layer ~fs:env.fs ~sys:env.sys ~d10:d10_cfg ~staging
-             ~cache_root ~url_base)
-          hashes
-      end;
       let d10ir_shas = unique_d10ir_shas_of_solved solved in
       if d10ir_shas <> [] then begin
         Say.step "Publishing %d source manifest(s)%s to %s"
@@ -1473,8 +1546,23 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
       let d10_cfg = d10_cfg_of_env ~env ~cache_root in
       let direct_cfg = direct_cfg_with_jobs ~jobs:inp.jobs in
       let plan_dir = Eio.Path.native_exn d10_cfg.root in
-      let built_layers : string list ref = ref [] in
-      let direct_reporter = direct_reporter_tracking ~reporter built_layers in
+      let stream =
+        match inp.upload_archive_url with
+        | None -> None
+        | Some raw_url ->
+            Some
+              {
+                env;
+                cache_root;
+                d10_cfg;
+                url_base = url_base_of raw_url;
+                staging = Filename.concat cache_root "upload-staging";
+                pp_by_hash = build_pp_by_hash inp.solved;
+                nodes_by_hash = build_nodes_by_hash inp.solved;
+                built_at = started_at;
+              }
+      in
+      let direct_reporter = direct_reporter_tracking ~reporter ?stream () in
       reporter.event
         (Phase_started { phase = Fetching; label = "build inputs" });
       fetch_needed_layers ~env ~reporter ~jobs:inp.jobs ~d10_cfg merged
@@ -1492,10 +1580,10 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
       in
       write_provenance_for_solved ~fs:env.fs ~cache_root ~os_key:env.os_key
         ~d10:d10_cfg inp.solved;
-      maybe_upload_built ~env ~cache_root ~d10_cfg
+      upload_post_build_meta ~env ~cache_root
         ~upload_archive_url:inp.upload_archive_url
         ~archive_sources:inp.archive_sources
-        ~snapshot_reporepo:inp.snapshot_reporepo built_layers inp.solved;
+        ~snapshot_reporepo:inp.snapshot_reporepo inp.solved;
       reporter.event (Build_summary result);
       let finished_at = Unix.gettimeofday () in
       finalize_build_manifest ~env ~started_at ~finished_at inp.solved;

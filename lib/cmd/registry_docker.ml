@@ -260,43 +260,38 @@ let validate_s3_field ~field s =
 
 (* The single shell command that drives [oi docker --all]'s real work
    inside one distro container: synthesise an [s3cmd] config from
-   mounted secrets, run the full registry build into [/registry], and
-   push the tree to S3. Used identically by the Dockerfile output
-   (mounted via BuildKit secrets) and the obuilder spec (mounted via
-   [(secrets …)]).
+   mounted secrets, then run [oi build --upload-archive=<bucket>] so
+   freshly built layers + their JSON sidecars + their build logs stream
+   up to S3 as each one finishes — no trailing batch upload, no
+   intermediate [/registry] export. Used identically by the Dockerfile
+   output (mounted via BuildKit secrets) and the obuilder spec
+   (mounted via [(secrets …)]).
 
    Secrets are read fresh from their [target=…] mount path and never
    land on the image filesystem: the config is written under [/tmp],
-   the build + sync both reference it via [-c PATH], and the final
-   step is an unconditional [rm -f] of that path. The cleanup runs
-   even when the build or sync fails — we collect each step's exit
-   code into [RC] and only [exit $RC] after the [rm], so a failed
-   sync still purges the config from this layer.
+   [OI_S3CFG] points [oi]'s internal [s3cmd] invocations at it via
+   [-c], and the final step is an unconditional [rm -f] of that path.
+   The cleanup runs even when the build fails — we capture the build's
+   exit code into [RC] and only [exit $RC] after the [rm].
 
    The config goes to a fixed [/tmp] path (not [$HOME/.s3cfg])
    because obuilder typically runs the build as a non-root user
    (e.g. [opam]) — relying on HOME would write under one user and
-   have s3cmd look under another. [-c PATH] is HOME-agnostic.
+   have s3cmd look under another. [OI_S3CFG] is HOME-agnostic.
 
    Setup uses [set -e]: if either secret file is missing or empty
    (typical cause: forgot to pass [--secret s3-access-key=<file>]
    to [obuilder build] / [docker build]), bail out immediately with
    a clear message instead of writing a config with empty keys and
    letting s3cmd fail later with the opaque [Configuration file not
-   available] error. [set -e] is disabled before [oi build] / [s3cmd]
-   so we can capture their exit codes and still run [rm]. *)
+   available] error. [set -e] is disabled before [oi build] so we can
+   capture its exit code and still run [rm]. *)
 let build_sync_shell ?(s3 = default_s3_config) () =
   validate_s3_field ~field:"--s3-bucket" s3.bucket;
   validate_s3_field ~field:"--s3-host-base" s3.host_base;
   validate_s3_field ~field:"--s3-host-bucket" s3.host_bucket;
   validate_s3_field ~field:"--s3-bucket-location" s3.bucket_location;
   let enable_multipart = if s3.enable_multipart then "True" else "False" in
-  (* Upload-only: [s3cmd sync] is bidirectional once the destination
-     already has some objects — newer mtimes on the remote pull files
-     *down* into the container's [/registry], which we don't want. The
-     container's filesystem is the authoritative producer for this build,
-     so use [put --recursive] + [--skip-existing] to write new objects
-     only and never read existing ones back. *)
   Fmt.str
     "set -eu; S3CFG=/tmp/oi-s3cfg; ACCESS=$(cat /run/secrets/%s); SECRET=$(cat \
      /run/secrets/%s); [ -n \"$ACCESS\" ] && [ -n \"$SECRET\" ] || { echo 'oi \
@@ -304,20 +299,21 @@ let build_sync_shell ?(s3 = default_s3_config) () =
      --secret to obuilder build / docker build)' >&2; exit 78; }; printf \
      '[default]\\naccess_key = %%s\\nsecret_key = %%s\\nbucket_location = \
      %s\\nhost_base = %s\\nhost_bucket = %s\\nenable_multipart = %s\\n' \
-     \"$ACCESS\" \"$SECRET\" > \"$S3CFG\"; chmod 600 \"$S3CFG\"; set +e; \
-     OI_BUILD_PARALLELISM=$(nproc) oi build --refresh --all \
-     --use-registry=archives --export /registry; RC=$?; [ $RC -eq 0 ] && { \
-     s3cmd -c \"$S3CFG\" put --recursive --skip-existing /registry/ %s; RC=$?; \
-     }; rm -f \"$S3CFG\"; exit $RC"
+     \"$ACCESS\" \"$SECRET\" > \"$S3CFG\"; chmod 600 \"$S3CFG\"; export \
+     OI_S3CFG=\"$S3CFG\"; set +e; OI_BUILD_PARALLELISM=$(nproc) oi build \
+     --refresh --all --use-registry=archives --upload-archive=%s; RC=$?; rm -f \
+     \"$S3CFG\"; exit $RC"
     s3_access_key_secret s3_secret_key_secret s3_access_key_secret
     s3_secret_key_secret s3.bucket_location s3.host_base s3.host_bucket
     enable_multipart s3.bucket
 
 (* Single-distro Dockerfile: distro stage with oi + s3cmd, then one
-   final RUN that uses BuildKit secret + cache mounts to bake the
-   registry tree into [/registry] and upload it to S3 with
-   [s3cmd put --recursive --skip-existing]. The secrets are only
-   readable inside this RUN — they never persist in the image. *)
+   final RUN that uses BuildKit secret + cache mounts to drive
+   [oi build --upload-archive=<bucket>] — every freshly built layer
+   (.tar.zst + JSON sidecar + build log) streams to S3 as soon as it
+   finishes, so there is no separate [/registry] export or trailing
+   [s3cmd put] phase. Secrets are only readable inside this RUN — they
+   never persist in the image. *)
 let dockerfile_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d =
   let resolved = Distro.resolve_alias d in
   let tag = Distro.tag_of_distro (resolved :> Distro.t) in
@@ -326,8 +322,8 @@ let dockerfile_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d =
   @@ DF.comment
        "Usage: S3_ACCESS_KEY=… S3_SECRET_KEY=… docker compose build (BuildKit \
         secrets carry the keys; the build runs oi build --all \
-        --export=/registry and then s3cmd put --recursive --skip-existing to \
-        %s)."
+        --upload-archive=%s, which streams each freshly built layer + its JSON \
+        sidecar + its build log to S3 as it completes)."
        s3.bucket
   @@ distro_stage ~overlay_depexts d
   @@ DF.run
@@ -361,10 +357,11 @@ let service_name d =
    but we keep a comment so old tooling doesn't choke. *)
 
 (* docker-compose.yml that drives [oi docker --all]. Each per-distro
-   service's build does the entire flow inline — oi build, then s3cmd
-   sync — using BuildKit secret mounts supplied via the top-level
-   [secrets:] block (which reads the S3 keys from the host env at
-   compose-build time, so nothing is baked into the image).
+   service's build runs [oi build --upload-archive=<bucket>] inline,
+   which streams every freshly built layer (+ sidecar + log) to S3 as
+   it finishes — using BuildKit secret mounts supplied via the
+   top-level [secrets:] block (which reads the S3 keys from the host
+   env at compose-build time, so nothing is baked into the image).
 
    [OI_BUILD_PARALLELISM=$(nproc)] (set inside the build RUN) overrides
    the [min cpu_count 8] cap that {!D10ir.Config.default} applies for
@@ -379,12 +376,13 @@ let docker_compose_yaml ?(s3 = default_s3_config) ~distros () =
   out "#\n";
   Fmt.kstr out
     "# Each per-distro service's image build runs `oi build --refresh --all \
-     --export /registry` to populate a per-os_key registry tree, then `s3cmd \
-     sync --skip-existing /registry/ %s` to publish it.\n"
+     --upload-archive=%s`. Every freshly built layer's `.tar.zst`, its JSON \
+     sidecar, and its build log stream to S3 as soon as that layer finishes — \
+     there is no separate `--export` step or trailing `s3cmd put`.\n"
     s3.bucket;
   out
     "# Secrets ride the build via BuildKit `--mount=type=secret` and are\n\
-     # only readable inside the sync RUN — they never persist in the image.\n\
+     # only readable inside the build RUN — they never persist in the image.\n\
      #\n\
      # Override the reporepo URL via `OI_REPOREPO_URL` in the service\n\
      # environment if you need something other than oi's built-in default.\n";
@@ -494,8 +492,9 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
 ; Usage: obuilder build --secret %s=<file> --secret %s=<file> \
 ;          -f %s.spec --store=zfs:tank .
 ;
-; Runs `oi build --refresh --all --export /registry`, then
-; `s3cmd put --recursive --skip-existing /registry/ %s` using the mounted secrets.
+; Runs `oi build --refresh --all --upload-archive=%s` with the mounted
+; secrets — every freshly built layer's .tar.zst, JSON sidecar, and
+; build log stream to S3 as it completes (no trailing batch upload).
 
 ((from "%s:%s")
  (env CI "true")
