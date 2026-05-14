@@ -1,2 +1,3 @@
 (cram
- (deps (package oi)))
+ (deps
+  (package oi)))

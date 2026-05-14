@@ -1,5 +1,3 @@
-(data_only_dirs test)
-
 (rule
  (target link_flags.sexp)
  (deps

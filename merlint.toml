@@ -8,11 +8,12 @@
 # ---------------------------------------------------------------------------
 # E605 — missing test file.
 #
-# The project does not yet have a unit-test scaffold beyond a couple of
-# focused integration tests under [test/]. Wiring up a [test_<module>.ml]
-# stub for every library module would be busywork and a green-checkmark
-# liability; we'll add tests under [test/] as real coverage gaps appear.
-# Disable everywhere.
+# Tier 1 + Tier 2 alcotest suites now cover lib/oi/{manifest_layer,
+# manifest_build,manifest_registry,source_manifest,audit,provenance,keys,
+# origin}.ml under test/oi/test_*.ml. The remaining lib modules don't
+# have a unit-test partner yet — bypass while we work through Tier 3+
+# and the cmdliner-glue layer (which is covered by the cram suite under
+# test/, not by per-module alcotest).
 [[rules]]
 files = "**/*.ml"
 exclude = ["E605"]
