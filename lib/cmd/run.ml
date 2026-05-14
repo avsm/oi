@@ -837,7 +837,8 @@ let lookup_layer_index ~ctx ~env ~binary_name =
   @@ fun ~on_phase ~on_text:_ ~preflight_done ~shared_display:_ ->
   let r =
     Layer_index.package_of_binary ~on_phase ~sys:ctx.sys ~fs:ctx.fs ~clock:clk
-      ~cache:ctx.cache ~os_key:ctx.os_key ~registry:ctx.registry binary_name
+      ~session:ctx.http_session ~cache:ctx.cache ~os_key:ctx.os_key
+      ~registry:ctx.registry binary_name
   in
   preflight_done ();
   r

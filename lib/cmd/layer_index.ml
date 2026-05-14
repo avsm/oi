@@ -3,7 +3,12 @@ let log_src = Logs.Src.create "oi.cmd.layer_index" ~doc:"oi layer index"
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let ( / ) = Filename.concat
-let remote_index_max_age = 3600.0 (* 1 hour *)
+
+(* Kept for backwards-compatibility with [oi config]'s display; the
+   value no longer drives any cache TTL since the remote index is now
+   JSON-fetched on demand and memoised in-process by
+   [D10.Remote_index]. *)
+let remote_index_max_age = 3600.0
 
 let url_join registry rel =
   let n = String.length registry in
@@ -12,6 +17,8 @@ let url_join registry rel =
     else registry
   in
   stripped ^ "/" ^ rel
+
+(* -- Local SQLite index ------------------------------------------------ *)
 
 let count_on_disk_layers ~fs ~os_layer_dir =
   let dir_p = Eio.Path.(fs / os_layer_dir) in
@@ -55,110 +62,144 @@ let ensure_local ~sys ~fs ~clock ~cache ~os_key =
   end;
   index_path
 
-let is_fresh_local local_path =
-  try
-    let st = Unix.stat local_path in
-    Unix.gettimeofday () -. st.Unix.st_mtime < remote_index_max_age
-  with Unix.Unix_error _ -> false
+(* -- Remote index (index-full.json) ------------------------------------ *)
 
-let unlink_quietly path = try Unix.unlink path with Unix.Unix_error _ -> ()
-
-let report_fetch_start ~on_phase ~url =
-  match on_phase with
-  | Some f -> f "Fetching registry index"
-  | None ->
-      Log.info (fun m ->
-          m "Fetching registry index from %s (this may take a moment)..." url)
-
-let fmt_size n =
-  if Int64.compare n 1_048_576L >= 0 then
-    Fmt.str "%.1fMB" (Int64.to_float n /. 1_048_576.)
-  else if Int64.compare n 1024L >= 0 then
-    Fmt.str "%.0fKB" (Int64.to_float n /. 1024.)
-  else Fmt.str "%LdB" n
-
-let progress_reporter on_phase =
-  Option.map
-    (fun f ~received ~total ->
-      match total with
-      | Some t when Int64.compare t 0L > 0 ->
-          Fmt.kstr f "Fetching registry index (%s / %s)" (fmt_size received)
-            (fmt_size t)
-      | _ -> Fmt.kstr f "Fetching registry index (%s)" (fmt_size received))
-    on_phase
-
-let promote_tmp_to_local ~tmp_path ~local_path =
-  try Unix.rename tmp_path local_path
-  with Unix.Unix_error _ -> unlink_quietly tmp_path
-
-let fall_back_to_stale ~fs ~local_path ~registry =
-  if Eio.Path.is_file Eio.Path.(fs / local_path) then begin
-    Log.warn (fun m -> m "Failed to fetch registry index, using stale cache");
-    Some local_path
-  end
-  else begin
-    Log.warn (fun m -> m "Failed to fetch registry index from %s" registry);
-    None
-  end
-
-let fetch_remote_index ~on_phase ~sys ~fs ~os_dir ~local_path ~tmp_path
-    ~registry ~url =
-  let dst = Eio.Path.(fs / tmp_path) in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
-  unlink_quietly tmp_path;
-  (* Visible status goes through [on_phase] so [oi run] can wire it
-     into its preflight bar; otherwise it's a quiet [Log.info]. The
-     previous [Log.app] leaked the message to stderr unconditionally,
-     polluting [oi run]'s output. *)
-  report_fetch_start ~on_phase ~url;
-  let on_progress = progress_reporter on_phase in
-  if D10.Sysops.Http.fetch ?on_progress sys ~url ~dst then begin
-    promote_tmp_to_local ~tmp_path ~local_path;
-    Some local_path
-  end
-  else begin
-    unlink_quietly tmp_path;
-    fall_back_to_stale ~fs ~local_path ~registry
-  end
-
-let ensure_remote ?on_phase ~sys ~fs ~cache ~os_key ~registry () =
+(* Common preamble: open a [D10.Config.t] pointed at the user's cache
+   and call [D10.Remote_index.fetch_full]. Returns [None] when the
+   registry doesn't publish an [index-full.json] (or the fetch fails). *)
+let load_remote_full ?on_phase ~sys ~fs ~clock ~session ~cache ~os_key ~registry
+    () =
   if registry = "" then None
-  else
-    let cache_root = Oi.Cache.root_s cache in
-    let os_dir = cache_root / "layers" / os_key in
-    let local_path = os_dir / "remote-index.db" in
-    let tmp_path = local_path ^ ".tmp" in
-    if is_fresh_local local_path then Some local_path
-    else
-      let url = url_join registry (os_key / "index.db") in
-      fetch_remote_index ~on_phase ~sys ~fs ~os_dir ~local_path ~tmp_path
-        ~registry ~url
+  else begin
+    (match on_phase with
+    | Some f -> f "Fetching registry binary index"
+    | None -> ());
+    let cfg : D10.Config.t =
+      { sys; fs; clock; root = Oi.Cache.root cache; os_key }
+    in
+    D10.Remote_index.fetch_full cfg ~session ~remote:(`Http_remote registry)
+  end
 
-let merge_remote_into_local ~fs ~index_path ~remote_path =
-  let db = D10.Index.open_ ~fs ~path:index_path in
-  (try D10.Index.merge_remote db ~remote_path
-   with Failure msg -> (
-     Log.warn (fun m ->
-         m
-           "Remote index merge failed (%s); removing %s so the next run \
-            re-downloads it"
-           msg remote_path);
-     try Sys.remove remote_path with Sys_error _ -> ()));
-  D10.Index.close db
+let overlay_of_layer (l : D10.Remote_index.layer_full) : D10.Overlay.t option =
+  match (l.overlay_handle, l.overlay_version) with
+  | Some handle, version_opt ->
+      Some
+        {
+          D10.Overlay.handle;
+          version = Stdlib.Option.value version_opt ~default:"";
+        }
+  | None, _ -> None
 
-let package_of_binary ?on_phase ~sys ~fs ~clock ~cache ~os_key ~registry name =
-  let clk = (clock :> D10.Config.clk) in
-  let index_path = ensure_local ~sys ~fs ~clock:clk ~cache ~os_key in
-  (match ensure_remote ?on_phase ~sys ~fs ~cache ~os_key ~registry () with
-  | Some remote_path -> merge_remote_into_local ~fs ~index_path ~remote_path
-  | None -> ());
-  if not (Eio.Path.is_file Eio.Path.(fs / index_path)) then None
+let layer_matches_binary ~binary (l : D10.Remote_index.layer_full) =
+  l.exit_status = 0 && List.exists (String.equal binary) l.binaries
+
+let by_version_desc a b =
+  OpamPackage.Version.compare
+    (OpamPackage.Version.of_string b)
+    (OpamPackage.Version.of_string a)
+
+(* Map a single [layer_full] row to the shape [D10.Index.binaries_for]
+   returns. Used to merge local + remote search results. *)
+let row_of_layer (l : D10.Remote_index.layer_full) =
+  (l.package_name, l.package_ver, l.hash, overlay_of_layer l)
+
+let remote_binaries_for ~binary (full : D10.Remote_index.index_full) =
+  full.layers
+  |> List.filter (layer_matches_binary ~binary)
+  |> List.map row_of_layer
+  |> List.sort (fun (_, v1, _, _) (_, v2, _, _) -> by_version_desc v1 v2)
+
+(* Glob-aware predicate: [pattern] uses [*] as the wildcard, matching
+   the SQLite [LIKE] path in [D10.Index.search_binary]. Empty pattern
+   matches everything. Implementation is the "find each non-wildcard
+   chunk in order, left to right" walk; we factor the inner string
+   search out so the glob driver stays a shallow loop (E010). *)
+let find_substr ~haystack ~needle ~start =
+  let hl = String.length haystack in
+  let nl = String.length needle in
+  let rec loop i =
+    if i + nl > hl then None
+    else if String.sub haystack i nl = needle then Some i
+    else loop (i + 1)
+  in
+  loop start
+
+let glob_walk ~parts ~s =
+  let rec walk pos = function
+    | [] -> true
+    | [ last ] ->
+        let ll = String.length last in
+        let sl = String.length s in
+        ll <= sl - pos && String.sub s (sl - ll) ll = last
+    | "" :: rest -> walk pos rest
+    | part :: rest -> (
+        match find_substr ~haystack:s ~needle:part ~start:pos with
+        | None -> false
+        | Some i -> walk (i + String.length part) rest)
+  in
+  walk 0 parts
+
+let glob_match ~pattern s =
+  if pattern = "" || pattern = "*" then true
+  else if not (String.contains pattern '*') then String.equal pattern s
+  else glob_walk ~parts:(String.split_on_char '*' pattern) ~s
+
+let remote_search_binary ~pattern (full : D10.Remote_index.index_full) =
+  full.layers
+  |> List.filter (fun (l : D10.Remote_index.layer_full) -> l.exit_status = 0)
+  |> List.concat_map (fun (l : D10.Remote_index.layer_full) ->
+      l.binaries
+      |> List.filter (glob_match ~pattern)
+      |> List.map (fun bin ->
+          (bin, l.package_name, l.package_ver, l.hash, overlay_of_layer l)))
+  |> List.sort
+       (fun (b1, n1, v1, _, _) (b2, n2, v2, _, _) ->
+         let c = String.compare b1 b2 in
+         if c <> 0 then c
+         else
+           let c = String.compare n1 n2 in
+           if c <> 0 then c else by_version_desc v1 v2)
+
+let remote_search_package ~pattern (full : D10.Remote_index.index_full) =
+  full.layers
+  |> List.filter (fun (l : D10.Remote_index.layer_full) ->
+      l.exit_status = 0 && glob_match ~pattern l.package_name)
+  |> List.map row_of_layer
+  |> List.sort (fun (n1, v1, _, _) (n2, v2, _, _) ->
+      let c = String.compare n1 n2 in
+      if c <> 0 then c else by_version_desc v1 v2)
+
+(* -- High-level entry points consumed by [oi run] / [oi search] ------- *)
+
+let local_binaries_for ~sys ~fs ~clock ~cache ~os_key ~binary =
+  let index_path = ensure_local ~sys ~fs ~clock ~cache ~os_key in
+  if not (Eio.Path.is_file Eio.Path.(fs / index_path)) then []
   else
     let db = D10.Index.open_ ~fs ~path:index_path in
-    let results = D10.Index.binaries_for db ~binary:name ~os_key in
+    let r = D10.Index.binaries_for db ~binary ~os_key in
     D10.Index.close db;
-    match results with
+    r
+
+let package_of_binary ?on_phase ~sys ~fs ~clock ~session ~cache ~os_key
+    ~registry name =
+  let clk = (clock :> D10.Config.clk) in
+  let first_match rows =
+    match rows with
     | (pkg, _, _, overlay) :: _ ->
-        let handle = Option.map (fun (o : D10.Overlay.t) -> o.handle) overlay in
+        let handle =
+          Stdlib.Option.map (fun (o : D10.Overlay.t) -> o.handle) overlay
+        in
         Some (pkg, handle)
     | [] -> None
+  in
+  match
+    first_match (local_binaries_for ~sys ~fs ~clock:clk ~cache ~os_key ~binary:name)
+  with
+  | Some _ as r -> r
+  | None -> (
+      match
+        load_remote_full ?on_phase ~sys ~fs ~clock:clk ~session ~cache ~os_key
+          ~registry ()
+      with
+      | None -> None
+      | Some full -> first_match (remote_binaries_for ~binary:name full))

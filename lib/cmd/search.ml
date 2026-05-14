@@ -119,15 +119,22 @@ let absorb_handle_prefix ~pattern ~overlay_filter =
       | None -> (pattern, overlay_filter)
       | Some (h, rest) -> (rest, h :: overlay_filter))
 
-let open_index ~sys ~fs ~cache ~os_key ~registry ~clk =
+let open_local_index ~sys ~fs ~cache ~os_key ~clk =
   let index_path =
     Layer_index.ensure_local ~sys ~fs ~clock:clk ~cache ~os_key
   in
-  (match Layer_index.ensure_remote ~sys ~fs ~cache ~os_key ~registry () with
-  | Some remote_path ->
-      Layer_index.merge_remote_into_local ~fs ~index_path ~remote_path
-  | None -> ());
   D10.Index.open_ ~fs ~path:index_path
+
+(* Fetch the registry's [index-full.json] once per [os_key] (it's
+   memoised inside [D10.Remote_index]); [None] when no [--registry]
+   was given or the registry doesn't publish one for this os_key. *)
+let load_remote_full ~sys ~fs ~clk ~session ~cache ~os_key ~registry =
+  if registry = "" then None
+  else
+    let cfg : D10.Config.t =
+      { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
+    in
+    D10.Remote_index.fetch_full cfg ~session ~remote:(`Http_remote registry)
 
 let overlay_of ~overlay_filter = function
   | None -> "-"
@@ -374,19 +381,64 @@ let render_text ~db ~long ~pattern sorted =
   else if long then render_long ~db sorted
   else render_compact sorted
 
+(* Project remote [index-full.json] rows into the [row] shape so they
+   merge with the local-SQLite-derived rows. Remote rows are always
+   tagged [Remote] (we don't try to cross-check whether the local d10
+   has the layer; [strongest_per_key] picks [Local] when both are
+   present). *)
+let remote_bin_rows_of ~remote_full ~overlay_filter ~pattern =
+  match remote_full with
+  | None -> []
+  | Some full ->
+      Layer_index.remote_search_binary ~pattern full
+      |> List.map (fun (bin, pkg_name, pkg_ver, hash, overlay) ->
+          {
+            kind = `Bin;
+            overlay = overlay_of ~overlay_filter overlay;
+            binary = Some bin;
+            findlib = None;
+            pkg_name;
+            pkg_version = pkg_ver;
+            state = Remote;
+            hash = Some hash;
+          })
+
+let remote_pkg_rows_of ~remote_full ~overlay_filter ~pattern =
+  match remote_full with
+  | None -> []
+  | Some full ->
+      Layer_index.remote_search_package ~pattern full
+      |> List.map (fun (pkg_name, pkg_ver, hash, overlay) ->
+          {
+            kind = `Pkg;
+            overlay = overlay_of ~overlay_filter overlay;
+            binary = None;
+            findlib = None;
+            pkg_name;
+            pkg_version = pkg_ver;
+            state = Remote;
+            hash = Some hash;
+          })
+
 (* Build every row source and merge them: indexed binaries, packages, and
-   findlib libs, plus declared packages scanned from overlay clones. *)
-let collect_rows ~db ~d10 ~reporepo_path ~os_key ~overlay_filter ~pattern =
+   findlib libs, plus declared packages scanned from overlay clones,
+   plus whatever the registry's [index-full.json] reports. *)
+let collect_rows ~db ~d10 ~remote_full ~reporepo_path ~os_key ~overlay_filter
+    ~pattern =
   let bin = bin_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
   let pkg_built = pkg_built_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
   let lib = lib_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
   let pkg_declared =
     pkg_declared_rows_of ~reporepo_path ~pattern ~overlay_filter
   in
+  let remote_bin = remote_bin_rows_of ~remote_full ~overlay_filter ~pattern in
+  let remote_pkg = remote_pkg_rows_of ~remote_full ~overlay_filter ~pattern in
   filter_by_overlay ~overlay_filter bin
   @ filter_by_overlay ~overlay_filter pkg_built
   @ filter_by_overlay ~overlay_filter lib
   @ filter_by_overlay ~overlay_filter pkg_declared
+  @ filter_by_overlay ~overlay_filter remote_bin
+  @ filter_by_overlay ~overlay_filter remote_pkg
 
 (* Collapse to latest version per (kind, overlay, name, binary) unless
    [--all-versions], then sort for stable readable output. *)
@@ -469,7 +521,7 @@ let long_arg =
 let cmd =
   let run (c : Terms.common) registry all_versions overlay_filter long pattern =
     Harness.run @@ fun ~sw env ->
-    let { Harness.fs; clock; sys; os_key; cache; _ } =
+    let { Harness.fs; clock; sys; os_key; cache; http_session; _ } =
       Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
         c.cache_dir
     in
@@ -478,12 +530,17 @@ let cmd =
       absorb_handle_prefix ~pattern ~overlay_filter
     in
     let clk = (clock :> D10.Config.clk) in
-    let db = open_index ~sys ~fs ~cache ~os_key ~registry ~clk in
+    let db = open_local_index ~sys ~fs ~cache ~os_key ~clk in
     let d10 : D10.Config.t =
       { sys; fs; clock = clk; root = Oi.Cache.root cache; os_key }
     in
+    let remote_full =
+      load_remote_full ~sys ~fs ~clk ~session:http_session ~cache ~os_key
+        ~registry
+    in
     let all_rows =
-      collect_rows ~db ~d10 ~reporepo_path ~os_key ~overlay_filter ~pattern
+      collect_rows ~db ~d10 ~remote_full ~reporepo_path ~os_key ~overlay_filter
+        ~pattern
     in
     let sorted = finalise_rows ~all_versions all_rows in
     (match c.format with
