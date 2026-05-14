@@ -16,6 +16,7 @@ depends: [
   "bytesrw" {>= "0.2"}
   "sqlite3"
   "requests"
+  "alcotest" {with-test}
   "nox-crypto-rng"
   "fmt"
   "logs"

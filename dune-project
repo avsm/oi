@@ -18,7 +18,7 @@
 (package (name d10)
  (synopsis "Content-addressed binary layer cache (day10 format)")
  (depends (ocaml (>= 5.2.0)) (eio (>= 1.0)) (osrel (= :version))
-  (opam-format (>= 2.2.0)) (jsont (>= 0.2)) (bytesrw (>= 0.2)) sqlite3 requests
+  (opam-format (>= 2.2.0)) (jsont (>= 0.2)) (bytesrw (>= 0.2)) sqlite3 requests (alcotest :with-test)
   nox-crypto-rng fmt logs))
 
 (package (name oi) (synopsis "A stateless OCaml package builder")
