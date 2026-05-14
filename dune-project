@@ -2,7 +2,7 @@
 
 (name oi)
 
-(version 0.12.1)
+(version 0.12.2)
 
 (generate_opam_files true)
 
