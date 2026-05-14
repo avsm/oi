@@ -786,15 +786,10 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
    [cache_key] returns [None] (no git HEAD to anchor staleness on)
    — there's nothing safe to store against, so storing is also
    skipped in that case. *)
-(* Hold a shared reporepo lock for the whole solve. Multiple [oi]
-   processes solving in parallel coexist; an [oi repo bump] takes
-   {!Lock.with_reporepo} in [Exclusive] and waits for every in-flight
-   solve to drain before rewriting the working tree. *)
+(* Cross-process serialisation against [oi repo bump] (and against
+   other [oi]s) is provided by {!Oi.Lock.acquire_global} in
+   {!Cmd.Harness.bootstrap}. *)
 let solve env ?(reporter = Build_progress.null) (req : request) : solved =
-  Lock.with_reporepo
-    ~clock:(env.clock :> _ Eio.Time.clock)
-    ~fs:env.fs ~data_dir:env.data_dir ~mode:Shared
-  @@ fun _reporepo_lock ->
   let reporepo_path = Source.Reporepo.env_path () in
   let cache_root = Cache.root_s env.cache in
   let key_opt = cache_key ~sys:env.sys ~reporepo_path req in
@@ -866,8 +861,7 @@ let sha256_of_file_quiet path =
 (* Once a layer's [.tar.zst] is staged, fill in [tarball.{sha256,size,key}]
    on the existing layer manifest (which P2 wrote with placeholder zeros)
    so the uploaded manifest accurately describes the blob it accompanies. *)
-let patch_layer_manifest_tarball ~clock ~fs ~cache_root ~os_key ~hash ~tar_path
-    =
+let patch_layer_manifest_tarball ~fs ~cache_root ~os_key ~hash ~tar_path =
   let manifest_path = Manifest_layer.path_for ~cache_root ~os_key ~hash in
   if not (Sys.file_exists manifest_path) then ()
   else
@@ -886,7 +880,7 @@ let patch_layer_manifest_tarball ~clock ~fs ~cache_root ~os_key ~hash ~tar_path
               }
             in
             let m' = { m with tarball = Some tarball } in
-            Manifest_layer.write ~clock ~fs ~cache_root m'
+            Manifest_layer.write ~fs ~cache_root m'
         | _ -> ())
 
 (* Upload one freshly built layer: stage the .tar.zst, patch the local
@@ -904,8 +898,7 @@ let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
   let tar_src =
     Filename.concat (Filename.concat staging os_key) (hash ^ ".tar.zst")
   in
-  patch_layer_manifest_tarball ~clock:d10.clock ~fs ~cache_root ~os_key ~hash
-    ~tar_path:tar_src;
+  patch_layer_manifest_tarball ~fs ~cache_root ~os_key ~hash ~tar_path:tar_src;
   if Sys.file_exists tar_src then
     s3_put_quiet ~sys ~src:tar_src
       ~dst:(Fmt.str "%s%s/layers/%s.tar.zst" url_base os_key hash);
@@ -1123,7 +1116,7 @@ let write_layer_manifest_for_package ~fs ~cache_root ~os_key ~ocaml_version
           | _ -> m)
       | None -> m
     in
-    Manifest_layer.write ~clock:d10.clock ~fs ~cache_root m
+    Manifest_layer.write ~fs ~cache_root m
 
 (* Write a layer manifest sidecar for every successfully built layer.
    The sidecar at [<cache>/layers/<os_key>/<hash>.json] now
@@ -1503,9 +1496,7 @@ let finalize_build_manifest ~env ~started_at ~finished_at ?targets
       ~overlays ~context ?targets ?solve ~events ()
   in
   Manifest_build.write ~fs:env.fs ~cache_root m;
-  Manifest_registry.ensure
-    ~clock:(env.clock :> D10.Config.clk)
-    ~fs:env.fs ~cache_root ~os_key ~wrote_by:"oi";
+  Manifest_registry.ensure ~fs:env.fs ~cache_root ~os_key ~wrote_by:"oi";
   Audit.delete_staged ~cache_root ~invocation_id
 
 let mk_stream_ctx ~env ~cache_root ~d10_cfg ~started_at (inp : build_inputs) =

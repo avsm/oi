@@ -989,12 +989,9 @@ module Bump = struct
       let bump_one_handle h =
         bump_and_bake ~ctx ~url ~ref_ ~toolchain ~depends ~default h
       in
-      (* Exclusive reporepo lock: while [oi repo bump] rewrites
-         [<reporepo>/v2/<handle>/packages/], no concurrent [oi build]
-         must read it. Builds take [Shared] on the same lockfile so
-         this serialises bumps against in-flight builds. *)
-      Oi.Lock.with_reporepo ~clock ~fs ~data_dir:c.data_dir ~mode:Exclusive
-      @@ fun _lock ->
+      (* Cross-process serialisation against concurrent [oi build] /
+         [oi repo bump] is handled by {!Oi.Lock.acquire_global} in
+         {!Cmd.Harness.bootstrap}. *)
       match (all, handle_opt) with
       | false, None ->
           Fmt.epr "oi repo bump: pass HANDLE or --all.@.";

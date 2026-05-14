@@ -398,6 +398,11 @@ let with_phase ~reporter (n : Plan.node) phase body =
   reporter.event (Node_phase { node = n; phase });
   try body () with exn -> raise (Phase_failed (phase, exn))
 
+(* Cross-process serialisation is provided by {!Oi.Lock.acquire_global} in
+   {!Cmd.Harness.bootstrap}, so [build_one] does not take its own lock; the
+   per-hash [staging] / [build_dir] paths only need to be safe against
+   in-process scheduling, which the d10ir scheduler handles by not
+   dispatching the same node twice. *)
 let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
     ~producers ~reporter ~mount_env (n : Plan.node) =
   if succeeded d10 n.layer_hash then `Cached
@@ -436,12 +441,12 @@ let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
       `Built (log_path, dt)
     with Phase_failed (phase, exn) ->
       (* Build failures are NOT logged as warnings here — they're
-           a normal part of any non-trivial build. The Failed event
-           carries enough info, the per-node log file has the full
-           output, and the run-level summary printed by the caller
-           is where the user should see the failure. Logging here
-           too would duplicate (during the run) and mid-bar the
-           progress UI. *)
+         a normal part of any non-trivial build. The Failed event
+         carries enough info, the per-node log file has the full
+         output, and the run-level summary printed by the caller
+         is where the user should see the failure. Logging here
+         too would duplicate (during the run) and mid-bar the
+         progress UI. *)
       let log_path = log_path_for ~config ~d10 n in
       cleanup_staging ~fs ~config staging build_dir;
       `Failed (phase, log_path, tidy_error_string (Printexc.to_string exn))

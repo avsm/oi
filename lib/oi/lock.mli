@@ -1,88 +1,36 @@
-(** Higher-level locks for [oi]-shaped resources.
+(** Process-wide global lock for [oi] commands.
 
-    Thin wrappers over {!D10.Lock} that pick the canonical lockfile path for
-    each kind of shared state and call through with the project's defaults. Each
-    lock comes in two forms: [acquire_X ~sw] for switch-scoped lifetime and
-    [with_X] for block-scoped use. *)
+    Every [oi] subcommand acquires {!path}'s lockfile {!D10.Lock.Exclusive} on
+    entry (in {!Cmd.Harness.bootstrap}) and holds it for the whole command. A
+    second concurrent [oi] invocation blocks on the same lockfile until the
+    first releases (process exit, ctrl-C, crash), then runs to completion in
+    turn.
 
-val acquire_reporepo :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
+    This replaces the previous per-resource granular locks (per-layer-hash,
+    per-archive-sha, per-prefix, per-pin-set, reporepo). With the single global
+    lock, every cache-write path is implicitly serialised across processes;
+    in-process concurrency (build-parallelism fibres) is governed by the
+    existing per-module in-flight tables. *)
+
+val path : data_dir:string -> string
+(** [path ~data_dir] is the canonical global lockfile path
+    [<data_dir>/.oi.lock]. Sited next to {b not} inside [<data_dir>/reporepo/]
+    so a [git clean -xfd] in any working tree never sweeps it. *)
+
+val acquire_global :
   sw:Eio.Switch.t ->
   clock:_ Eio.Time.clock ->
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   data_dir:string ->
   unit ->
-  D10.Lock.t
-(** [acquire_reporepo ~sw ~clock ~fs ~data_dir ()] is the switch-scoped variant
-    of {!with_reporepo}. The lock releases when [sw] ends. *)
+  unit
+(** [acquire_global ~sw ~clock ~fs ~data_dir ()] takes {!D10.Lock.Exclusive} on
+    {!path} for the lifetime of [sw]: the lockfile fd is owned by the switch via
+    {!Eio_unix.Fd.of_unix} [~close_unix:true], so the lock releases on normal
+    switch teardown, exception propagation, signal-driven cancel, or process
+    death. The function returns [unit] — there is no handle to manage, and
+    calling [release] early would be incorrect (the rest of the command body
+    needs the lock).
 
-val with_reporepo :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
-  clock:_ Eio.Time.clock ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  data_dir:string ->
-  (D10.Lock.t -> 'a) ->
-  'a
-(** [with_reporepo ~clock ~fs ~data_dir f] holds the reporepo lockfile at
-    [<data_dir>/.reporepo.lock] (deliberately {b outside} [<data_dir>/reporepo/]
-    so a [git clean -xfd] in the working tree never sweeps it). [oi repo bump],
-    [oi repo add] etc. take {!D10.Lock.Exclusive}; [oi build] takes
-    {!D10.Lock.Shared} so builds can run in parallel while a bump waits for them
-    all. *)
-
-val acquire_prefix :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
-  sw:Eio.Switch.t ->
-  clock:_ Eio.Time.clock ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  cache_root:string ->
-  prefix_hash:string ->
-  unit ->
-  D10.Lock.t
-(** [acquire_prefix ~sw ~clock ~fs ~cache_root ~prefix_hash ()] is the
-    switch-scoped variant of {!with_prefix}. *)
-
-val with_prefix :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
-  clock:_ Eio.Time.clock ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  cache_root:string ->
-  prefix_hash:string ->
-  (D10.Lock.t -> 'a) ->
-  'a
-(** [with_prefix ~clock ~fs ~cache_root ~prefix_hash f] holds the per-prefix
-    lockfile at [<cache>/prefixes/<prefix_hash>.lock].
-    {!Pipeline.assemble_prefix} takes {!D10.Lock.Exclusive} while hardlinking
-    layers; the double-check-after-acquire pattern (re-checking the [.ready]
-    marker) skips the work entirely on a contested win. *)
-
-val acquire_pin_set :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
-  sw:Eio.Switch.t ->
-  clock:_ Eio.Time.clock ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  cache_root:string ->
-  set_id:string ->
-  unit ->
-  D10.Lock.t
-(** [acquire_pin_set ~sw ~clock ~fs ~cache_root ~set_id ()] is the switch-scoped
-    variant of {!with_pin_set}. *)
-
-val with_pin_set :
-  ?mode:D10.Lock.mode ->
-  ?strategy:D10.Lock.strategy ->
-  clock:_ Eio.Time.clock ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  cache_root:string ->
-  set_id:string ->
-  (D10.Lock.t -> 'a) ->
-  'a
-(** [with_pin_set ~clock ~fs ~cache_root ~set_id f] holds the per-pin-set
-    lockfile at [<cache>/pins/sets/<set_id>.lock]. {!Source.Pin.materialize}
-    takes {!D10.Lock.Exclusive} while synthesising opam files for the pin set.
-*)
+    Blocks forever if another [oi] holds it, logging progress every 5 s via
+    {!D10.Lock}'s default [on_wait]. *)

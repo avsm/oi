@@ -154,34 +154,24 @@ let do_fetch_with_retries ~clock ~fs ~session ~cache_root ~remote ~sha ~dst =
   in
   loop 1 2.0
 
-let lock_path_for ~cache_root ~sha = archives_dir ~cache_root / (sha ^ ".lock")
-
-let fetch_under_lock ~clock ~fs ~session ~cache_root ~remote ~sha ~dst =
-  D10.Lock.with_lock ~clock ~fs
-    ~path:(lock_path_for ~cache_root ~sha)
-    ~mode:Exclusive
-  @@ fun _lock ->
-  if Sys.file_exists dst then true
-  else do_fetch_with_retries ~clock ~fs ~session ~cache_root ~remote ~sha ~dst
-
 let claim_and_fetch ~clock ~fs ~session ~cache_root ~remote ~sha ~dst u =
   let ok = ref false in
   Fun.protect
     ~finally:(fun () -> In_flight.release sha u !ok)
     (fun () ->
       let r =
-        fetch_under_lock ~clock ~fs ~session ~cache_root ~remote ~sha ~dst
+        if Sys.file_exists dst then true
+        else
+          do_fetch_with_retries ~clock ~fs ~session ~cache_root ~remote ~sha
+            ~dst
       in
       ok := r;
       r)
 
-(* Two-tier coordination:
-   - In-process {!In_flight} dedups concurrent fibers in the same [oi]
-     run sharing a session.
-   - Cross-process {!D10.Lock.with_lock} on a per-sha lockfile serialises
-     multiple [oi] processes hitting the same shared cache. The
-     double-check on [Sys.file_exists dst] after acquiring the lock lets
-     a loser of contested fetch skip the HTTP work. *)
+(* {!In_flight} dedups concurrent fibres in the same [oi] run sharing a
+   session. Cross-process safety against another [oi] hitting the same
+   shared cache is provided by {!Oi.Lock.acquire_global} in
+   {!Cmd.Harness.bootstrap}, which serialises whole commands. *)
 let pull ~clock ~fs ~session ~cache_root ~remote ~sha =
   let dst = archive_path ~cache_root ~sha in
   if Sys.file_exists dst then true

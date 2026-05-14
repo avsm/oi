@@ -100,7 +100,13 @@ val store :
     layer directory. The d10 layer is opaque to the IR — d10 just stores the
     blob. The producer (typically [d10ir.Direct]) writes a single-node d10ir
     [Plan.node] here so the layer is reconstructible from inputs (recipe +
-    content-addressed source archive + dep layers). *)
+    content-addressed source archive + dep layers).
+
+    {b Cross-process safety} is handled by the {!Oi.Lock.acquire_global}
+    invocation in {!Cmd.Harness.bootstrap}: only one [oi] process touches the
+    cache at a time, so [store] needs no internal lock. In-process concurrency
+    is controlled by the build scheduler ({!D10ir.Direct}) and per-hash
+    in-flight tables ({!D10ir.Registry.In_flight}). *)
 
 val load_recipe_json : Config.t -> hash:string -> string option
 (** [load_recipe_json c ~hash] reads the layer's [recipe.json] verbatim, or

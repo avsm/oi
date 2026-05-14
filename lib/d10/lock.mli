@@ -1,46 +1,30 @@
-(** Cross-process advisory locking for the d10 cache.
+(** Cross-process advisory locking primitive.
 
     Backed by [Unix.lockf] (POSIX fcntl record locks). The lock is held while a
     file descriptor to the lockfile remains open; it is released on explicit
     {!release}, on the surrounding {!with_lock}'s exit (success or exception),
-    and on process termination. A crashed [oi] process therefore never strands a
-    held lock.
+    on switch teardown for the {!acquire} form, and on process termination — so
+    a crashed process never strands a held lock.
 
-    {1 What gets locked}
-
-    Lockfiles live next to the resource they protect:
-
-    - [<cache>/layers/<os_key>/<hash>.lock] — protects the layer at
-      [<cache>/layers/<os_key>/<hash>/] and its sidecar at
-      [<cache>/layers/<os_key>/<hash>.json].
-    - [<cache>/d10ir/archives/<sha>.lock] — protects
-      [<cache>/d10ir/archives/<sha>.{tar.zst,json}].
-    - [<cache>/layers/<os_key>/.registry.lock] — protects the schema-version
-      pointer at [<cache>/layers/<os_key>/registry.json].
-
-    The files themselves are tiny zero-byte sentinels created on first use; we
-    record the holder's pid into them as a debug aid.
+    The single user of this primitive is {!Oi.Lock.acquire_global}, which takes
+    [<data_dir>/.oi.lock] at the top of every [oi] command in
+    {!Cmd.Harness.bootstrap}. The lockfile is a tiny sentinel created on first
+    use; we record the holder's pid into it as a debug aid.
 
     {1 Modes}
 
     Multiple {!Shared} holders coexist. An {!Exclusive} holder excludes every
-    other holder of any mode. The typical pattern is:
-
-    - Writers ({!Layer.store}, {!Registry.pull}, [oi repo bump]) take
-      {!Exclusive}.
-    - Readers that need a stable view ({!Layer.export}, prefix assembly) take
-      {!Shared}.
-    - Pure reads (browsing layer dirs from inside [oi cache show]) do not bother
-      — they accept the small race.
+    other holder of any mode. The [oi] command lock uses {!Exclusive}.
 
     {1 Limitations}
 
-    - Advisory: code that bypasses these helpers and writes the resource
-      directly can still corrupt it. Treat any direct [d10.fs] write as a bug.
+    - Advisory: code that bypasses this primitive and writes the cache directly
+      can still corrupt it.
     - Local-FS only. [Unix.lockf] over NFS is fragile in mixed-version clusters;
       this is an unsupported configuration.
-    - Not re-entrant. A fiber that already holds [lock(R)] must not try to
-      acquire it again from a nested call. *)
+    - Not re-entrant. A process that already holds [lock(R)] must not try to
+      acquire it again — closing the inner fd would release the outer's
+      kernel-side lock (POSIX fcntl record locks are owned per-process). *)
 
 type mode = Shared | Exclusive
 
@@ -117,78 +101,3 @@ val with_lock :
 
     Prefer this for one-shot acquisitions; reach for {!acquire} when the lock
     needs to outlive a single block. *)
-
-(** {1 Resource-specific helpers}
-
-    These call {!with_lock} with the canonical paths under {!Config.t}. *)
-
-val acquire_layer :
-  Config.t ->
-  sw:Eio.Switch.t ->
-  hash:string ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  unit ->
-  t
-(** [acquire_layer c ~sw ~hash ()] is {!acquire} on the lockfile at
-    [<cache>/layers/<os_key>/<hash>.lock]. *)
-
-val with_layer :
-  Config.t ->
-  hash:string ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  (t -> 'a) ->
-  'a
-(** [with_layer c ~hash f] is the block-scoped form of {!acquire_layer}. *)
-
-val acquire_archive :
-  Config.t ->
-  sw:Eio.Switch.t ->
-  sha:string ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  unit ->
-  t
-(** [acquire_archive c ~sw ~sha ()] is {!acquire} on the lockfile at
-    [<cache>/d10ir/archives/<sha>.lock]. *)
-
-val with_archive :
-  Config.t ->
-  sha:string ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  (t -> 'a) ->
-  'a
-(** [with_archive c ~sha f] is the block-scoped form of {!acquire_archive}. *)
-
-val acquire_registry_pointer :
-  Config.t ->
-  sw:Eio.Switch.t ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  unit ->
-  t
-(** [acquire_registry_pointer c ~sw ()] is {!acquire} on the lockfile at
-    [<cache>/layers/<os_key>/.registry.lock]. *)
-
-val with_registry_pointer :
-  Config.t ->
-  ?mode:mode ->
-  ?strategy:strategy ->
-  ?log_interval_s:float ->
-  ?on_wait:(waited_s:float -> path:string -> pid:int option -> unit) ->
-  (t -> 'a) ->
-  'a
-(** [with_registry_pointer c f] is the block-scoped form of
-    {!acquire_registry_pointer}. *)

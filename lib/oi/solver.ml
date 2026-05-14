@@ -723,10 +723,7 @@ module Memo = struct
   let signature_memo : (string, string option) Hashtbl.t = Hashtbl.create 16
 
   (* Run an argv via the Eio process manager and return its untrimmed stdout,
-     or [None] on any failure (missing git, non-git dir, signal kill). The old
-     [Unix.open_process_in] route is gone — every external command goes
-     through [D10.Sysops.Cmd.run_out_quiet] so stderr is swallowed and the
-     call lives under the Eio fiber tree. *)
+     or [None] on any failure (missing git, non-git dir, signal kill). *)
   let run_out_opt ~sys argv =
     try Some (D10.Sysops.Cmd.run_out_quiet sys argv) with Eio.Io _ -> None
 

@@ -319,7 +319,6 @@ let bake_archive ~proc_mgr ~fs ~d10 (p : Plan.package_plan) =
     try (Unix.stat tmp_path).Unix.st_size with Unix.Unix_error _ -> 0
   in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-  D10.Lock.with_archive d10 ~sha ~mode:Exclusive @@ fun _lock ->
   install_or_drop_tmp ~tmp_path ~final_path;
   write_source_manifest_for_plan ~proc_mgr ~fs ~d10 p ~sha ~size;
   Log.debug (fun m -> m "archive %s -> %s" p.pkg final_path);
@@ -512,10 +511,10 @@ let prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir
   ensure_dune_project_version ~build_dir ~opam_version:version ~url_opt
 
 (* [bake_no_solve_archive] tars + computes the sha but stops short of
-   installing — the install (and its sibling sidecar write) happens
-   under [D10.Lock.with_archive] at the call site so the
-   post-rename + sidecar-write sequence is atomic with respect to
-   other [oi] processes. *)
+   installing. The install (and its sibling sidecar write) happens at
+   the call site; cross-process atomicity comes from the global lock
+   in {!Cmd.Harness.bootstrap} (only one [oi] writes to the cache at a
+   time). *)
 let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
   let tmp_path =
     tmp_dir ~d10 / Fmt.str "%s.%s-bake-%d.tar.zst" name version (Unix.getpid ())
@@ -560,9 +559,8 @@ let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
   let sha, tmp_path, final_path, size =
     bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir
   in
-  D10.Lock.with_archive d10 ~sha ~mode:Exclusive (fun _lock ->
-      install_or_drop_tmp ~tmp_path ~final_path;
-      write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size);
+  install_or_drop_tmp ~tmp_path ~final_path;
+  write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size;
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
   Log.debug (fun m -> m "no-solve bake %s -> %s" b.pkg final_path);
   {

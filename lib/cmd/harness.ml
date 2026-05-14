@@ -142,6 +142,17 @@ let bootstrap ~sw ?data_dir ?(format = Terms.Text) (env : Eio_unix.Stdenv.base)
   let os_key = D10.Os_key.(to_string (of_platform platform)) in
   let cache = Oi.Cache.v ~root:cache_dir fs in
   let data_dir = resolve_data_dir ?override:data_dir () in
+  (* Serialise every [oi] invocation against every other one sharing the
+     same [data_dir]. The lockfile fd is owned by [sw] (the
+     command-lifetime switch installed in {!with_eio_root}) so the lock
+     releases on normal exit, exception unwind, or signal-driven cancel;
+     a second [oi] blocks here and logs every 5 s until the first
+     releases. The lockfile lives at [<data_dir>/.oi.lock] (mirroring
+     [.reporepo.lock]), {b outside} any git-tree-rooted subdir so
+     [git clean -xfd] never sweeps it. *)
+  (try Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / data_dir)
+   with Eio.Exn.Io _ -> ());
+  Oi.Lock.acquire_global ~sw ~clock ~fs ~data_dir ();
   (* Validate on-disk schema stamps before any command body runs. A
      mismatch means the user upgraded [oi] across an incompatible
      format change; stale caches get cleared automatically so the

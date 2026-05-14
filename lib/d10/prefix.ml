@@ -20,29 +20,21 @@ let solve_hash hashes =
   let sorted = List.sort String.compare hashes in
   Digest.string (String.concat "\n" sorted) |> Digest.to_hex
 
-(* Per-prefix exclusive lock, with double-check after acquire so the
-   loser of a contested assembly returns the winner's prefix without
-   re-doing the hardlink work. The lockfile lives alongside the prefix
-   dir at [<cache>/prefixes/<hash>.lock]; the [.ready] marker is the
-   commit point. *)
+(* Cross-process serialisation comes from {!Oi.Lock.acquire_global} in
+   {!Cmd.Harness.bootstrap}; in-process callers go through the d10ir
+   scheduler. The [.ready] marker is still the commit point so a
+   crashed-mid-assembly prefix dir is re-assembled by the next run. *)
 let assemble_cached (c : Config.t) ~layer_hashes =
   let hash = solve_hash layer_hashes in
   let dir = Eio.Path.(c.root / "prefixes" / hash) in
   let ready = Eio.Path.(dir / ".ready") in
   if Sysops.file_exists ready then native dir
-  else
-    let lock_path =
-      Eio.Path.native_exn c.root / "prefixes" / (hash ^ ".lock")
-    in
-    Lock.with_lock ~clock:c.clock ~fs:c.fs ~path:lock_path ~mode:Exclusive
-    @@ fun _lock ->
-    if Sysops.file_exists ready then native dir
-    else begin
-      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dir;
-      assemble c ~layer_hashes ~dst:dir;
-      Eio.Path.save ~create:(`Or_truncate 0o644) ready "";
-      native dir
-    end
+  else begin
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dir;
+    assemble c ~layer_hashes ~dst:dir;
+    Eio.Path.save ~create:(`Or_truncate 0o644) ready "";
+    native dir
+  end
 
 (* -- Prefix diff --------------------------------------------------------- *)
 

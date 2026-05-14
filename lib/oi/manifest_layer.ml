@@ -399,12 +399,11 @@ let matches_on_disk dst s =
   try same_digest s (In_channel.with_open_text dst In_channel.input_all)
   with Sys_error _ -> false
 
-let lock_path_for ~cache_root ~os_key ~hash =
-  registry_dir ~cache_root ~os_key / (hash ^ ".lock")
-
 let write_payload ~fs ~dst s =
-  (* Per-pid tmp keeps two writers that somehow bypass the lock from
-     colliding on [Sys.rename] — defence in depth. *)
+  (* Per-pid tmp suffix keeps the [Sys.rename] step safe even though the
+     command-level lock in {!Cmd.Harness.bootstrap} already serialises
+     concurrent [oi] writers (defence in depth — a future single-process
+     parallel writer would still need the tmp suffix to be safe). *)
   let tmp = Fmt.str "%s.tmp.%d" dst (Unix.getpid ()) in
   try
     Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
@@ -413,12 +412,10 @@ let write_payload ~fs ~dst s =
     Log.warn (fun mlog ->
         mlog "layer manifest write %s: %s" dst (Printexc.to_string exn))
 
-let write ~clock ~fs ~cache_root m =
+let write ~fs ~cache_root m =
   let dir = registry_dir ~cache_root ~os_key:m.os_key in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / dir);
   let dst = path_for ~cache_root ~os_key:m.os_key ~hash:m.hash in
-  let lock_path = lock_path_for ~cache_root ~os_key:m.os_key ~hash:m.hash in
-  D10.Lock.with_lock ~clock ~fs ~path:lock_path ~mode:Exclusive @@ fun _lock ->
   match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec m with
   | Error e -> Log.warn (fun mlog -> mlog "layer manifest encode %s: %s" dst e)
   | Ok s ->

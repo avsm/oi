@@ -94,9 +94,6 @@ let write_atomic ~fs ~dst s =
     Log.warn (fun mlog ->
         mlog "registry pointer write %s: %s" dst (Printexc.to_string exn))
 
-let lock_path_for ~cache_root ~os_key =
-  cache_root / "layers" / os_key / ".registry.lock"
-
 let write_current ~fs ~dst ~os_key ~wrote_by =
   let r =
     current
@@ -119,14 +116,8 @@ let write_current ~fs ~dst ~os_key ~wrote_by =
 (* Idempotent: writes only when the existing file is missing or has a
    different [schema]/[kind] (so a schema bump is the only thing that
    triggers a re-write). Called from every successful build manifest
-   write to keep the pointer in sync.
-
-   Serialised across processes by a per-os_key lockfile next to the
-   pointer; the double-check on [needs_write_at] after acquiring lets
-   the second writer no-op when the first already produced the
-   current-schema file. *)
-let ensure ~clock ~fs ~cache_root ~os_key ~wrote_by =
+   write to keep the pointer in sync. Cross-process safety comes from
+   {!Oi.Lock.acquire_global} held in {!Cmd.Harness.bootstrap}. *)
+let ensure ~fs ~cache_root ~os_key ~wrote_by =
   let dst = path_for ~cache_root ~os_key in
-  let lock_path = lock_path_for ~cache_root ~os_key in
-  D10.Lock.with_lock ~clock ~fs ~path:lock_path ~mode:Exclusive @@ fun _lock ->
   if needs_write_at dst then write_current ~fs ~dst ~os_key ~wrote_by

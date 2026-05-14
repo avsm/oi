@@ -178,14 +178,17 @@ let do_store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
   | None -> ()
   | Some s -> Eio.Path.save ~create:(`Or_truncate 0o644) (recipe_path c ~hash) s
 
-(* [store] is the only writer for [<cache>/layers/<os_key>/<hash>/];
-   serialise across processes via {!D10.Lock.with_layer}. The
-   double-check after acquire (re-running [succeeded c ~hash]) lets
-   the loser of a contested write detect that the winner already
-   produced a valid layer and return without redoing the extraction. *)
+(* [store] is the inner write step at the tail of {!D10ir.Direct.build_one},
+   which {b must} hold {!D10.Lock.with_layer} {!Exclusive} for [hash] across
+   the whole unpack/run/diff/store window (else concurrent builders race on
+   the per-hash staging and build directories long before [store] is
+   reached). No lock is taken here — taking it again from inside the outer
+   critical section would re-enter on the same lockfile path and, on
+   release, drop {b both} fds' kernel-level lock state (POSIX fcntl record
+   locks are owned per-process: closing any fd that referred to the file
+   releases all of that process's locks on it). *)
 let store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
     ~exit_status ?recipe_json () =
-  Lock.with_layer c ~hash ~mode:Exclusive @@ fun _lock ->
   if succeeded c ~hash then ()
   else
     do_store c ~hash ~prefix ~files ~package ~deps ~parent_hashes ~exit_status
@@ -359,9 +362,6 @@ let do_export (c : Config.t) ~hash ~os_dir ~dst_file =
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
   else
-    (* Shared lock: many parallel exporters of the same hash coexist,
-       but a concurrent [store] (exclusive) cannot pull the rug. *)
-    Lock.with_layer c ~hash ~mode:Shared @@ fun _lock ->
     let os_dir = Eio.Path.(dst / c.os_key) in
     let dst_file = Eio.Path.(os_dir / (hash ^ ".tar.zst")) in
     do_export c ~hash ~os_dir ~dst_file

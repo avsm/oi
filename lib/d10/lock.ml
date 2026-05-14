@@ -2,8 +2,6 @@ let log_src = Logs.Src.create "d10.lock"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
-let ( / ) = Filename.concat
-
 type mode = Shared | Exclusive
 type strategy = Block | Block_timeout of float | No_wait
 type t = { fd : Eio_unix.Fd.t; path : string; mutable released : bool }
@@ -138,49 +136,3 @@ let with_lock ?mode ?strategy ?log_interval_s ?on_wait ~clock ~fs ~path f =
     acquire ?mode ?strategy ?log_interval_s ?on_wait ~sw ~clock ~fs ~path ()
   in
   Fun.protect ~finally:(fun () -> release t) (fun () -> f t)
-
-(* -- Resource-specific paths ------------------------------------------ *)
-
-let layer_lock_path (c : Config.t) ~hash =
-  Eio.Path.native_exn c.root / "layers" / c.os_key / (hash ^ ".lock")
-
-let archive_lock_path (c : Config.t) ~sha =
-  Eio.Path.native_exn c.root / "d10ir" / "archives" / (sha ^ ".lock")
-
-let registry_pointer_lock_path (c : Config.t) =
-  Eio.Path.native_exn c.root / "layers" / c.os_key / ".registry.lock"
-
-let acquire_layer (c : Config.t) ~sw ~hash ?(mode = Exclusive)
-    ?(strategy = Block) ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) ()
-    =
-  acquire ~mode ~strategy ~log_interval_s ~on_wait ~sw ~clock:c.clock ~fs:c.fs
-    ~path:(layer_lock_path c ~hash) ()
-
-let acquire_archive (c : Config.t) ~sw ~sha ?(mode = Exclusive)
-    ?(strategy = Block) ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) ()
-    =
-  acquire ~mode ~strategy ~log_interval_s ~on_wait ~sw ~clock:c.clock ~fs:c.fs
-    ~path:(archive_lock_path c ~sha) ()
-
-let acquire_registry_pointer (c : Config.t) ~sw ?(mode = Exclusive)
-    ?(strategy = Block) ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) ()
-    =
-  acquire ~mode ~strategy ~log_interval_s ~on_wait ~sw ~clock:c.clock ~fs:c.fs
-    ~path:(registry_pointer_lock_path c)
-    ()
-
-let with_layer (c : Config.t) ~hash ?(mode = Exclusive) ?(strategy = Block)
-    ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) f =
-  with_lock ~mode ~strategy ~log_interval_s ~on_wait ~clock:c.clock ~fs:c.fs
-    ~path:(layer_lock_path c ~hash) f
-
-let with_archive (c : Config.t) ~sha ?(mode = Exclusive) ?(strategy = Block)
-    ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) f =
-  with_lock ~mode ~strategy ~log_interval_s ~on_wait ~clock:c.clock ~fs:c.fs
-    ~path:(archive_lock_path c ~sha) f
-
-let with_registry_pointer (c : Config.t) ?(mode = Exclusive) ?(strategy = Block)
-    ?(log_interval_s = 5.0) ?(on_wait = default_on_wait) f =
-  with_lock ~mode ~strategy ~log_interval_s ~on_wait ~clock:c.clock ~fs:c.fs
-    ~path:(registry_pointer_lock_path c)
-    f
