@@ -88,6 +88,13 @@ type request = {
           recipe-emission flows ([oi ir emit]) so {!Recipe_emitter.emit}
           materialises an archive for every package; the alternative would be an
           empty recipe against a fully-warm cache. *)
+  with_test : bool;
+      (** Include [{with-test}]-gated dependencies for the requested root
+          packages in the solve. Off for [oi run] / [oi build] / [oi install] /
+          [oi env] / [oi sync] so the solve is as small as possible; on for
+          [oi build --test] and any flow that needs to run a package's
+          testsuite. Folded into the solve cache key (see
+          {!Solver.Memo.key}) so toggling it never reuses a stale solve. *)
   refresh : bool;
 }
 

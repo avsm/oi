@@ -107,6 +107,7 @@ let build_request ~targets ~with_repos ~pins ~extra_repos ~constraints
     local_packages_dir;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh;
   }
 

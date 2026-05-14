@@ -31,6 +31,7 @@ let build_request ~toolchain ~conf ~constraints dep_names :
     local_packages_dir = None;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh = false;
   }
 

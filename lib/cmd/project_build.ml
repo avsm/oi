@@ -333,8 +333,9 @@ let run ~action ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache ~data_dir
        a clean canvas. *)
     let prefix, tc =
       Sync.run ~quiet:false ~refresh ~with_repos ~with_deps ?jobs ?toolchain
-        ?envrc_mode ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache ~data_dir
-        ~registry ~use_registry ~session ~cwd ()
+        ?envrc_mode ~with_test:(action = `Test) ~proc_mgr ~fs ~clock ~sys
+        ~platform ~os_key ~cache ~data_dir ~registry ~use_registry ~session ~cwd
+        ()
     in
     match dune_target action with
     | None -> 0

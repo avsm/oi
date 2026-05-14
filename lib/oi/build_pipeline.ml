@@ -35,6 +35,7 @@ type request = {
   local_packages_dir : string option;
   project_root : string option;
   force_source : bool;
+  with_test : bool;
   refresh : bool;
 }
 
@@ -398,8 +399,11 @@ let build_recipe_pipeline ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
    [recipe] as each phase succeeds. *)
 let run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
     ~group_constraints ~stripped_tokens ~group_handles ~force_source ~toolchain
-    ~names state =
-  let test_for_roots = OpamPackage.Name.Set.of_list names in
+    ~with_test ~names state =
+  let test_for_roots =
+    if with_test then OpamPackage.Name.Set.of_list names
+    else OpamPackage.Name.Set.empty
+  in
   match
     Solver.solve ~test:test_for_roots ~sys:env.sys ~fs:env.fs ~cache_root gctx
       ~packages_dirs:pkgs_dir ~constraints:group_constraints names
@@ -424,7 +428,8 @@ let run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
 
 let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
     ~pin_dir ?local_packages_dir ~reporepo_path ~base_constraints ~build_prefix
-    ~cache_root ~d10 ~force_source (toolchain : Toolchain.info option)
+    ~cache_root ~d10 ~force_source ~with_test
+    (toolchain : Toolchain.info option)
     ((tokens, group_handles) : string list * string list) : group_result =
   let label = String.concat ", " tokens in
   let pkgs_dir =
@@ -467,7 +472,7 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
     in
     run_group_solve ~env ~d10 ~cache_root ~gctx ~pkgs_dir ~group_conf
       ~group_constraints ~stripped_tokens ~group_handles ~force_source
-      ~toolchain ~names { state0 with group }
+      ~toolchain ~with_test ~names { state0 with group }
 
 (* -- Persistent cache for the [solved] struct ----------------------------- *)
 
@@ -477,8 +482,13 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
    encoding (so an old cache entry that keyed under a different
    canonicalisation produces a miss rather than a wrong hit). Folded
    into the cache key so a stale entry produces a key miss rather than
-   a crash on [Marshal.from_channel]. *)
-let cache_schema = "v3"
+   a crash on [Marshal.from_channel].
+   Bumped to v4: [request.with_test] now gates whether the per-group
+   solve enables [{with-test}] for its roots; v3 keys did not encode
+   that bit, so toggling between [oi build] (no test deps) and
+   [oi build --test] (test deps) on the same target would alias to the
+   same key and return a stale solve. *)
+let cache_schema = "v4"
 let log_src = Logs.Src.create "oi.build_pipeline.cache"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
@@ -577,7 +587,8 @@ let add_request_body add (req : request) =
   add_conf add req.conf;
   add ("local_pkg_dir:" ^ Stdlib.Option.value req.local_packages_dir ~default:"");
   add ("project_root:" ^ Stdlib.Option.value req.project_root ~default:"");
-  add ("force_source:" ^ string_of_bool req.force_source)
+  add ("force_source:" ^ string_of_bool req.force_source);
+  add ("with_test:" ^ string_of_bool req.with_test)
 
 let cache_key ~sys ~reporepo_path (req : request) : string option =
   match git_head_of ~sys reporepo_path with
@@ -687,7 +698,7 @@ let prepare_sources ~env ~reporter ~req ~toolchain ~token_handles =
    events, returning the list of per-group results in order. *)
 let solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
     ~base_pkgs_dirs ~pin_dir ~reporepo_path ~build_prefix ~cache_root ~d10
-    token_groups =
+    ~with_test token_groups =
   let n_groups = List.length token_groups in
   reporter.Build_progress.event
     (Phase_started
@@ -704,7 +715,7 @@ let solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
             ~global_handles ~base_pkgs_dirs ~pin_dir
             ?local_packages_dir:req.local_packages_dir ~reporepo_path
             ~base_constraints:req.constraints ~build_prefix ~cache_root ~d10
-            ~force_source:req.force_source toolchain g
+            ~force_source:req.force_source ~with_test toolchain g
         in
         reporter.event (Solve_finished { label });
         incr solved_count;
@@ -764,7 +775,7 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
   let groups =
     solve_each_group ~env ~reporter ~conf ~toolchain ~req ~global_handles
       ~base_pkgs_dirs ~pin_dir ~reporepo_path ~build_prefix ~cache_root ~d10
-      token_groups
+      ~with_test:req.with_test token_groups
   in
   let merged = merge_group_recipes groups in
   { groups; merged; toolchain }

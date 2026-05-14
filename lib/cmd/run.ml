@@ -507,6 +507,7 @@ let solve_request ctx ~names : Oi.Build_pipeline.request =
     local_packages_dir = ctx.local_packages_dir;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh = ctx.refresh;
   }
 
@@ -650,6 +651,7 @@ let script_solve_request ctx ~dep_opam_names ~constraints :
     local_packages_dir = ctx.local_packages_dir;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh = ctx.refresh;
   }
 

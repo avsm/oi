@@ -549,6 +549,7 @@ let target_test_request ~names ~req_with_repos ~pins ~all_extras
     local_packages_dir;
     project_root = None;
     force_source = false;
+    with_test = true;
     refresh;
   }
 
@@ -1451,6 +1452,7 @@ let bucket_req ~bi ~refresh ~override tgs : Oi.Build_pipeline.request =
     local_packages_dir = bi.pin_dir;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh;
   }
 

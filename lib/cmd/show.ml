@@ -523,6 +523,7 @@ let merged_plan_request ~handles ~refresh ~conf_host : Oi.Build_pipeline.request
     local_packages_dir = None;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh;
   }
 
@@ -1453,6 +1454,7 @@ let build_request ~with_repos ~project_pins ~all_extras ~extra_constraints
     local_packages_dir;
     project_root = None;
     force_source = false;
+    with_test = false;
     refresh;
   }
 

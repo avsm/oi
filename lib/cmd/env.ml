@@ -64,6 +64,7 @@ let oneshot_request (i : oneshot_inputs) ~url_project ~extras
     local_packages_dir = url_project.packages_dir;
     project_root = Some i.cwd_s;
     force_source = false;
+    with_test = false;
     refresh = i.refresh;
   }
 

@@ -332,6 +332,7 @@ let solve_targets ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir ~session
          [Recipe_emitter] prunes them from the d10ir plan — the generated
          Dockerfile would [oi ir run] a recipe with 0 nodes. *)
       force_source = true;
+      with_test = false;
       refresh;
     }
   in
@@ -426,6 +427,7 @@ let solve_local_project ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir
          [force_source] forces every dep into the d10ir plan even when the
          host has a cached layer. *)
       force_source = true;
+      with_test = false;
       refresh;
     }
   in

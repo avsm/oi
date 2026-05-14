@@ -151,6 +151,7 @@ let build_request ~conf ~toolchain_override ~refresh
     local_packages_dir = None;
     project_root = None;
     force_source = true;
+    with_test = false;
     refresh;
   }
 

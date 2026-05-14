@@ -439,6 +439,7 @@ let prepare_request ~harness ~refresh ~dev ~pinned_update =
       local_packages_dir = ctx.url_project.packages_dir;
       project_root = None;
       force_source = false;
+      with_test = false;
       refresh;
     }
   in

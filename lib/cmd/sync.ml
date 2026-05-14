@@ -93,6 +93,7 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
       local_packages_dir = None;
       project_root = Some c.cwd;
       force_source = false;
+      with_test = false;
       refresh = Stdlib.Option.value ~default:false c.refresh;
     }
   in
@@ -381,6 +382,7 @@ type run_inputs = {
   jobs : int option;
   toolchain : string option;
   envrc_mode : envrc_mode;
+  with_test : bool;
   proc_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
   fs : Eio.Fs.dir_ty Eio.Path.t;
   clock : float Eio.Time.clock_ty Eio.Resource.t;
@@ -531,6 +533,7 @@ let prepare_state (i : run_inputs) : state =
       local_packages_dir;
       project_root = Some i.cwd;
       force_source = false;
+      with_test = i.with_test;
       refresh = i.refresh;
     }
   in
@@ -617,8 +620,9 @@ let run_with_inputs (i : run_inputs) =
 
 let run ?(quiet = false) ?(refresh = false) ?(skip_local = false)
     ?(with_repos = []) ?(with_deps = []) ?jobs ?(toolchain : string option)
-    ?(envrc_mode = `Detect) ~proc_mgr ~fs ~clock ~sys ~platform ~os_key ~cache
-    ~data_dir ~registry ~use_registry ~session ~cwd () =
+    ?(envrc_mode = `Detect) ?(with_test = false) ~proc_mgr ~fs ~clock ~sys
+    ~platform ~os_key ~cache ~data_dir ~registry ~use_registry ~session ~cwd ()
+    =
   run_with_inputs
     {
       quiet;
@@ -629,6 +633,7 @@ let run ?(quiet = false) ?(refresh = false) ?(skip_local = false)
       jobs;
       toolchain;
       envrc_mode;
+      with_test;
       proc_mgr;
       fs;
       clock;

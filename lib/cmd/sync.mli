@@ -48,6 +48,7 @@ val run :
   ?jobs:int ->
   ?toolchain:string ->
   ?envrc_mode:envrc_mode ->
+  ?with_test:bool ->
   proc_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   clock:float Eio.Time.clock_ty Eio.Resource.t ->
