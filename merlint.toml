@@ -1,0 +1,85 @@
+# merlint configuration for oi.
+#
+# The rules below are bypasses for issues that we've consciously decided not
+# to address. Run `merlint --no-build` from the project root to see the
+# residual list. Add a justification next to every new entry so future
+# maintainers understand the trade-off.
+
+# ---------------------------------------------------------------------------
+# E605 — missing test file.
+#
+# The project does not yet have a unit-test scaffold beyond a couple of
+# focused integration tests under [test/]. Wiring up a [test_<module>.ml]
+# stub for every library module would be busywork and a green-checkmark
+# liability; we'll add tests under [test/] as real coverage gaps appear.
+# Disable everywhere.
+[[rules]]
+files = "**/*.ml"
+exclude = ["E605"]
+
+[[rules]]
+files = "**/*.mli"
+exclude = ["E605"]
+
+# ---------------------------------------------------------------------------
+# E920 — untested OCaml code in documentation.
+#
+# We don't run odoc/mdx as part of [dune test] yet. The OCaml fragments in
+# our READMEs are explanatory, not executable, and wiring up
+# `(mdx (files ...))` stanzas for each one would be a separate piece of
+# infrastructure. Revisit once we want to enforce that doc snippets compile.
+[[rules]]
+files = "**/*.md"
+exclude = ["E920"]
+
+[[rules]]
+files = "**/*.mli"
+exclude = ["E920"]
+
+# ---------------------------------------------------------------------------
+# E300 — variant naming convention.
+#
+# The flagged `PlusEq` constructor is `OpamTypesBase.PlusEq` from the opam
+# library; we can't rename it. The match in `lib/oi/solver.ml` reflects the
+# upstream type.
+[[rules]]
+files = "lib/oi/solver.ml"
+exclude = ["E300"]
+
+# ---------------------------------------------------------------------------
+# E350 — boolean blindness.
+#
+# `mk_args`, `run`, and `test_run` in `lib/cmd/build.ml` aggregate the
+# cmdliner flag terms before threading them into a typed record. The
+# boolean count comes from the CLI surface (`--refresh`, `--all`,
+# `--archives-only`, `--skip-local`, `--locked`, …) — collapsing them into
+# a record at this layer would just push the boolean labelling into the
+# call site of cmdliner's `Term.(... $ ... $ ...)` composition without
+# improving safety. Bypass these specific entries.
+[[rules]]
+files = "lib/cmd/build.ml"
+exclude = ["E350"]
+
+# ---------------------------------------------------------------------------
+# E415 — missing pretty printer (`val pp` on type `t`).
+#
+# These records carry several dozen JSON-codec fields apiece. A meaningful
+# `pp` would either reimplement the JSON encoder or stub out as a single
+# `<manifest>` placeholder; both are worse than what callers do today
+# (they print via `Jsont_bytesrw.encode_string`). Bypass on the four
+# manifest .mli files.
+[[rules]]
+files = "lib/oi/manifest_layer.mli"
+exclude = ["E415"]
+
+[[rules]]
+files = "lib/oi/manifest_build.mli"
+exclude = ["E415"]
+
+[[rules]]
+files = "lib/oi/manifest_registry.mli"
+exclude = ["E415"]
+
+[[rules]]
+files = "lib/oi/source_manifest.mli"
+exclude = ["E415"]

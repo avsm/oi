@@ -37,7 +37,9 @@ let opam_cache_urls () =
 let merge_with_cache_fallback cache_urls =
   let extra =
     List.filter_map
-      (fun s -> try Some (OpamUrl.parse ~handle_suffix:true s) with _ -> None)
+      (fun s ->
+        try Some (OpamUrl.parse ~handle_suffix:true s)
+        with Failure _ | Invalid_argument _ -> None)
       (opam_cache_urls ())
   in
   cache_urls @ extra

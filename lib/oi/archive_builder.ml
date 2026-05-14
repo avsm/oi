@@ -292,7 +292,7 @@ let write_source_manifest_for_plan ~proc_mgr ~fs ~d10 (p : Plan.package_plan)
         if o.version = "" then None else Some o.version)
   in
   let m =
-    Source_manifest.make ~proc_mgr ~build_dir:p.build_dir ~name ~version
+    Source_manifest.v ~proc_mgr ~build_dir:p.build_dir ~name ~version
       ?overlay_handle ?overlay_version ~sha256:sha ~size ~strip_components:0
       ~source:p.source ~extra_sources:p.extra_sources ~extra_files:p.extra_files
       ~patches:p.patches ~substs:p.substs ()
@@ -309,7 +309,9 @@ let bake_archive ~proc_mgr ~fs ~d10 (p : Plan.package_plan) =
   tar_zst ~proc_mgr ~src_dir:p.build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
   warn_archive_divergence ~p sha;
-  let size = try (Unix.stat tmp_path).Unix.st_size with _ -> 0 in
+  let size =
+    try (Unix.stat tmp_path).Unix.st_size with Unix.Unix_error _ -> 0
+  in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
   install_or_drop_tmp ~tmp_path ~final_path;
   write_source_manifest_for_plan ~proc_mgr ~fs ~d10 p ~sha ~size;
@@ -507,7 +509,9 @@ let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
   (try Sys.remove tmp_path with Sys_error _ -> ());
   tar_zst ~proc_mgr ~src_dir:build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
-  let size = try (Unix.stat tmp_path).Unix.st_size with _ -> 0 in
+  let size =
+    try (Unix.stat tmp_path).Unix.st_size with Unix.Unix_error _ -> 0
+  in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
   install_or_drop_tmp ~tmp_path ~final_path;
   (sha, final_path, size)
@@ -515,7 +519,7 @@ let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
 let write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size =
   let name, version = pkg_name_version b.pkg in
   let m =
-    Source_manifest.make ~proc_mgr ~build_dir:b.build_dir ~name ~version
+    Source_manifest.v ~proc_mgr ~build_dir:b.build_dir ~name ~version
       ~sha256:sha ~size ~strip_components:0 ~source:b.source
       ~extra_sources:b.extra_sources ~extra_files:b.extra_files
       ~patches:b.patches ~substs:b.substs ()

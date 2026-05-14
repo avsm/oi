@@ -1312,7 +1312,7 @@ let add ~fs ~sys ~path ~handle ~url ?ref_ ?toolchain ?base_handles ?depends
 (* Compute the bumped [depends] list. Auto-derive from [base_handles] (or the
    defaults), then preserve any extras [prev] carried — bumped to their
    current latest version so a fresh bump never leaves a stale pin. *)
-let extra_from_prev ~entries ~auto_handles (h, _) =
+let extra_of_prev ~entries ~auto_handles (h, _) =
   if List.mem h auto_handles then None
   else
     match latest entries ~handle:h with
@@ -1322,7 +1322,7 @@ let extra_from_prev ~entries ~auto_handles (h, _) =
 let auto_derive_depends ~entries ~auto ~prev =
   let auto_handles = List.map fst auto in
   let extras_from_prev =
-    List.filter_map (extra_from_prev ~entries ~auto_handles) prev
+    List.filter_map (extra_of_prev ~entries ~auto_handles) prev
   in
   auto @ extras_from_prev
 

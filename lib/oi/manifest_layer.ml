@@ -12,7 +12,7 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 
 type outcome = Ok | Fail | Timeout
 
-let outcome_to_string = function
+let string_of_outcome = function
   | Ok -> "ok"
   | Fail -> "fail"
   | Timeout -> "timeout"
@@ -109,7 +109,7 @@ let outcome_codec =
   Jsont.map ~kind:"outcome"
     ~dec:(fun s ->
       match outcome_of_string s with Stdlib.Ok o -> o | Error e -> failwith e)
-    ~enc:outcome_to_string Jsont.string
+    ~enc:string_of_outcome Jsont.string
 
 let tarball_codec =
   let open Jsont in
@@ -350,7 +350,7 @@ let files_of_fs_dir fs_dir =
 
 (* -- Construction ------------------------------------------------------- *)
 
-let make_success ~hash ~os_key ~package ~package_name ~package_ver ~method_
+let success ~hash ~os_key ~package ~package_name ~package_ver ~method_
     ?overlay_handle ?overlay_version ~tarball ~files ~binaries ~findlib
     ~exit_status ?provenance ?recipe ?source_archive ~deps ~depexts_declared
     ?build_env_ocaml_version () =
@@ -382,37 +382,6 @@ let make_success ~hash ~os_key ~package ~package_name ~package_ver ~method_
     build_env_ocaml_version;
   }
 
-let make_failure ~hash ~os_key ~package ~package_name ~package_ver ~method_
-    ?overlay_handle ?overlay_version ~outcome ~failure ?invocation_id
-    ?source_archive ~deps ~depexts_declared ?build_env_ocaml_version () =
-  {
-    schema = 1;
-    kind = "oi.layer.v1";
-    outcome;
-    hash;
-    os_key;
-    date = rfc3339_of_unix (Unix.gettimeofday ());
-    package;
-    package_name;
-    package_ver;
-    method_;
-    overlay_handle;
-    overlay_version;
-    tarball = None;
-    files = [];
-    binaries = [];
-    findlib = [];
-    exit_status = None;
-    provenance = None;
-    recipe = None;
-    failure = Some failure;
-    invocation_id;
-    source_archive;
-    deps;
-    depexts_declared;
-    build_env_ocaml_version;
-  }
-
 (* -- Storage ------------------------------------------------------------ *)
 
 (* Layer manifest sidecar lives alongside the layer-hash directory it
@@ -426,27 +395,28 @@ let path_for ~cache_root ~os_key ~hash =
 
 let same_digest a b = Digest.string a = Digest.string b
 
+let matches_on_disk dst s =
+  try same_digest s (In_channel.with_open_text dst In_channel.input_all)
+  with Sys_error _ -> false
+
+let write_payload ~fs ~dst s =
+  let tmp = dst ^ ".tmp" in
+  try
+    Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
+    Sys.rename tmp dst
+  with exn ->
+    Log.warn (fun mlog ->
+        mlog "layer manifest write %s: %s" dst (Printexc.to_string exn))
+
 let write ~fs ~cache_root m =
   let dir = registry_dir ~cache_root ~os_key:m.os_key in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / dir);
   let dst = path_for ~cache_root ~os_key:m.os_key ~hash:m.hash in
   match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec m with
   | Error e -> Log.warn (fun mlog -> mlog "layer manifest encode %s: %s" dst e)
-  | Ok s -> (
+  | Ok s ->
       (* Dedup on identical content (esp. for the failure-retry case). *)
-      let same =
-        try same_digest s (In_channel.with_open_text dst In_channel.input_all)
-        with Sys_error _ -> false
-      in
-      if same then ()
-      else
-        let tmp = dst ^ ".tmp" in
-        try
-          Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
-          Sys.rename tmp dst
-        with exn ->
-          Log.warn (fun mlog ->
-              mlog "layer manifest write %s: %s" dst (Printexc.to_string exn)))
+      if matches_on_disk dst s then () else write_payload ~fs ~dst s
 
 let try_read ~path : t option =
   if not (Sys.file_exists path) then None

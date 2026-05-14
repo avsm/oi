@@ -807,34 +807,39 @@ module Bump = struct
   let put_one ~sys ~src ~url =
     D10.Sysops.Cmd.run sys (s3cmd_argv [ "put"; "--quiet"; src; url ])
 
+  let upload_tar ~sys ~pkg ~src ~url =
+    try
+      put_one ~sys ~src ~url;
+      Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded" pkg url
+    with exn ->
+      Fmt.pr "    %a upload %s: %s@." Oi.Style.pp_warn_string "skip" pkg
+        (Printexc.to_string exn)
+
+  let upload_sidecar ~sys ~pkg ~json_path ~json_url =
+    if not (Sys.file_exists json_path) then
+      Fmt.pr "    %a sidecar %s: %s missing@." Oi.Style.pp_warn_string "skip"
+        pkg json_path
+    else
+      try
+        put_one ~sys ~src:json_path ~url:json_url;
+        Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded"
+          (pkg ^ " sidecar") json_url
+      with exn ->
+        Fmt.pr "    %a sidecar %s: %s@." Oi.Style.pp_warn_string "skip" pkg
+          (Printexc.to_string exn)
+
   let make_upload_callback ~sys ~upload_archives ~archives_url =
     if not upload_archives then None
     else
       let base = strip_trailing_slash archives_url in
       Some
         (fun ~name ~version ~sha ~path ->
+          let pkg = Fmt.str "%s.%s" name version in
           let tar_url = Fmt.str "%s/%s.tar.zst" base sha in
           let json_path = Filename.dirname path / Fmt.str "%s.json" sha in
           let json_url = Fmt.str "%s/%s.json" base sha in
-          let pkg = Fmt.str "%s.%s" name version in
-          (try
-             put_one ~sys ~src:path ~url:tar_url;
-             Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded" pkg
-               tar_url
-           with exn ->
-             Fmt.pr "    %a upload %s: %s@." Oi.Style.pp_warn_string "skip" pkg
-               (Printexc.to_string exn));
-          if Sys.file_exists json_path then
-            try
-              put_one ~sys ~src:json_path ~url:json_url;
-              Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded"
-                (pkg ^ " sidecar") json_url
-            with exn ->
-              Fmt.pr "    %a sidecar %s: %s@." Oi.Style.pp_warn_string "skip"
-                pkg (Printexc.to_string exn)
-          else
-            Fmt.pr "    %a sidecar %s: %s missing@." Oi.Style.pp_warn_string
-              "skip" pkg json_path)
+          upload_tar ~sys ~pkg ~src:path ~url:tar_url;
+          upload_sidecar ~sys ~pkg ~json_path ~json_url)
 
   type bump_ctx = {
     proc_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;

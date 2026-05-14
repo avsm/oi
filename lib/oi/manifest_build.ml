@@ -233,11 +233,6 @@ let filename_for ~ts ~invocation_id =
 let path_for ~cache_root ~os_key ~ts ~invocation_id =
   builds_dir ~cache_root ~os_key ts / filename_for ~ts ~invocation_id
 
-let unix_of_invocation_id_first_event events =
-  match events with
-  | [] -> Unix.gettimeofday ()
-  | (e : Audit.event) :: _ -> e.ts
-
 let write ~fs ~cache_root m =
   let ts =
     match m.events with [] -> Unix.gettimeofday () | first :: _ -> first.ts
@@ -293,14 +288,11 @@ let read_all_at ~root : t list =
         |> List.concat_map (fun m ->
             collect (root / y / m) |> List.filter_map (read_one (root / y / m))))
 
-let read_all_for_os ~cache_root ~os_key : t list =
-  read_all_at ~root:(cache_root / "layers" / os_key / "builds")
-
 (* -- Construction ------------------------------------------------------- *)
 
-let make ~invocation_id ~os_key ~started_at ?finished_at ?reporepo
-    ?(overlays = []) ~context ?(targets = []) ?solve
-    ~(events : Audit.event list) ?(crashed = false) ?(exit_code = 0) () =
+let v ~invocation_id ~os_key ~started_at ?finished_at ?reporepo ?(overlays = [])
+    ~context ?(targets = []) ?solve ~(events : Audit.event list)
+    ?(crashed = false) ?(exit_code = 0) () =
   let summary =
     let base = summary_of_events events in
     { base with exit = exit_code }

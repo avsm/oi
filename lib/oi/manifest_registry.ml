@@ -67,27 +67,41 @@ let codec : t Jsont.t =
 let path_for ~cache_root ~os_key =
   cache_root / "layers" / os_key / "registry.json"
 
+let is_current r =
+  r.schema = 1
+  && r.layer_manifest_schema = 1
+  && r.build_manifest_schema = 1
+  && r.source_manifest_schema = 1
+
+let needs_write_at dst =
+  if not (Sys.file_exists dst) then true
+  else
+    try
+      let s = In_channel.with_open_text dst In_channel.input_all in
+      match Jsont_bytesrw.decode_string ~locs:false ~file:dst codec s with
+      | Stdlib.Ok r -> not (is_current r)
+      | Error _ -> true
+    with Sys_error _ | End_of_file -> true
+
+let write_atomic ~fs ~dst s =
+  let parent = Filename.dirname dst in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / parent);
+  let tmp = dst ^ ".tmp" in
+  try
+    Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
+    Sys.rename tmp dst
+  with exn ->
+    Log.warn (fun mlog ->
+        mlog "registry pointer write %s: %s" dst (Printexc.to_string exn))
+
 (* Idempotent: writes only when the existing file is missing or has a
    different [schema]/[kind] (so a schema bump is the only thing that
    triggers a re-write). Called from every successful build manifest
    write to keep the pointer in sync. *)
 let ensure ~fs ~cache_root ~os_key ~wrote_by =
   let dst = path_for ~cache_root ~os_key in
-  let need_write =
-    if not (Sys.file_exists dst) then true
-    else
-      try
-        let s = In_channel.with_open_text dst In_channel.input_all in
-        match Jsont_bytesrw.decode_string ~locs:false ~file:dst codec s with
-        | Stdlib.Ok r ->
-            r.schema <> 1
-            || r.layer_manifest_schema <> 1
-            || r.build_manifest_schema <> 1
-            || r.source_manifest_schema <> 1
-        | Error _ -> true
-      with _ -> true
-  in
-  if need_write then
+  if not (needs_write_at dst) then ()
+  else
     let r =
       current
         {
@@ -104,14 +118,4 @@ let ensure ~fs ~cache_root ~os_key ~wrote_by =
     match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec r with
     | Error e ->
         Log.warn (fun mlog -> mlog "registry pointer encode %s: %s" dst e)
-    | Ok s -> (
-        let parent = Filename.dirname dst in
-        Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / parent);
-        let tmp = dst ^ ".tmp" in
-        try
-          Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
-          Sys.rename tmp dst
-        with exn ->
-          Log.warn (fun mlog ->
-              mlog "registry pointer write %s: %s" dst (Printexc.to_string exn))
-        )
+    | Ok s -> write_atomic ~fs ~dst s

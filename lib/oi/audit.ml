@@ -223,21 +223,29 @@ let ensure_staging_dir ~fs ~cache_root =
 let collect_dir dir =
   try Sys.readdir dir |> Array.to_list with Sys_error _ -> []
 
+let mtime_of path =
+  try Some (Unix.stat path).Unix.st_mtime with Unix.Unix_error _ -> None
+
+let try_remove path = try Sys.remove path with Sys_error _ -> ()
+let one_hour_s = 3600.0
+
+let reap_one ~dir ~current ~now name =
+  if not (Filename.check_suffix name ".events.jsonl") then ()
+  else
+    let inv = Filename.chop_suffix name ".events.jsonl" in
+    if inv = current then ()
+    else
+      let path = dir / name in
+      match mtime_of path with
+      | Some mtime when now -. mtime > one_hour_s -> try_remove path
+      | _ -> ()
+
 let reap_orphan_staging_files ~cache_root ~current =
-  let now = Unix.gettimeofday () in
-  let one_hour = 3600.0 in
   let dir = staging_dir ~cache_root in
-  if Sys.file_exists dir then
-    collect_dir dir
-    |> List.iter (fun name ->
-        if Filename.check_suffix name ".events.jsonl" then
-          let inv = Filename.chop_suffix name ".events.jsonl" in
-          if inv <> current then
-            let path = dir / name in
-            match try Some (Unix.stat path).Unix.st_mtime with _ -> None with
-            | Some mtime when now -. mtime > one_hour -> (
-                try Sys.remove path with Sys_error _ -> ())
-            | _ -> ())
+  if not (Sys.file_exists dir) then ()
+  else
+    let now = Unix.gettimeofday () in
+    List.iter (reap_one ~dir ~current ~now) (collect_dir dir)
 
 let reaper_done = ref false
 
@@ -318,14 +326,16 @@ let read_all ~(fs : _ Eio.Path.t) ~cache_root ~os_key =
   let root = cache_root / "layers" / os_key / "builds" in
   if not (Sys.file_exists root) then []
   else
+    let read_month md =
+      List.concat_map
+        (fun e -> read_one_build ~os_key (md / e))
+        (collect_dir md)
+    in
+    let read_year yd =
+      List.concat_map (fun m -> read_month (yd / m)) (collect_dir yd)
+    in
     collect_dir root
-    |> List.concat_map (fun y ->
-        let yd = root / y in
-        collect_dir yd
-        |> List.concat_map (fun m ->
-            let md = yd / m in
-            collect_dir md
-            |> List.concat_map (fun e -> read_one_build ~os_key (md / e))))
+    |> List.concat_map (fun y -> read_year (root / y))
     |> List.sort (fun a b -> String.compare a.event_id b.event_id)
 
 (* Read all events written during this invocation (i.e. that still live

@@ -376,6 +376,34 @@ let local_solver_names ~project ~extra_cli ~url_project =
   project.Oi.Project.deps @ extra_names @ url_project.Oi.Project.Url.roots
   |> List.sort_uniq String.compare
 
+let local_packages_dir_of ~(project : Oi.Project.t)
+    ~(url_project : Oi.Project.Url.t) =
+  match project.packages_dir with
+  | Some _ -> project.packages_dir
+  | None -> url_project.packages_dir
+
+let local_project_request ~project ~url_project ~extra_cli ~project_overlays
+    ~all_extras ~names ~toolchain ~conf ~local_packages_dir ~cwd ~refresh :
+    Oi.Build_pipeline.request =
+  {
+    targets = [ Group { tokens = names; handles = [] } ];
+    with_repos = project_overlays;
+    pins = project.Oi.Project.pins @ url_project.Oi.Project.Url.pins;
+    extra_repos = all_extras;
+    constraints = Oi.Project.Script.constraints extra_cli;
+    toolchain_override = None;
+    toolchain;
+    conf;
+    local_packages_dir;
+    project_root = Some cwd;
+    (* Same rationale as {!solve_targets}: the container starts empty, so
+       [force_source] forces every dep into the d10ir plan even when the
+       host has a cached layer. *)
+    force_source = true;
+    with_test = false;
+    refresh;
+  }
+
 let solve_local_project ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir
     ~session ~platform ~refresh ~cwd =
   Oi.Pipeline.init_opam_root ~fs ~data_dir;
@@ -393,11 +421,7 @@ let solve_local_project ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir
     resolve_local_project_inputs ~fs ~sys ~data_dir ~conf ~project ~url_project
   in
   let names = local_solver_names ~project ~extra_cli ~url_project in
-  let local_packages_dir =
-    match project.packages_dir with
-    | Some _ -> project.packages_dir
-    | None -> url_project.packages_dir
-  in
+  let local_packages_dir = local_packages_dir_of ~project ~url_project in
   let pipeline_env : Oi.Build_pipeline.env =
     {
       proc_mgr;
@@ -410,25 +434,9 @@ let solve_local_project ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir
       http_session = session;
     }
   in
-  let req : Oi.Build_pipeline.request =
-    {
-      targets = [ Group { tokens = names; handles = [] } ];
-      with_repos = project_overlays;
-      pins = project.pins @ url_project.pins;
-      extra_repos = all_extras;
-      constraints = Oi.Project.Script.constraints extra_cli;
-      toolchain_override = None;
-      toolchain;
-      conf;
-      local_packages_dir;
-      project_root = Some cwd;
-      (* Same rationale as {!solve_targets}: the container starts empty, so
-         [force_source] forces every dep into the d10ir plan even when the
-         host has a cached layer. *)
-      force_source = true;
-      with_test = false;
-      refresh;
-    }
+  let req =
+    local_project_request ~project ~url_project ~extra_cli ~project_overlays
+      ~all_extras ~names ~toolchain ~conf ~local_packages_dir ~cwd ~refresh
   in
   Oi.Build_pipeline.solve pipeline_env req
 

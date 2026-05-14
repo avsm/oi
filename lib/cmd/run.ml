@@ -224,6 +224,30 @@ let merged_extra_constraints ~fs ~data_dir ~refresh ~cli_extras ~handle_pins
   in
   OpamPackage.Name.Map.union (fun a _ -> a) handle_constraints base
 
+(* Resolve all the inputs that depend on the [Target.cli_extra_repos] lookup
+   path: drop project overlays whose toolchain tag disagrees with
+   [toolchain_override], extend with the user-supplied [--with-repo] /
+   [@h/pkg] handles, materialise the resulting extra-repo list, and
+   merge handle-pin version constraints into [base_constraints]. *)
+let merge_repos_and_constraints ~fs ~sys ~data_dir ~refresh ~toolchain
+    ~toolchain_override ~(pt : parsed_target) ~pi ~base_constraints =
+  let project_overlays =
+    Oi.Pipeline.filter_compatible_overlays
+      ~reporepo_path:(Terms.reporepo_path ()) ~override:toolchain_override
+      ~toolchain pi.project_overlays
+  in
+  let with_repos = project_overlays @ pt.with_repos in
+  let cli_extras = Target.cli_extra_repos ~fs ~sys ?toolchain with_repos in
+  let all_extras =
+    Target.merge_extras ~cli:cli_extras ~project:pi.project_extras
+  in
+  let handle_pins = Stdlib.Option.to_list pt.target_pin @ pt.with_pins in
+  let extra_constraints =
+    merged_extra_constraints ~fs ~data_dir ~refresh ~cli_extras ~handle_pins
+      ~base:base_constraints
+  in
+  (with_repos, all_extras, extra_constraints)
+
 let build_ctx_from_harness (h : Harness.env) (flags : flags) registry
     use_registry toolchain_override pt save_d10ir jobs ~fast_key ~data_dir =
   let {
@@ -264,23 +288,9 @@ let build_ctx_from_harness (h : Harness.env) (flags : flags) registry
     resolve_toolchain ~fs ~sys ~data_dir ~conf ~toolchain_override ~pt
       ~project_overlays:pi.project_overlays
   in
-  (* Drop project overlays tagged for a different toolchain when
-     [--toolchain] is explicit. Project overlays go earlier so CLI
-     [--with-repo] entries take priority. *)
-  let project_overlays =
-    Oi.Pipeline.filter_compatible_overlays
-      ~reporepo_path:(Terms.reporepo_path ()) ~override:toolchain_override
-      ~toolchain pi.project_overlays
-  in
-  let with_repos = project_overlays @ pt.with_repos in
-  let cli_extras = Target.cli_extra_repos ~fs ~sys ?toolchain with_repos in
-  let all_extras =
-    Target.merge_extras ~cli:cli_extras ~project:pi.project_extras
-  in
-  let handle_pins = Stdlib.Option.to_list pt.target_pin @ pt.with_pins in
-  let extra_constraints =
-    merged_extra_constraints ~fs ~data_dir ~refresh ~cli_extras ~handle_pins
-      ~base:base_constraints
+  let with_repos, all_extras, extra_constraints =
+    merge_repos_and_constraints ~fs ~sys ~data_dir ~refresh ~toolchain
+      ~toolchain_override ~pt ~pi ~base_constraints
   in
   {
     fs;
@@ -832,7 +842,7 @@ let lookup_layer_index ~ctx ~env ~binary_name =
   preflight_done ();
   r
 
-let try_solve_from_index ~binary_name ~solve_with_extras index_result =
+let try_solve_of_index ~binary_name ~solve_with_extras index_result =
   match index_result with
   | Some (pkg_name, _) when pkg_name <> binary_name ->
       Log.info (fun m ->
@@ -903,7 +913,7 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
       lookup_layer_index ~ctx ~env ~binary_name:pt.binary_name
     in
     let from_index =
-      try_solve_from_index ~binary_name:pt.binary_name ~solve_with_extras
+      try_solve_of_index ~binary_name:pt.binary_name ~solve_with_extras
         index_result
     in
     if not from_index then

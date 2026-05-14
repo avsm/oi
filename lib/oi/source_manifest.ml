@@ -88,14 +88,14 @@ let resolve_git_commit ~proc_mgr ~build_dir =
       in
       let s = String.trim out in
       if String.length s = 40 then Some s else None
-    with _ -> None
+    with Eio.Io _ | Sys_error _ | Failure _ -> None
 
 let sha256_and_size path =
   try
     let stat = Unix.stat path in
     let h = OpamHash.contents (OpamHash.compute ~kind:`SHA256 path) in
     Some (h, stat.Unix.st_size)
-  with _ -> None
+  with Sys_error _ | Failure _ | Unix.Unix_error _ -> None
 
 (* -- Codecs -------------------------------------------------------------- *)
 
@@ -234,7 +234,7 @@ let extra_file_of (basename, src_path) =
 
 let patch_of (p : Plan.patch) = { file = p.file; filter = p.filter }
 
-let make ~proc_mgr ~build_dir ~name ~version ?overlay_handle ?overlay_version
+let v ~proc_mgr ~build_dir ~name ~version ?overlay_handle ?overlay_version
     ~sha256 ?size ?(strip_components = 0) ~source ~extra_sources ~extra_files
     ~patches ~substs () =
   {
@@ -259,6 +259,15 @@ let make ~proc_mgr ~build_dir ~name ~version ?overlay_handle ?overlay_version
 
 let path_for ~archives_dir ~sha = Filename.concat archives_dir (sha ^ ".json")
 
+let write_payload ~fs ~dst s =
+  let tmp = dst ^ ".tmp" in
+  try
+    Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
+    Sys.rename tmp dst
+  with exn ->
+    Log.warn (fun mlog ->
+        mlog "source manifest write %s: %s" dst (Printexc.to_string exn))
+
 let write ~fs ~archives_dir m =
   let dst = path_for ~archives_dir ~sha:m.sha256 in
   if Sys.file_exists dst then ()
@@ -266,14 +275,7 @@ let write ~fs ~archives_dir m =
     match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec m with
     | Error e ->
         Log.warn (fun mlog -> mlog "source manifest encode %s: %s" dst e)
-    | Ok s -> (
-        let tmp = dst ^ ".tmp" in
-        try
-          Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
-          Sys.rename tmp dst
-        with exn ->
-          Log.warn (fun mlog ->
-              mlog "source manifest write %s: %s" dst (Printexc.to_string exn)))
+    | Ok s -> write_payload ~fs ~dst s
 
 let try_read ~path : t option =
   if not (Sys.file_exists path) then None

@@ -131,6 +131,26 @@ let copy_file ~fs ~src ~dst =
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / parent);
   Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / dst) s
 
+let readdir_safe dir = try Sys.readdir dir with Sys_error _ -> [||]
+let child_rel rel name = if rel = "" then name else rel / name
+
+let copy_one_build_json ~fs ~src_root ~dst_root ~n ~rel =
+  let abs_src = if rel = "" then src_root else src_root / rel in
+  if not (Filename.check_suffix abs_src ".json") then ()
+  else begin
+    copy_file ~fs ~src:abs_src ~dst:(dst_root / rel);
+    incr n
+  end
+
+let rec walk_builds_tree ~fs ~src_root ~dst_root ~n rel =
+  let abs_src = if rel = "" then src_root else src_root / rel in
+  if Sys.is_directory abs_src then
+    Array.iter
+      (fun name ->
+        walk_builds_tree ~fs ~src_root ~dst_root ~n (child_rel rel name))
+      (readdir_safe abs_src)
+  else copy_one_build_json ~fs ~src_root ~dst_root ~n ~rel
+
 let copy_builds_subtree ~fs ~cache_root ~output ~os_key =
   let src_root =
     Filename.concat cache_root
@@ -140,49 +160,41 @@ let copy_builds_subtree ~fs ~cache_root ~output ~os_key =
   if not (Sys.file_exists src_root) then 0
   else
     let n = ref 0 in
-    let rec walk rel =
-      let abs_src = if rel = "" then src_root else src_root / rel in
-      if Sys.is_directory abs_src then
-        Array.iter
-          (fun name ->
-            let rel' = if rel = "" then name else rel / name in
-            walk rel')
-          (try Sys.readdir abs_src with Sys_error _ -> [||])
-      else if Filename.check_suffix abs_src ".json" then begin
-        let dst = dst_root / rel in
-        copy_file ~fs ~src:abs_src ~dst;
-        incr n
-      end
-    in
-    walk "";
+    walk_builds_tree ~fs ~src_root ~dst_root ~n "";
     !n
 
 (* Copy [<cache>/layers/<os_key>/*.json] (the new layer manifests,
    stored flat next to each [<hash>/] dir) into
    [<output>/<os_key>/*.json] — alongside each
    [<hash>.tar.zst] that [D10.Layer.export_all] writes. *)
+(* Top-level [registry.json] is copied by its own helper; skip the
+   [builds/] subdir + the hash-named layer dirs; pick up only [<hash>.json]
+   sidecars. *)
+let is_layer_sidecar name =
+  Filename.check_suffix name ".json" && name <> "registry.json"
+
+let is_regular abs =
+  try (Unix.lstat abs).st_kind = Unix.S_REG with Unix.Unix_error _ -> false
+
+let copy_one_layer_manifest ~fs ~src_root ~dst_root ~n name =
+  if not (is_layer_sidecar name) then ()
+  else
+    let abs = src_root / name in
+    if not (is_regular abs) then ()
+    else begin
+      copy_file ~fs ~src:abs ~dst:(dst_root / name);
+      incr n
+    end
+
 let copy_layer_manifests ~fs ~cache_root ~output ~os_key =
   let src_root = Filename.concat cache_root (Filename.concat "layers" os_key) in
   let dst_root = Filename.concat output os_key in
   if not (Sys.file_exists src_root) then 0
   else
     let n = ref 0 in
-    let entries =
-      try Sys.readdir src_root |> Array.to_list with Sys_error _ -> []
-    in
-    List.iter
-      (fun name ->
-        (* Top-level [registry.json] is copied by its own helper; skip
-           the [builds/] subdir + the hash-named layer dirs; pick up
-           only [<hash>.json] sidecars. *)
-        if Filename.check_suffix name ".json" && name <> "registry.json" then begin
-          let abs = src_root / name in
-          if try (Unix.lstat abs).st_kind = Unix.S_REG with _ -> false then begin
-            copy_file ~fs ~src:abs ~dst:(dst_root / name);
-            incr n
-          end
-        end)
-      entries;
+    Array.iter
+      (copy_one_layer_manifest ~fs ~src_root ~dst_root ~n)
+      (readdir_safe src_root);
     !n
 
 (* Copy [<cache>/layers/<os_key>/registry.json] (the schema-version
