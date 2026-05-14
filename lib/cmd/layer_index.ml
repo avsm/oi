@@ -152,13 +152,12 @@ let remote_search_binary ~pattern (full : D10.Remote_index.index_full) =
       |> List.filter (glob_match ~pattern)
       |> List.map (fun bin ->
           (bin, l.package_name, l.package_ver, l.hash, overlay_of_layer l)))
-  |> List.sort
-       (fun (b1, n1, v1, _, _) (b2, n2, v2, _, _) ->
-         let c = String.compare b1 b2 in
-         if c <> 0 then c
-         else
-           let c = String.compare n1 n2 in
-           if c <> 0 then c else by_version_desc v1 v2)
+  |> List.sort (fun (b1, n1, v1, _, _) (b2, n2, v2, _, _) ->
+      let c = String.compare b1 b2 in
+      if c <> 0 then c
+      else
+        let c = String.compare n1 n2 in
+        if c <> 0 then c else by_version_desc v1 v2)
 
 let remote_search_package ~pattern (full : D10.Remote_index.index_full) =
   full.layers
@@ -193,7 +192,8 @@ let package_of_binary ?on_phase ~sys ~fs ~clock ~session ~cache ~os_key
     | [] -> None
   in
   match
-    first_match (local_binaries_for ~sys ~fs ~clock:clk ~cache ~os_key ~binary:name)
+    first_match
+      (local_binaries_for ~sys ~fs ~clock:clk ~cache ~os_key ~binary:name)
   with
   | Some _ as r -> r
   | None -> (

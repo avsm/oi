@@ -210,81 +210,23 @@ let print_provenance (p : Oi.Provenance.t) =
   if phase_strs <> [] then
     Fmt.pr "  phases:   %s@," (String.concat ", " phase_strs)
 
-(* Group [events] by overlay handle and render one row per distinct handle
-   listing its outcome histogram and the most recent timestamp:
-
-       @avsm     ok×1 cached×2  (last 2026-05-02 09:14 UTC)
-       @samoht   restored×1     (last 2026-05-02 09:30 UTC)
-
-   Events are pre-filtered to a single layer_hash by the caller. *)
-let print_callers events =
-  if events = [] then ()
-  else begin
-    let by_handle :
-        (string, (Oi.Outcome.kind * int) list ref * float ref) Hashtbl.t =
-      Hashtbl.create 4
-    in
-    List.iter
-      (fun (e : Oi.Audit.event) ->
-        let key =
-          match e.context.overlay with
-          | Some o -> "@" ^ o.handle
-          | None -> "(no overlay)"
-        in
-        let outcomes_ref, ts_ref =
-          match Hashtbl.find_opt by_handle key with
-          | Some v -> v
-          | None ->
-              let v = (ref [], ref e.ts) in
-              Hashtbl.replace by_handle key v;
-              v
-        in
-        outcomes_ref :=
-          Oi.Outcome.bump (Oi.Outcome.kind_of e.outcome) !outcomes_ref;
-        ts_ref := Float.max !ts_ref e.ts)
-      events;
-    let rows =
-      Hashtbl.fold
-        (fun k (os_ref, ts_ref) acc -> (k, !os_ref, !ts_ref) :: acc)
-        by_handle []
-      |> List.sort (fun (a, _, _) (b, _, _) -> compare a b)
-    in
-    Fmt.pr "  callers:@,";
-    List.iter
-      (fun (handle, outcomes, last_ts) ->
-        let outcome_str =
-          Oi.Outcome.sort_histogram outcomes
-          |> List.map (fun (k, c) ->
-              Fmt.str "%s×%d" (Oi.Outcome.string_of_kind k) c)
-          |> String.concat " "
-        in
-        Fmt.pr "    %-16s %s  (last %s)@," handle outcome_str (pp_time last_ts))
-      rows
-  end
-
 type show_match = {
   layer_hash : string;
   meta : D10.Layer.meta;
   files_count : int;
   provenance : Oi.Provenance.t option;
-  callers : Oi.Audit.event list;
 }
 
 let show_match_codec =
   let open Jsont in
   Object.map ~kind:"cache_show_layer"
-    (fun layer_hash meta files_count provenance callers ->
-      { layer_hash; meta; files_count; provenance; callers })
+    (fun layer_hash meta files_count provenance ->
+      { layer_hash; meta; files_count; provenance })
   |> Object.mem "layer_hash" string ~enc:(fun m -> m.layer_hash)
   |> Object.mem "meta" D10.Layer.meta_codec ~enc:(fun m -> m.meta)
   |> Object.mem "files_count" int ~enc:(fun m -> m.files_count)
   |> Object.opt_mem "provenance" Oi.Provenance.codec ~enc:(fun m ->
       m.provenance)
-  |> Object.mem "callers"
-       (list Oi.Audit.event_codec)
-       ~dec_absent:[]
-       ~enc:(fun m -> m.callers)
-       ~enc_omit:(( = ) [])
   |> Object.finish
 
 let show_envelope_codec =
@@ -299,55 +241,25 @@ let show_envelope_codec =
   |> Object.mem "matches" (list show_match_codec) ~enc:(fun (_, _, m) -> m)
   |> Object.finish
 
-let record_event_for_layer tbl (e : Oi.Audit.event) =
-  match e.target with
-  | Solve_key _ -> ()
-  | Layer hash ->
-      let prev =
-        match Hashtbl.find_opt tbl hash with Some xs -> xs | None -> []
-      in
-      Hashtbl.replace tbl hash (e :: prev)
-
-(* Build a [hash -> Audit events] map from the local audit log so that
-   [oi cache show] can attribute each layer to its callers. *)
-let build_events_by_hash ~fs ~cache_root ~os_key ~layers_dir =
-  let tbl = Hashtbl.create 256 in
-  if not (Sys.file_exists layers_dir) then tbl
-  else begin
-    let all = Oi.Audit.read_all ~fs ~cache_root ~os_key in
-    List.iter (record_event_for_layer tbl) all;
-    tbl
-  end
-
 let package_prefix_match ~prefix s =
   String.length s >= String.length prefix
   && String.sub s 0 (String.length prefix) = prefix
 
-let match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~events_for
-    ~package hash =
+let match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~package hash =
   let json = Eio.Path.(root / "layers" / os_key / hash / "layer.json") in
   match D10.Layer.load_meta json with
   | Some m when package_prefix_match ~prefix:package m.package ->
       let files_count = count_files (layers_dir / hash / "fs") in
       let provenance = Oi.Provenance.read_one ~fs ~cache_root ~os_key ~hash in
-      Some
-        {
-          layer_hash = hash;
-          meta = m;
-          files_count;
-          provenance;
-          callers = events_for hash;
-        }
+      Some { layer_hash = hash; meta = m; files_count; provenance }
   | _ -> None
 
-let matches_for_package ~fs ~os_key ~cache_root ~layers_dir ~root ~events_for
-    package =
+let matches_for_package ~fs ~os_key ~cache_root ~layers_dir ~root package =
   if not (Sys.file_exists layers_dir) then []
   else
     Sys.readdir layers_dir |> Array.to_list
     |> List.filter_map
-         (match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~events_for
-            ~package)
+         (match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~package)
 
 let print_show_match (m : show_match) =
   let status =
@@ -367,7 +279,6 @@ let print_show_match (m : show_match) =
      else String.concat ", " (List.map short_hash m.meta.hashes));
   Fmt.pr "  files:    %d@," m.files_count;
   (match m.provenance with None -> () | Some p -> print_provenance p);
-  print_callers m.callers;
   Fmt.pr "@,@]@."
 
 let print_show_text ~package matches =
@@ -387,16 +298,9 @@ let print_show_json ~os_key ~package matches =
 let show_for_d10 ~h ~package c d10 =
   let layers_dir = layers_root_s d10 in
   let cache_root = Eio.Path.native_exn d10.D10.Config.root in
-  let events_by_hash =
-    build_events_by_hash ~fs:h.Harness.fs ~cache_root ~os_key:d10.os_key
-      ~layers_dir
-  in
-  let events_for hash =
-    match Hashtbl.find_opt events_by_hash hash with Some xs -> xs | None -> []
-  in
   let matches =
     matches_for_package ~fs:h.Harness.fs ~os_key:d10.os_key ~cache_root
-      ~layers_dir ~root:d10.root ~events_for package
+      ~layers_dir ~root:d10.root package
   in
   match (c : Terms.common).format with
   | Json -> print_show_json ~os_key:d10.os_key ~package matches

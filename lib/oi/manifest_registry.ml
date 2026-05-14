@@ -86,7 +86,7 @@ let needs_write_at dst =
 let write_atomic ~fs ~dst s =
   let parent = Filename.dirname dst in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / parent);
-  let tmp = dst ^ ".tmp" in
+  let tmp = Fmt.str "%s.tmp.%d" dst (Unix.getpid ()) in
   try
     Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / tmp) s;
     Sys.rename tmp dst
@@ -94,28 +94,39 @@ let write_atomic ~fs ~dst s =
     Log.warn (fun mlog ->
         mlog "registry pointer write %s: %s" dst (Printexc.to_string exn))
 
+let lock_path_for ~cache_root ~os_key =
+  cache_root / "layers" / os_key / ".registry.lock"
+
+let write_current ~fs ~dst ~os_key ~wrote_by =
+  let r =
+    current
+      {
+        schema = 1;
+        kind = "oi.registry.v1";
+        os_key;
+        layer_manifest_schema = 1;
+        build_manifest_schema = 1;
+        source_manifest_schema = 1;
+        wrote_by;
+        date = rfc3339_of_unix (Unix.gettimeofday ());
+      }
+  in
+  match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec r with
+  | Error e ->
+      Log.warn (fun mlog -> mlog "registry pointer encode %s: %s" dst e)
+  | Ok s -> write_atomic ~fs ~dst s
+
 (* Idempotent: writes only when the existing file is missing or has a
    different [schema]/[kind] (so a schema bump is the only thing that
    triggers a re-write). Called from every successful build manifest
-   write to keep the pointer in sync. *)
-let ensure ~fs ~cache_root ~os_key ~wrote_by =
+   write to keep the pointer in sync.
+
+   Serialised across processes by a per-os_key lockfile next to the
+   pointer; the double-check on [needs_write_at] after acquiring lets
+   the second writer no-op when the first already produced the
+   current-schema file. *)
+let ensure ~clock ~fs ~cache_root ~os_key ~wrote_by =
   let dst = path_for ~cache_root ~os_key in
-  if not (needs_write_at dst) then ()
-  else
-    let r =
-      current
-        {
-          schema = 1;
-          kind = "oi.registry.v1";
-          os_key;
-          layer_manifest_schema = 1;
-          build_manifest_schema = 1;
-          source_manifest_schema = 1;
-          wrote_by;
-          date = rfc3339_of_unix (Unix.gettimeofday ());
-        }
-    in
-    match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec r with
-    | Error e ->
-        Log.warn (fun mlog -> mlog "registry pointer encode %s: %s" dst e)
-    | Ok s -> write_atomic ~fs ~dst s
+  let lock_path = lock_path_for ~cache_root ~os_key in
+  D10.Lock.with_lock ~clock ~fs ~path:lock_path ~mode:Exclusive @@ fun _lock ->
+  if needs_write_at dst then write_current ~fs ~dst ~os_key ~wrote_by

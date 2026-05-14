@@ -105,8 +105,8 @@ let findlib_codec : findlib_entry Jsont.t =
       f.package_dir)
   |> Object.mem "findlib_pkg" string ~enc:(fun (f : findlib_entry) ->
       f.findlib_pkg)
-  |> Object.mem "archive" string ~dec_absent:""
-       ~enc:(fun (f : findlib_entry) -> f.archive)
+  |> Object.mem "archive" string ~dec_absent:"" ~enc:(fun (f : findlib_entry) ->
+      f.archive)
   |> Object.finish
 
 let layer_full_codec : layer_full Jsont.t =
@@ -150,17 +150,16 @@ let layer_full_codec : layer_full Jsont.t =
   |> Object.opt_mem "tarball_sha256" string ~enc:(fun l -> l.tarball_sha256)
   |> Object.opt_mem "tarball_size" int64 ~enc:(fun l -> l.tarball_size)
   |> Object.mem "deps" (list dep_codec) ~dec_absent:[] ~enc:(fun l -> l.deps)
-  |> Object.mem "binaries" (list string) ~dec_absent:[]
-       ~enc:(fun l -> l.binaries)
-  |> Object.mem "findlib" (list findlib_codec) ~dec_absent:[]
-       ~enc:(fun l -> l.findlib)
+  |> Object.mem "binaries" (list string) ~dec_absent:[] ~enc:(fun l ->
+      l.binaries)
+  |> Object.mem "findlib" (list findlib_codec) ~dec_absent:[] ~enc:(fun l ->
+      l.findlib)
   |> Object.finish
 
 let index_full_codec : index_full Jsont.t =
   let open Jsont in
   Object.map ~kind:"index_full"
-    (fun
-      schema os_key arch distro os_version os generated_at n_layers layers ->
+    (fun schema os_key arch distro os_version os generated_at n_layers layers ->
       {
         schema;
         os_key;

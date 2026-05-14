@@ -299,12 +299,18 @@ let write_source_manifest_for_plan ~proc_mgr ~fs ~d10 (p : Plan.package_plan)
   in
   Source_manifest.write ~fs ~archives_dir:(archives_dir ~d10) m
 
+(* Two bakers producing the same sha race on [install_or_drop_tmp] +
+   sidecar write. We can't lock the sha until we've computed it
+   (post-tar), but everything from "install" through "write sidecar"
+   has to be under a per-sha exclusive lock. *)
 let bake_archive ~proc_mgr ~fs ~d10 (p : Plan.package_plan) =
   let layer_short =
     if String.length p.layer_hash >= 8 then String.sub p.layer_hash 0 8
     else p.layer_hash
   in
-  let tmp_path = tmp_dir ~d10 / Fmt.str "%s-%s.tar.zst" p.pkg layer_short in
+  let tmp_path =
+    tmp_dir ~d10 / Fmt.str "%s-%s-%d.tar.zst" p.pkg layer_short (Unix.getpid ())
+  in
   (try Sys.remove tmp_path with Sys_error _ -> ());
   tar_zst ~proc_mgr ~src_dir:p.build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
@@ -313,6 +319,7 @@ let bake_archive ~proc_mgr ~fs ~d10 (p : Plan.package_plan) =
     try (Unix.stat tmp_path).Unix.st_size with Unix.Unix_error _ -> 0
   in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
+  D10.Lock.with_archive d10 ~sha ~mode:Exclusive @@ fun _lock ->
   install_or_drop_tmp ~tmp_path ~final_path;
   write_source_manifest_for_plan ~proc_mgr ~fs ~d10 p ~sha ~size;
   Log.debug (fun m -> m "archive %s -> %s" p.pkg final_path);
@@ -504,8 +511,15 @@ let prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir
   in
   ensure_dune_project_version ~build_dir ~opam_version:version ~url_opt
 
+(* [bake_no_solve_archive] tars + computes the sha but stops short of
+   installing — the install (and its sibling sidecar write) happens
+   under [D10.Lock.with_archive] at the call site so the
+   post-rename + sidecar-write sequence is atomic with respect to
+   other [oi] processes. *)
 let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
-  let tmp_path = tmp_dir ~d10 / Fmt.str "%s.%s-bake.tar.zst" name version in
+  let tmp_path =
+    tmp_dir ~d10 / Fmt.str "%s.%s-bake-%d.tar.zst" name version (Unix.getpid ())
+  in
   (try Sys.remove tmp_path with Sys_error _ -> ());
   tar_zst ~proc_mgr ~src_dir:build_dir ~dst_path:tmp_path;
   let sha = sha256_of_file tmp_path in
@@ -513,8 +527,7 @@ let bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir =
     try (Unix.stat tmp_path).Unix.st_size with Unix.Unix_error _ -> 0
   in
   let final_path = archives_dir ~d10 / Fmt.str "%s.tar.zst" sha in
-  install_or_drop_tmp ~tmp_path ~final_path;
-  (sha, final_path, size)
+  (sha, tmp_path, final_path, size)
 
 let write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size =
   let name, version = pkg_name_version b.pkg in
@@ -544,10 +557,12 @@ let build_no_solve ?(reporter = Build_progress.null) ~proc_mgr ~fs ~d10
       opam_path
   in
   prepare_no_solve_build_dir ~fs ~cache_root ~cache_urls ~b ~build_dir ~version;
-  let sha, final_path, size =
+  let sha, tmp_path, final_path, size =
     bake_no_solve_archive ~proc_mgr ~d10 ~name ~version ~build_dir
   in
-  write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size;
+  D10.Lock.with_archive d10 ~sha ~mode:Exclusive (fun _lock ->
+      install_or_drop_tmp ~tmp_path ~final_path;
+      write_source_manifest_for_inputs ~proc_mgr ~fs ~d10 ~b ~sha ~size);
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir);
   Log.debug (fun m -> m "no-solve bake %s -> %s" b.pkg final_path);
   {

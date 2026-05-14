@@ -1,24 +1,26 @@
-(** Fetch the per-os_key remote index files the registry publishes and
-    project them into the maps that [oi run] / [oi build] consume.
+(** Fetch the per-os_key remote index files the registry publishes and project
+    them into the maps that [oi run] / [oi build] consume.
 
     Two files are read, both shipped by a server-side Clickhouse query (see
     [foo.sql] in the repo root):
 
     - [<base>/<os_key>/index.json] — minimum index, hash → tarball sha256
-      + size only. Drives the layer-fetch path in
-      {!Build_pipeline.plan_remote_fetches}.
-    - [<base>/<os_key>/index-full.json] — adds package name/version,
-      overlay, binaries, findlib, deps. Drives the [oi run BARE_BINARY]
-      resolution in {!Layer_index.package_of_binary}.
 
-    There is no fallback to the legacy [index.db]; the streaming upload
-    pipeline never publishes one. *)
+    + size only. Drives the layer-fetch path in
+      {!Build_pipeline.plan_remote_fetches}.
+
+    - [<base>/<os_key>/index-full.json] — adds package name/version, overlay,
+      binaries, findlib, deps. Drives the [oi run BARE_BINARY] resolution in
+      {!Layer_index.package_of_binary}.
+
+    There is no fallback to the legacy [index.db]; the streaming upload pipeline
+    never publishes one. *)
 
 (** {1 Wire types}
 
-    These mirror the JSON shapes the Clickhouse query emits. Exposed so
-    callers ({!Layer_index}, future {!Oi.search}) can pattern-match the
-    parsed records directly rather than going through SQLite. *)
+    These mirror the JSON shapes the Clickhouse query emits. Exposed so callers
+    ({!Layer_index}, future {!Oi.search}) can pattern-match the parsed records
+    directly rather than going through SQLite. *)
 
 type layer_min = {
   hash : string;
@@ -71,8 +73,8 @@ type index_full = {
 
 val index_min_codec : index_min Jsont.t
 (** [index_min_codec] is the Jsont codec for the minimum index ([index.json]).
-    Exposed so an alternative client (a test fixture, an out-of-process
-    indexer) can roundtrip the same wire format. *)
+    Exposed so an alternative client (a test fixture, an out-of-process indexer)
+    can roundtrip the same wire format. *)
 
 val index_full_codec : index_full Jsont.t
 (** [index_full_codec] is the Jsont codec for the rich index
@@ -80,18 +82,17 @@ val index_full_codec : index_full Jsont.t
 
 (** {1 Fetch entry points}
 
-    Both functions memoise per [(remote, os_key)] so a multi-group solve
-    pays the HTTP cost once. *)
+    Both functions memoise per [(remote, os_key)] so a multi-group solve pays
+    the HTTP cost once. *)
 
 val fetch :
   Config.t ->
   session:Sysops.Http.session ->
   remote:Layer.remote ->
   Layer.remote_index
-(** [fetch c ~session ~remote] downloads
-    [<remote>/<os_key>/index.json] and returns the map from layer hash
-    to its tarball SHA-256 + size. Missing or undecodable responses
-    yield an empty map (and emit a warn log). *)
+(** [fetch c ~session ~remote] downloads [<remote>/<os_key>/index.json] and
+    returns the map from layer hash to its tarball SHA-256 + size. Missing or
+    undecodable responses yield an empty map (and emit a warn log). *)
 
 val fetch_full :
   Config.t ->
@@ -99,5 +100,5 @@ val fetch_full :
   remote:Layer.remote ->
   index_full option
 (** [fetch_full c ~session ~remote] downloads
-    [<remote>/<os_key>/index-full.json] and returns the decoded
-    document. [None] on missing or undecodable responses. *)
+    [<remote>/<os_key>/index-full.json] and returns the decoded document. [None]
+    on missing or undecodable responses. *)

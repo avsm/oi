@@ -115,10 +115,19 @@ val path_for : cache_root:string -> os_key:string -> hash:string -> string
 (** [path_for ~cache_root ~os_key ~hash] is the on-disk path of the JSON
     manifest for [hash] under [cache_root]'s [os_key/] directory. *)
 
-val write : fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> t -> unit
-(** [write ~fs ~cache_root m] writes [m] to
+val write :
+  clock:_ Eio.Time.clock ->
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  cache_root:string ->
+  t ->
+  unit
+(** [write ~clock ~fs ~cache_root m] writes [m] to
     [path_for ~cache_root ~os_key:m.os_key ~hash:m.hash], atomically and
-    idempotently (no-op if the on-disk content already matches). *)
+    idempotently (no-op if the on-disk content already matches).
+
+    Serialised across processes by {!D10.Lock.with_layer} on a lockfile next to
+    the sidecar — concurrent [oi] invocations that target the same layer hash
+    see exactly one writer at a time. *)
 
 val try_read : path:string -> t option
 (** [try_read ~path] decodes the manifest at [path]; [None] on missing file or

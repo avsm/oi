@@ -4,6 +4,7 @@
  (libraries
   osrel
   eio
+  eio.unix
   opam-format
   jsont
   jsont.bytesrw

@@ -130,43 +130,42 @@ let link_or_copy ~fs ~src ~dst =
   with Unix.Unix_error (Unix.EXDEV, _, _) ->
     copy_file_preserve_mode ~fs ~src ~dst
 
-let store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
-    ~exit_status ?recipe_json () =
+let replace_existing dst_p f =
+  try f ()
+  with
+  | Unix.Unix_error (Unix.EEXIST, _, _)
+  | Eio.Io (Eio.Fs.E (Eio.Fs.Already_exists _), _)
+  ->
+    (try Eio.Path.unlink dst_p with Eio.Exn.Io _ -> ());
+    f ()
+
+let install_one_file (c : Config.t) ~prefix ~fs_dir rel_path =
+  let src = prefix / rel_path in
+  let dst = fs_dir / rel_path in
+  let src_p = Eio.Path.(c.fs / src) in
+  let dst_p = Eio.Path.(c.fs / dst) in
+  let kind =
+    try Some (Eio.Path.stat ~follow:false src_p).kind
+    with Eio.Exn.Io _ -> None
+  in
+  match kind with
+  | Some `Symbolic_link ->
+      let target = Eio.Path.read_link src_p in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+        Eio.Path.(c.fs / Filename.dirname dst);
+      replace_existing dst_p (fun () -> Eio.Path.symlink ~link_to:target dst_p)
+  | Some `Regular_file ->
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+        Eio.Path.(c.fs / Filename.dirname dst);
+      replace_existing dst_p (fun () -> link_or_copy ~fs:c.fs ~src ~dst)
+  | _ -> ()
+
+let do_store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
+    ~exit_status ~recipe_json =
   let d = dir_s c ~hash in
   let fs_dir = d / "fs" in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(c.fs / fs_dir);
-  let replace_existing dst_p f =
-    try f ()
-    with
-    | Unix.Unix_error (Unix.EEXIST, _, _)
-    | Eio.Io (Eio.Fs.E (Eio.Fs.Already_exists _), _)
-    ->
-      (try Eio.Path.unlink dst_p with Eio.Exn.Io _ -> ());
-      f ()
-  in
-  List.iter
-    (fun rel_path ->
-      let src = prefix / rel_path in
-      let dst = fs_dir / rel_path in
-      let src_p = Eio.Path.(c.fs / src) in
-      let dst_p = Eio.Path.(c.fs / dst) in
-      let kind =
-        try Some (Eio.Path.stat ~follow:false src_p).kind
-        with Eio.Exn.Io _ -> None
-      in
-      match kind with
-      | Some `Symbolic_link ->
-          let target = Eio.Path.read_link src_p in
-          Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-            Eio.Path.(c.fs / Filename.dirname dst);
-          replace_existing dst_p (fun () ->
-              Eio.Path.symlink ~link_to:target dst_p)
-      | Some `Regular_file ->
-          Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
-            Eio.Path.(c.fs / Filename.dirname dst);
-          replace_existing dst_p (fun () -> link_or_copy ~fs:c.fs ~src ~dst)
-      | _ -> ())
-    files;
+  List.iter (install_one_file c ~prefix ~fs_dir) files;
   save_meta (json_path c ~hash)
     {
       package;
@@ -178,6 +177,19 @@ let store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
   match recipe_json with
   | None -> ()
   | Some s -> Eio.Path.save ~create:(`Or_truncate 0o644) (recipe_path c ~hash) s
+
+(* [store] is the only writer for [<cache>/layers/<os_key>/<hash>/];
+   serialise across processes via {!D10.Lock.with_layer}. The
+   double-check after acquire (re-running [succeeded c ~hash]) lets
+   the loser of a contested write detect that the winner already
+   produced a valid layer and return without redoing the extraction. *)
+let store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
+    ~exit_status ?recipe_json () =
+  Lock.with_layer c ~hash ~mode:Exclusive @@ fun _lock ->
+  if succeeded c ~hash then ()
+  else
+    do_store c ~hash ~prefix ~files ~package ~deps ~parent_hashes ~exit_status
+      ~recipe_json
 
 let restore (c : Config.t) ~hash ~prefix =
   let fs_dir = fs_path c ~hash in
@@ -327,24 +339,32 @@ let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
 
 (* -- Export -------------------------------------------------------------- *)
 
+let do_export (c : Config.t) ~hash ~os_dir ~dst_file =
+  if Sysops.file_exists dst_file then false
+  else begin
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_dir;
+    (* Atomic publication: stage into .tar.zst.tmp.<pid>, rename on
+       success. Per-pid tmp suffix means two exporters that somehow
+       bypass the shared/exclusive split (e.g. external tooling)
+       still don't collide on rename. *)
+    let tmp_file =
+      Eio.Path.(os_dir / Fmt.str "%s.tar.zst.tmp.%d" hash (Unix.getpid ()))
+    in
+    (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
+    Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:tmp_file;
+    Eio.Path.rename tmp_file dst_file;
+    true
+  end
+
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
   else
+    (* Shared lock: many parallel exporters of the same hash coexist,
+       but a concurrent [store] (exclusive) cannot pull the rug. *)
+    Lock.with_layer c ~hash ~mode:Shared @@ fun _lock ->
     let os_dir = Eio.Path.(dst / c.os_key) in
     let dst_file = Eio.Path.(os_dir / (hash ^ ".tar.zst")) in
-    if Sysops.file_exists dst_file then false
-    else begin
-      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 os_dir;
-      (* Atomic publication: stage into .tar.zst.tmp, rename on success. If
-         the process is interrupted mid-tar, the next export sees no
-         [dst_file] and retries rather than treating a truncated archive as
-         authoritative. *)
-      let tmp_file = Eio.Path.(os_dir / (hash ^ ".tar.zst.tmp")) in
-      (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
-      Sysops.Tar.create_zstd c.sys ~src:(dir c ~hash) ~dst:tmp_file;
-      Eio.Path.rename tmp_file dst_file;
-      true
-    end
+    do_export c ~hash ~os_dir ~dst_file
 
 let export_one_if_succeeded (c : Config.t) ~os_key ~dst count hash =
   if String.contains hash '.' then count

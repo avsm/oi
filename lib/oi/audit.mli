@@ -77,15 +77,6 @@ val append : fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> event -> unit
     {!staging_path} (keyed by [e.invocation_id]). Errors are logged and
     swallowed so logging failure cannot abort the build. *)
 
-val read_all :
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  cache_root:string ->
-  os_key:string ->
-  event list
-(** [read_all ~fs ~cache_root ~os_key] walks every build manifest under
-    [<cache>/registry/<os_key>/builds/] and returns all embedded events, sorted
-    by [event_id]. Replaces the legacy [audit.jsonl] reader. *)
-
 val read_staged : cache_root:string -> invocation_id:string -> event list
 (** [read_staged] returns the events written so far during a specific invocation
     (i.e. that haven't been rolled into a build manifest yet). Used by the

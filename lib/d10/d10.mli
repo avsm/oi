@@ -51,6 +51,7 @@
 
 module Config = Config
 module Layer = Layer
+module Lock = Lock
 module Prefix = Prefix
 module Index = Index
 module Remote_index = Remote_index

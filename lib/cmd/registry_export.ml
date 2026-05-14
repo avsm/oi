@@ -113,18 +113,6 @@ let publish_d10ir_archives_summary ~cache ~output =
       "%d archive(s) at %s/d10ir-archives/ (%d new, %d already present)" n_d10ir
       output linked present
 
-let write_manifest_file ~fs ~output ~os_key manifest =
-  let logs_dir = output / os_key / "logs" in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / logs_dir);
-  let path = logs_dir / "manifest.json" in
-  match
-    Jsont_bytesrw.encode_string ~format:Jsont.Indent Oi.Manifest.codec manifest
-  with
-  | Ok s ->
-      Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / path) s;
-      Oi.Say.field "manifest" "%d entry(ies) at %s" manifest.n_packages path
-  | Error e -> Log.warn (fun m -> m "manifest encode failed: %s" e)
-
 let copy_file ~fs ~src ~dst =
   let s = Eio.Path.load Eio.Path.(fs / src) in
   let parent = Filename.dirname dst in
@@ -210,21 +198,14 @@ let copy_registry_pointer ~fs ~cache_root ~output ~os_key =
     copy_file ~fs ~src ~dst;
     true
 
-(* Manifest = Provenance ⨝ Audit. Provenance gives us one entry per
-   successfully committed layer with its content fields; the build
-   manifests under [registry/<os_key>/builds/] supply the [callers[]]
-   history. Failed-build events surface either as caller entries or as
-   the [outcome] field on the new layer manifest (P2). *)
-let write_manifest_and_audit ~fs ~cache_root ~output ~os_key =
-  let provs = Oi.Provenance.read_all ~fs ~cache_root ~os_key in
-  let events = Oi.Audit.read_all ~fs ~cache_root ~os_key in
-  if provs <> [] || events <> [] then begin
-    let manifest =
-      Oi.Manifest.from_logs ~os_key ~exported_at:(Unix.gettimeofday ()) provs
-        events
-    in
-    write_manifest_file ~fs ~output ~os_key manifest
-  end;
+(* Copy every per-layer + per-build manifest under [<cache>/layers/<os_key>/]
+   into [<output>/<os_key>/]. The aggregated [manifest.json] join that used
+   to live here (Provenance ⨝ Audit) was redundant once the per-build
+   [<os_key>/builds/<YYYY>/<MM>/...json] manifests started shipping to S3
+   and feeding the Clickhouse indexer — the cross-build view rebuilds from
+   those persistently, so a client-side denormalisation just creates a
+   second source of truth that drifts. *)
+let copy_local_manifests ~fs ~cache_root ~output ~os_key =
   let n_layers = copy_layer_manifests ~fs ~cache_root ~output ~os_key in
   if n_layers > 0 then
     Oi.Say.field "layers.json" "%d layer manifest(s) at %s/<hash>.json" n_layers
@@ -251,7 +232,7 @@ let run ~fs ~clock ~sys ~os_key ~cache ~registry ~output =
     s.layers s.binaries s.tarballs;
   publish_d10ir_archives_summary ~cache ~output;
   let cache_root = Oi.Cache.root_s cache in
-  write_manifest_and_audit ~fs ~cache_root ~output ~os_key
+  copy_local_manifests ~fs ~cache_root ~output ~os_key
 (* No per-distro [handles/] report. Each export only sees its own
      oskey's slice of the build, so the report would be incomplete and
      [s3cmd put --skip-existing] would pin the first distro's slice in

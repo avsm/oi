@@ -275,10 +275,12 @@ let append ~fs ~cache_root e =
 
 (* -- Read --------------------------------------------------------------
 
-   Replaces the old single-jsonl reader: walks the rolled-up build
-   manifests under [<cache>/registry/<os_key>/builds/] and flattens out
-   every embedded event. Used by [oi cache], [oi show], and the legacy
-   [Manifest] / [Handle_report] aggregators. *)
+   Only the per-invocation staging file is read locally — it's consumed
+   by [Build_pipeline.finalize_build_manifest] when a run wraps up and
+   then unlinked. Persistent history lives in the per-month build
+   manifests under [<cache>/layers/<os_key>/builds/<YYYY>/<MM>/...json],
+   read by [Manifest_build.read_all_at] (and queried at the analytics
+   layer via the S3+Clickhouse pipeline). *)
 
 let split_lines s =
   String.split_on_char '\n' s |> List.filter (fun l -> l <> "")
@@ -289,54 +291,6 @@ let decode_event ~file line =
   | Error msg ->
       Log.debug (fun m -> m "audit bad line: %s" msg);
       None
-
-let read_one_build ~os_key path =
-  if not (Filename.check_suffix path ".json") then []
-  else
-    try
-      let s = In_channel.with_open_text path In_channel.input_all in
-      (* Pull just the [events] array via a streaming codec would be
-         ideal; for now we let the full build manifest go through
-         [Jsont_bytesrw] and extract its events field. To avoid a hard
-         dependency cycle on [Manifest_build], we decode just the
-         [events] array via a minimal local codec. *)
-      let events_only =
-        let open Jsont in
-        Object.map ~kind:"build_events_only" (fun events os -> (events, os))
-        |> Object.mem "events" (list event_codec) ~dec_absent:[]
-             ~enc:(fun (es, _) -> es)
-        |> Object.mem "os_key" string ~enc:(fun (_, k) -> k)
-        |> Object.finish
-      in
-      match
-        Jsont_bytesrw.decode_string ~locs:false ~file:path events_only s
-      with
-      | Ok (events, k) when k = os_key -> events
-      | Ok _ -> []
-      | Error msg ->
-          Log.debug (fun m -> m "audit build bad %s: %s" path msg);
-          []
-    with exn ->
-      Log.debug (fun m ->
-          m "audit build read %s: %s" path (Printexc.to_string exn));
-      []
-
-let read_all ~(fs : _ Eio.Path.t) ~cache_root ~os_key =
-  ignore fs;
-  let root = cache_root / "layers" / os_key / "builds" in
-  if not (Sys.file_exists root) then []
-  else
-    let read_month md =
-      List.concat_map
-        (fun e -> read_one_build ~os_key (md / e))
-        (collect_dir md)
-    in
-    let read_year yd =
-      List.concat_map (fun m -> read_month (yd / m)) (collect_dir yd)
-    in
-    collect_dir root
-    |> List.concat_map (fun y -> read_year (root / y))
-    |> List.sort (fun a b -> String.compare a.event_id b.event_id)
 
 (* Read all events written during this invocation (i.e. that still live
    in the staging file). Used by {!finalize}. *)
