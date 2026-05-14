@@ -788,23 +788,53 @@ module Bump = struct
       String.sub u 0 (String.length u - 1)
     else u
 
-  (* [--upload-archives]: invoke [s3cmd put <path> <base>/<sha>.tar.zst] for
-     each fresh bake. Failures print a warning but don't abort. *)
+  (* [--upload-archives]: for each fresh bake, [s3cmd put] both the
+     [.tar.zst] archive and its sibling [.json] source-manifest sidecar
+     so the bucket stays self-describing. Skipping the sidecar (as we
+     used to) left fresh local caches downstream missing the
+     [.json] — [D10ir.Registry.do_fetch_sidecar] is a best-effort
+     companion to the [.tar.zst] pull and silently no-ops when the
+     bucket lacks the JSON. Failures print a warning but don't abort.
+
+     Honours [OI_S3CFG] so the [s3cmd] invocation reads the same config
+     [Oi.Build_pipeline.s3_put_quiet] does; matters inside the [oi
+     docker] containers where the config lives under [/tmp]. *)
+  let s3cmd_argv args =
+    match Sys.getenv_opt "OI_S3CFG" with
+    | Some path when path <> "" -> "s3cmd" :: "-c" :: path :: args
+    | _ -> "s3cmd" :: args
+
+  let put_one ~sys ~src ~url =
+    D10.Sysops.Cmd.run sys (s3cmd_argv [ "put"; "--quiet"; src; url ])
+
   let make_upload_callback ~sys ~upload_archives ~archives_url =
     if not upload_archives then None
     else
       let base = strip_trailing_slash archives_url in
       Some
         (fun ~name ~version ~sha ~path ->
-          let url = Fmt.str "%s/%s.tar.zst" base sha in
-          try
-            D10.Sysops.Cmd.run sys [ "s3cmd"; "put"; "--quiet"; path; url ];
-            Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded"
-              (Fmt.str "%s.%s" name version)
-              url
-          with exn ->
-            Fmt.pr "    %a upload %s.%s: %s@." Oi.Style.pp_warn_string "skip"
-              name version (Printexc.to_string exn))
+          let tar_url = Fmt.str "%s/%s.tar.zst" base sha in
+          let json_path = Filename.dirname path / Fmt.str "%s.json" sha in
+          let json_url = Fmt.str "%s/%s.json" base sha in
+          let pkg = Fmt.str "%s.%s" name version in
+          (try
+             put_one ~sys ~src:path ~url:tar_url;
+             Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded" pkg
+               tar_url
+           with exn ->
+             Fmt.pr "    %a upload %s: %s@." Oi.Style.pp_warn_string "skip" pkg
+               (Printexc.to_string exn));
+          if Sys.file_exists json_path then
+            try
+              put_one ~sys ~src:json_path ~url:json_url;
+              Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded"
+                (pkg ^ " sidecar") json_url
+            with exn ->
+              Fmt.pr "    %a sidecar %s: %s@." Oi.Style.pp_warn_string "skip"
+                pkg (Printexc.to_string exn)
+          else
+            Fmt.pr "    %a sidecar %s: %s missing@." Oi.Style.pp_warn_string
+              "skip" pkg json_path)
 
   type bump_ctx = {
     proc_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
@@ -1066,10 +1096,12 @@ module Bump = struct
         value & flag
         & info
             ~doc:
-              "Upload each freshly baked $(b,x-d10-archive) tarball to \
-               $(b,--archives-url) via $(b,s3cmd put). Requires a working \
-               $(b,~/.s3cfg). Already-present archives are not re-uploaded (we \
-               only upload what was freshly baked this run)."
+              "Upload each freshly baked $(b,x-d10-archive) tarball $(i,and \
+               its $(b,.json) source-manifest sidecar) to $(b,--archives-url) \
+               via $(b,s3cmd put). Requires a working $(b,~/.s3cfg) (or \
+               $(b,OI_S3CFG) pointing at a config). Already-present archives \
+               are not re-uploaded (we only upload what was freshly baked this \
+               run)."
             [ "upload-archives" ])
     in
     let archives_url =
@@ -1079,7 +1111,8 @@ module Bump = struct
         & info ~docv:"URL"
             ~doc:
               "Destination URL prefix for $(b,--upload-archives). The full \
-               object key for each archive is $(b,<URL>/<sha>.tar.zst)."
+               object keys are $(b,<URL>/<sha>.tar.zst) and \
+               $(b,<URL>/<sha>.json) (the source-manifest sidecar)."
             [ "archives-url" ])
     in
     Cmd.v info
