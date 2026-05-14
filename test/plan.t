@@ -1,15 +1,15 @@
-`oi show --tree` prints the full per-package plan that `oi plan` used to
-emit: a Plan header followed by per-package entries with layer hashes.
+`oi show --tree` prints a dependency tree headed by the target package
+with its layer hash on the same line.
 
   $ export OI_DATA_DIR=$PWD/data
   $ export OI_CACHE_DIR=$PWD/cache
   $ export HOME=$PWD/home
   $ mkdir -p "$HOME"
-  $ oi show --tree utop 2>&1 | grep -q "^Plan:"
-  $ oi show --tree utop 2>&1 | grep -q "^  utop\."
-  $ oi show --tree utop 2>&1 | grep -q "^    layer: "
+  $ oi show --tree utop 2>&1 | grep -q "^Dependency tree"
+  $ oi show --tree utop 2>&1 | grep -qE "^utop\.[0-9]"
 
-The default view (no flags) prints a compact info block instead.
+`oi show` without `--tree` also surfaces utop and its leaf dependencies
+under the tree.
 
-  $ oi show utop 2>&1 | grep -q "^Target:"
-  $ oi show utop 2>&1 | grep -q "^Packages:"
+  $ oi show utop 2>&1 | grep -qE "^utop\.[0-9]"
+  $ oi show utop 2>&1 | grep -qE "ocaml\.[0-9]"

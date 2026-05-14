@@ -4,7 +4,7 @@ Config reflects sandboxed XDG env vars and the default registry URL.
   $ export OI_CACHE_DIR=$PWD/cache
   $ oi config 2>&1 | grep -q "data:       $PWD/data"
   $ oi config 2>&1 | grep -q "cache:      $PWD/cache"
-  $ oi config 2>&1 | grep -q "https://oi.ci.dev"
+  $ oi config 2>&1 | grep -q "https://oi.thicket.dev"
 
 XDG_DATA_HOME / XDG_CACHE_HOME are used as fallbacks when OI_* are unset.
 
@@ -25,12 +25,12 @@ Project metadata shown by 'oi config'.
   > license: "ISC"
   > dev-repo: "git+x"
   > synopsis: "x"
-  > x-opam-repositories: [ ["local" "https://example.com/r"] ]
+  > x-repos: [ "https://example.com/r" ]
   > pin-depends: [ ["foo.dev" "git+https://example.com/foo.git"] ]
   > depends: [ "fmt" ]
   > EOF
-  $ oi config 2>&1 | grep -E '^Project|^  local|^  foo\.dev'
+  $ oi config 2>&1 | grep -E '^Project|^  extra-|^  foo\.dev'
   Project extra repositories:
-    local                https://example.com/r
+    extra-7ae45f29f2     https://example.com/r
   Project pin-depends:
     foo.dev              git+https://example.com/foo.git

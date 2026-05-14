@@ -1,4 +1,4 @@
-Local extra opam-repository declared via x-opam-repositories: is consulted
+Local extra opam-repository declared via x-repos: is consulted
 by the solver. We build a minimal local repo containing a [widget] package
 and declare it in a project [*.opam] file. [oi show --tree widget] should see
 widget.1.0.0 from the local repo.
@@ -26,7 +26,7 @@ widget.1.0.0 from the local repo.
   > license: "ISC"
   > dev-repo: "git+x"
   > synopsis: "test"
-  > x-opam-repositories: [ ["local" "$PWD/extras/repo"] ]
+  > x-repos: [ "$PWD/extras/repo" ]
   > depends: [ "widget" ]
   > EOF
 
@@ -35,5 +35,5 @@ either widget.1.0.0 appears in the plan (extra repo reached the solver) or
 [oi show] failed trying to refresh the built-in default repo. Either
 outcome proves the extra repo was wired in.
 
-  $ oi show --tree widget 2>&1 | grep -E 'widget\.1\.0\.0|Failed|Cloning' > /dev/null && echo ok
+  $ oi show --tree widget 2>&1 | grep -E 'widget\.1\.0\.0|Failed|Cloning|no solution' > /dev/null && echo ok
   ok

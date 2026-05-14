@@ -5,14 +5,13 @@ tools will be installed into [_oi/tools/] on the next 'oi sync'.
   $ export OI_DATA_DIR=$PWD/data
   $ export OI_CACHE_DIR=$PWD/cache
 
-With neither .ocamlformat nor a dune-project, only the Always tools
-hit and the optional ones miss.
+With neither .ocamlformat nor a dune-project, the dune-project-gated
+[mdx] and the .ocamlformat-gated [ocamlformat] both miss. The
+always-on tools (odoc, merlin, ocaml-lsp-server) are installed
+unconditionally and no longer listed here.
 
   $ oi config 2>&1 | awk '/^Dev tools:/,/^$/'
   Dev tools:
-    odoc               hit  always
-    merlin             hit  always
-    ocaml-lsp-server   hit  always
     mdx                miss dune-project: no (using mdx ...)
     ocamlformat        miss .ocamlformat: missing
 
