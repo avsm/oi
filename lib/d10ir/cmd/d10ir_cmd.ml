@@ -172,13 +172,13 @@ let node_label ~repeated (n : D10ir.Plan.node) =
 let walk_kids ~parent_indent ~is_root ~is_last ~walk kids =
   let n_kids = List.length kids in
   let child_indent =
-    if is_root then ""
-    else parent_indent ^ if is_last then "    " else "│   "
+    if is_root then "" else parent_indent ^ if is_last then "    " else "│   "
   in
   List.iteri
     (fun i child ->
-      walk ~parent_indent:child_indent ~is_last:(i = n_kids - 1) ~is_root:false
-        child)
+      walk ~parent_indent:child_indent
+        ~is_last:(i = n_kids - 1)
+        ~is_root:false child)
     kids
 
 let render_dep_tree (plan : D10ir.Plan.t) =
@@ -209,9 +209,7 @@ let render_dep_tree (plan : D10ir.Plan.t) =
     in
     List.iteri render_one rs
   in
-  match roots with
-  | [] -> Fmt.pr "  (no roots)@."
-  | rs -> render_roots rs
+  match roots with [] -> Fmt.pr "  (no roots)@." | rs -> render_roots rs
 
 let render_mount (m : D10ir.Plan.mount) =
   let mode = match m.mode with `Ro -> "ro" | `Rw -> "rw" in

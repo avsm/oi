@@ -55,11 +55,11 @@ let codec : t Jsont.t =
   |> Object.mem "kind" string ~enc:(fun r -> r.kind)
   |> Object.mem "os_key" string ~enc:(fun r -> r.os_key)
   |> Object.mem "layer_manifest_schema" int ~enc:(fun r ->
-         r.layer_manifest_schema)
+      r.layer_manifest_schema)
   |> Object.mem "build_manifest_schema" int ~enc:(fun r ->
-         r.build_manifest_schema)
+      r.build_manifest_schema)
   |> Object.mem "source_manifest_schema" int ~enc:(fun r ->
-         r.source_manifest_schema)
+      r.source_manifest_schema)
   |> Object.mem "wrote_by" string ~enc:(fun r -> r.wrote_by)
   |> Object.mem "date" string ~enc:(fun r -> r.date)
   |> Object.finish
@@ -80,8 +80,10 @@ let ensure ~fs ~cache_root ~os_key ~wrote_by =
         let s = In_channel.with_open_text dst In_channel.input_all in
         match Jsont_bytesrw.decode_string ~locs:false ~file:dst codec s with
         | Stdlib.Ok r ->
-            r.schema <> 1 || r.layer_manifest_schema <> 1
-            || r.build_manifest_schema <> 1 || r.source_manifest_schema <> 1
+            r.schema <> 1
+            || r.layer_manifest_schema <> 1
+            || r.build_manifest_schema <> 1
+            || r.source_manifest_schema <> 1
         | Error _ -> true
       with _ -> true
   in
@@ -111,4 +113,5 @@ let ensure ~fs ~cache_root ~os_key ~wrote_by =
           Sys.rename tmp dst
         with exn ->
           Log.warn (fun mlog ->
-              mlog "registry pointer write %s: %s" dst (Printexc.to_string exn)))
+              mlog "registry pointer write %s: %s" dst (Printexc.to_string exn))
+        )

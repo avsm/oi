@@ -117,9 +117,8 @@ let build_request ~targets ~with_repos ~pins ~extra_repos ~constraints
    verbatim — they explicitly overrode the project's preference, so
    we shouldn't second-guess by silently filtering. *)
 let filter_overlays ~toolchain_override ~toolchain overlays =
-  Oi.Pipeline.filter_compatible_overlays
-    ~reporepo_path:(Terms.reporepo_path ()) ~override:toolchain_override
-    ~toolchain overlays
+  Oi.Pipeline.filter_compatible_overlays ~reporepo_path:(Terms.reporepo_path ())
+    ~override:toolchain_override ~toolchain overlays
 
 let prepare ~(harness : Harness.env) ~refresh ~locked ~skip_local ~registry
     ~use_registry ~with_repos ~with_deps ~toolchain_override ~targets
@@ -162,7 +161,8 @@ let prepare ~(harness : Harness.env) ~refresh ~locked ~skip_local ~registry
       ~project:project.extras
   in
   let request =
-    build_request ~targets ~with_repos ~pins:(project.pins @ extra_pins)
+    build_request ~targets ~with_repos
+      ~pins:(project.pins @ extra_pins)
       ~extra_repos
       ~constraints:(merge_constraints extra_constraints with_deps_constraints)
       ~toolchain_override ~toolchain ~conf

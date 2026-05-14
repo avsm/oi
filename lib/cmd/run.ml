@@ -98,8 +98,7 @@ let store_fast_cache ~fs ~cache_root ~fast_key ~bin_path ~prefix ~tc_ctx =
               tc_ctx )
         in
         let tmp = path ^ ".tmp" in
-        Out_channel.with_open_bin tmp (fun oc ->
-            Marshal.to_channel oc entry []);
+        Out_channel.with_open_bin tmp (fun oc -> Marshal.to_channel oc entry []);
         Sys.rename tmp path
       with Sys_error _ -> ())
 
@@ -123,8 +122,7 @@ let tc_ctx_of_info tc_info : Oi.Solver.Ctx.toolchain option =
           root_names = OpamPackage.Name.Set.empty;
         }
 
-let try_fast_cache_exec ~proc_mgr ~cache_root ~dune_cache_root ~fast_key
-    ~args =
+let try_fast_cache_exec ~proc_mgr ~cache_root ~dune_cache_root ~fast_key ~args =
   match fast_key with
   | None -> ()
   | Some key -> (
@@ -165,8 +163,7 @@ type ctx = {
   with_repos : string list;
   project_pins : Oi.Project.pin list;
   all_extras : Oi.Project.extra_repo list;
-  extra_constraints :
-    OpamFormula.version_constraint OpamPackage.Name.Map.t;
+  extra_constraints : OpamFormula.version_constraint OpamPackage.Name.Map.t;
   local_packages_dir : string option;
   extra_deps : Oi.Project.Script.dep list;
   url_project : Oi.Project.Url.t;
@@ -229,8 +226,19 @@ let merged_extra_constraints ~fs ~data_dir ~refresh ~cli_extras ~handle_pins
 
 let build_ctx_from_harness (h : Harness.env) (flags : flags) registry
     use_registry toolchain_override pt save_d10ir jobs ~fast_key ~data_dir =
-  let { Harness.proc_mgr; fs; clock; sys; platform; os_key; cache;
-        http_session; _ } = h in
+  let {
+    Harness.proc_mgr;
+    fs;
+    clock;
+    sys;
+    platform;
+    os_key;
+    cache;
+    http_session;
+    _;
+  } =
+    h
+  in
   let refresh = flags.refresh && not flags.locked in
   let use_registry =
     if flags.locked then Oi.Use_registry.Never else use_registry
@@ -249,7 +257,9 @@ let build_ctx_from_harness (h : Harness.env) (flags : flags) registry
     Oi.Pipeline.classify_with_args ~fs ~sys ~cache ~refresh pt.with_deps
   in
   let base_constraints = Oi.Project.Script.constraints extra_deps in
-  let pi = collect_project_inputs ~fs ~skip_local:flags.skip_local ~url_project in
+  let pi =
+    collect_project_inputs ~fs ~skip_local:flags.skip_local ~url_project
+  in
   let toolchain =
     resolve_toolchain ~fs ~sys ~data_dir ~conf ~toolchain_override ~pt
       ~project_overlays:pi.project_overlays
@@ -331,9 +341,7 @@ let save_solved_recipes ~fs ~dir (solved : Oi.Build_pipeline.solved) ~mk_stem =
     solved.groups
 
 let solve_stem (gr : Oi.Build_pipeline.group_result) =
-  match gr.group.tokens with
-  | t :: _ -> recipe_stem_token t
-  | [] -> "recipe"
+  match gr.group.tokens with t :: _ -> recipe_stem_token t | [] -> "recipe"
 
 let print_dry_run_plan (solved : Oi.Build_pipeline.solved) =
   (match solved.merged with
@@ -388,8 +396,9 @@ let fail_no_executable_plan (solved : Oi.Build_pipeline.solved) =
         match gr.error with
         | Ok () -> None
         | Error e ->
-            Fmt.kstr (fun s -> Some s) "%s: %s" gr.group.label
-              (group_error_kind e))
+            Fmt.kstr
+              (fun s -> Some s)
+              "%s: %s" gr.group.label (group_error_kind e))
       solved.groups
   in
   Oi.Error.fail_config_error
@@ -425,8 +434,7 @@ let fail_empty_plan_with_missing xs =
   let summary =
     List.map
       (fun (pkg, h) ->
-        Fmt.str "  %s (%s)" pkg
-          (String.sub h 0 (min 12 (String.length h))))
+        Fmt.str "  %s (%s)" pkg (String.sub h 0 (min 12 (String.length h))))
       xs
     |> String.concat "\n"
   in
@@ -448,8 +456,8 @@ let fail_build_failures (r : D10ir.Direct.result) =
   if r.failures <> [] then begin
     let summary = List.map pp_fail r.failures |> String.concat "\n  " in
     Oi.Error.fail_config_error
-      "build failed: %d node(s) failed, %d skipped.@\n  %s" r.failed
-      r.skipped summary
+      "build failed: %d node(s) failed, %d skipped.@\n  %s" r.failed r.skipped
+      summary
   end
   else
     Oi.Error.fail_config_error
@@ -489,10 +497,7 @@ let solve_request ctx ~names : Oi.Build_pipeline.request =
     targets =
       [
         Group
-          {
-            tokens = List.map OpamPackage.Name.to_string names;
-            handles = [];
-          };
+          { tokens = List.map OpamPackage.Name.to_string names; handles = [] };
       ];
     (* Overlay handles from [--with=@H/PKG] / [--with-repo=@H] / project
        [x-repos] must flow into the request so the solver's
@@ -521,8 +526,7 @@ let drive_solve_and_build ~ctx ~target ~req =
   if ctx.dry_run then print_dry_run_plan solved;
   (match ctx.save_d10ir with
   | None -> ()
-  | Some dir ->
-      save_solved_recipes ~fs:ctx.fs ~dir solved ~mk_stem:solve_stem);
+  | Some dir -> save_solved_recipes ~fs:ctx.fs ~dir solved ~mk_stem:solve_stem);
   let build_result =
     Oi.Build_pipeline.build pipeline_env ~reporter
       {
@@ -530,7 +534,9 @@ let drive_solve_and_build ~ctx ~target ~req =
         layer_remote = ctx.layer_remote;
         source_remote = ctx.source_remote;
         jobs = ctx.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   interpret_build_result ~sys:ctx.sys ~fs:ctx.fs ~clock:ctx.clock
@@ -542,8 +548,8 @@ let exec_in_prefix ctx ~prefix ~tc_ctx ~bin_path ~args =
     Oi.Solver.Env.make_env ?toolchain:tc_ctx ~prefix
       ~dune_cache_root:ctx.dune_cache_root ()
   in
-  store_fast_cache ~fs:ctx.fs ~cache_root:ctx.cache_root
-    ~fast_key:ctx.fast_key ~bin_path ~prefix ~tc_ctx;
+  store_fast_cache ~fs:ctx.fs ~cache_root:ctx.cache_root ~fast_key:ctx.fast_key
+    ~bin_path ~prefix ~tc_ctx;
   exit (Subprocess.run ctx.proc_mgr ~env:(env_vars ()) (bin_path :: args))
 
 (* Non-relocatable toolchains keep their compiler binaries (ocamlc,
@@ -674,7 +680,9 @@ let script_solve ~ctx ~req ~target =
         layer_remote = ctx.layer_remote;
         source_remote = ctx.source_remote;
         jobs = ctx.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -765,8 +773,7 @@ let package_exists_in ~packages_dirs name =
 let try_solve_target_as_pkg ~packages_dirs ~target ~solve_with_extras =
   if not (package_exists_in ~packages_dirs target) then begin
     Log.info (fun m ->
-        m "Skipping solve %s — not a package name in any configured repo"
-          target);
+        m "Skipping solve %s — not a package name in any configured repo" target);
     false
   end
   else
@@ -779,9 +786,7 @@ let try_solve_target_as_pkg ~packages_dirs ~target ~solve_with_extras =
    executables the package does install and how to run one. *)
 let fail_overlay_pin_no_binary ~binary_name ~unfound_bins
     (pin : Target.handle_pin) =
-  let qualified =
-    "@" ^ pin.handle ^ "/" ^ OpamPackage.Name.to_string pin.pkg
-  in
+  let qualified = "@" ^ pin.handle ^ "/" ^ OpamPackage.Name.to_string pin.pkg in
   let suggestion =
     match !unfound_bins with
     | [] ->
@@ -792,9 +797,8 @@ let fail_overlay_pin_no_binary ~binary_name ~unfound_bins
           " The package installs: %s.@,To run one of them: oi run --with=%s %s"
           (String.concat ", " bins) qualified (List.hd bins)
   in
-  Oi.Error.fail_not_found binary_name
-    "%s solved but does not install bin/%s.%s" qualified binary_name
-    suggestion
+  Oi.Error.fail_not_found binary_name "%s solved but does not install bin/%s.%s"
+    qualified binary_name suggestion
 
 (* Dash-split prefixes, longest-first: "a-b-c" → ["a-b-c"; "a-b"; "a"]. *)
 let dash_prefixes name =
@@ -822,9 +826,8 @@ let lookup_layer_index ~ctx ~env ~binary_name =
   with_preflight_bar ~clock:ctx.clock
   @@ fun ~on_phase ~on_text:_ ~preflight_done ~shared_display:_ ->
   let r =
-    Layer_index.package_of_binary ~on_phase ~sys:ctx.sys ~fs:ctx.fs
-      ~clock:clk ~cache:ctx.cache ~os_key:ctx.os_key ~registry:ctx.registry
-      binary_name
+    Layer_index.package_of_binary ~on_phase ~sys:ctx.sys ~fs:ctx.fs ~clock:clk
+      ~cache:ctx.cache ~os_key:ctx.os_key ~registry:ctx.registry binary_name
   in
   preflight_done ();
   r
@@ -853,8 +856,7 @@ let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names
   if prefixes = [] then
     Oi.Error.fail_not_found target "no package provides bin/%s" target
   else begin
-    Log.info (fun m ->
-        m "Trying packages: %s" (String.concat ", " prefixes));
+    Log.info (fun m -> m "Trying packages: %s" (String.concat ", " prefixes));
     let found =
       List.exists
         (fun name ->
@@ -877,8 +879,8 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
     @ ctx.url_project.roots
   in
   let solve_with_extras pkg_names =
-    solve_and_exec ~ctx ~binary_name:pt.binary_name
-      ~target_pin:pt.target_pin ~unfound_bins ~args (pkg_names @ extra_names)
+    solve_and_exec ~ctx ~binary_name:pt.binary_name ~target_pin:pt.target_pin
+      ~unfound_bins ~args (pkg_names @ extra_names)
   in
   let packages_dirs = Lazy.force (packages_dirs_lazy ctx) in
   let from_target =
@@ -897,7 +899,9 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
   | _ -> ());
   if from_with then ()
   else begin
-    let index_result = lookup_layer_index ~ctx ~env ~binary_name:pt.binary_name in
+    let index_result =
+      lookup_layer_index ~ctx ~env ~binary_name:pt.binary_name
+    in
     let from_index =
       try_solve_from_index ~binary_name:pt.binary_name ~solve_with_extras
         index_result
@@ -985,8 +989,8 @@ let man_targets =
     `I ("$(b,path/to/script.ml)", "Local OCaml script.");
     `I
       ( "$(b,https://...ml)",
-        "Remote OCaml script ($(b,http://) also accepted). Refetched each \
-         run; cached by content hash." );
+        "Remote OCaml script ($(b,http://) also accepted). Refetched each run; \
+         cached by content hash." );
   ]
 
 let man_binaries =
@@ -1027,8 +1031,8 @@ let man_overlays =
     `P "Read from the cwd (or a $(b,--with=URL) clone):";
     `I
       ( "$(b,*.opam)",
-        "$(b,depends:), $(b,pin-depends:), $(b,x-repos:) merge into the \
-         solve." );
+        "$(b,depends:), $(b,pin-depends:), $(b,x-repos:) merge into the solve."
+      );
     `I
       ( "$(b,packages/) + $(b,repo)",
         "Highest-priority opam-repository overlay for patched transitive deps."
@@ -1041,8 +1045,7 @@ let man_toolchain =
     `P "Picked in order:";
     `I ("1.", "$(b,--toolchain=NAME).");
     `I
-      ( "2.",
-        "$(b,x-oi-toolchain) on an in-scope $(b,@HANDLE). Conflicts error." );
+      ("2.", "$(b,x-oi-toolchain) on an in-scope $(b,@HANDLE). Conflicts error.");
     `I ("3.", "Reporepo's $(b,x-oi-default-toolchain).");
   ]
 
@@ -1073,8 +1076,8 @@ let man_urls =
 let info_run =
   Cmd.info "run" ~doc:"Run an opam-packaged binary or OCaml script"
     ~man:
-      (man_targets @ man_binaries @ man_scripts @ man_overlays
-      @ man_toolchain @ man_urls)
+      (man_targets @ man_binaries @ man_scripts @ man_overlays @ man_toolchain
+     @ man_urls)
 
 let info_oix =
   Cmd.info "oix" ~doc:"Run a binary from opam overlays"

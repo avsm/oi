@@ -61,8 +61,7 @@ let is_fresh_local local_path =
     Unix.gettimeofday () -. st.Unix.st_mtime < remote_index_max_age
   with Unix.Unix_error _ -> false
 
-let unlink_quietly path =
-  try Unix.unlink path with Unix.Unix_error _ -> ()
+let unlink_quietly path = try Unix.unlink path with Unix.Unix_error _ -> ()
 
 let report_fetch_start ~on_phase ~url =
   match on_phase with
@@ -102,8 +101,8 @@ let fall_back_to_stale ~fs ~local_path ~registry =
     None
   end
 
-let fetch_remote_index ~on_phase ~sys ~fs ~os_dir ~local_path ~tmp_path ~registry
-    ~url =
+let fetch_remote_index ~on_phase ~sys ~fs ~os_dir ~local_path ~tmp_path
+    ~registry ~url =
   let dst = Eio.Path.(fs / tmp_path) in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / os_dir);
   unlink_quietly tmp_path;

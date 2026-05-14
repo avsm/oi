@@ -511,7 +511,8 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
       (shell "%s")))
 |}
     distro_label s3_access_key_secret s3_secret_key_secret distro_label
-    s3.bucket img tag shell_op (sexp_escape install) (sexp_escape fetch_oi_obuilder)
+    s3.bucket img tag shell_op (sexp_escape install)
+    (sexp_escape fetch_oi_obuilder)
     s3_access_key_secret s3_access_key_secret s3_secret_key_secret
     s3_secret_key_secret
     (sexp_escape (build_sync_shell ~s3 ()))

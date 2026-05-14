@@ -93,17 +93,14 @@ let copy_file_contents src dst =
 (* Hardlink [src] to [dst], falling back to a byte copy on failure
    (typically [EXDEV] across filesystems). *)
 let link_or_copy src dst =
-  try Unix.link src dst
-  with Unix.Unix_error _ -> copy_file_contents src dst
+  try Unix.link src dst with Unix.Unix_error _ -> copy_file_contents src dst
 
 let copy_symlink src dst =
   let target = Unix.readlink src in
-  try Unix.symlink target dst
-  with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  try Unix.symlink target dst with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
 
 let mkdir_existing_ok dst =
-  try Unix.mkdir dst 0o755
-  with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  try Unix.mkdir dst 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
 
 (* Recursive copy of [src] into [dst], hardlinking regular files when
    possible (cross-fs gracefully falls back to byte copy). Used to
@@ -219,7 +216,7 @@ let install_one ~cache_urls ~vendor_dir ~acc pkg url checksums =
   let key = archive_key url checksums in
   match Hashtbl.find_opt acc.by_key key with
   | Some dir -> acc.duplicates <- (pkg, dir) :: acc.duplicates
-  | None ->
+  | None -> (
       let pkg_name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
       let dst = vendor_dir / pkg_name in
       let record_extracted () =
@@ -230,7 +227,7 @@ let install_one ~cache_urls ~vendor_dir ~acc pkg url checksums =
       else
         match extract_main_source ~cache_urls ~dst pkg url checksums with
         | Ok () -> record_extracted ()
-        | Error msg -> acc.failures <- (pkg_name, msg) :: acc.failures
+        | Error msg -> acc.failures <- (pkg_name, msg) :: acc.failures)
 
 let install_sources ~cache_urls ~vendor_dir ~packages_dirs pkgs =
   (* [by_key] maps an archive's identity to the basename of the
@@ -392,9 +389,7 @@ let collect_solve_inputs ~fs ~sys ~cache ~refresh ~with_repos ~with_deps
         ~reporepo_path:(Terms.reporepo_path ()) ~toolchain:None
         (project.overlays @ url_project.overlays)
   in
-  let cli_extras =
-    Target.cli_extra_repos ~fs ~sys ?toolchain:None with_repos
-  in
+  let cli_extras = Target.cli_extra_repos ~fs ~sys ?toolchain:None with_repos in
   let all_extras =
     Target.merge_extras ~cli:cli_extras
       ~project:(project.extra_repos @ url_project.extra_repos)
@@ -563,7 +558,8 @@ let run_solve ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
   in
   let consumer_pkgs, toolchain_pkgs = partition_toolchain ~toolchain pkgs in
   Oi.Say.info "%d package(s) in solve closure (%d toolchain)"
-    (List.length consumer_pkgs) (List.length toolchain_pkgs);
+    (List.length consumer_pkgs)
+    (List.length toolchain_pkgs);
   ignore cache_root;
   { consumer_pkgs; packages_dirs; inputs }
 
@@ -601,12 +597,12 @@ let run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
       ~targets ~data_dir ~project
   in
   report_fetch_failures
-    (warm_local_mirror ~fs ~cache
-       ~packages_dirs:solved.packages_dirs solved.consumer_pkgs);
+    (warm_local_mirror ~fs ~cache ~packages_dirs:solved.packages_dirs
+       solved.consumer_pkgs);
   let cache_urls = [ Oi.Source.Mirror.url ~cache ] in
   let install =
-    install_sources ~cache_urls ~vendor_dir
-      ~packages_dirs:solved.packages_dirs solved.consumer_pkgs
+    install_sources ~cache_urls ~vendor_dir ~packages_dirs:solved.packages_dirs
+      solved.consumer_pkgs
   in
   report_install install ~vendor_dir;
   let n_repo =

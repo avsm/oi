@@ -466,13 +466,12 @@ let prepare_mounts ~fs (mounts : Plan.mount list) =
     mounts;
   List.concat_map (fun (m : Plan.mount) -> m.env) mounts
 
-type counts_t = <
-  built : unit -> unit ;
-  cached : unit -> unit ;
-  failed : failure -> unit ;
-  skipped : unit -> unit ;
-  snapshot : int * int * int * int * failure list
->
+type counts_t =
+  < built : unit -> unit
+  ; cached : unit -> unit
+  ; failed : failure -> unit
+  ; skipped : unit -> unit
+  ; snapshot : int * int * int * int * failure list >
 
 let new_counts () : counts_t =
   object
@@ -539,9 +538,7 @@ let one_dep_status ~tables ~d10 h =
 
 let dep_status ~tables ~d10 (n : Plan.node) =
   let step acc h =
-    match acc with
-    | `Failed -> `Failed
-    | `Ok -> one_dep_status ~tables ~d10 h
+    match acc with `Failed -> `Failed | `Ok -> one_dep_status ~tables ~d10 h
   in
   List.fold_left step `Ok n.dep_layer_hashes
 

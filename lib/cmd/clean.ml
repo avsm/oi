@@ -62,8 +62,8 @@ let pkg_clean_apply ~fs ~db ~layers_root ~all_hashes =
 (* Plan + execute the clean for the layers that match [target] (already
    resolved into [direct]). Returns the total number of layers removed
    (or that would be removed under [--dry-run]). *)
-let pkg_clean_with_layers ~fs ~db ~os_key ~layers_root ~target ~direct
-    ~dry_run =
+let pkg_clean_with_layers ~fs ~db ~os_key ~layers_root ~target ~direct ~dry_run
+    =
   let direct_hashes = List.map (fun (_, _, h) -> h) direct in
   let dependents = close_dependents db ~os_key direct_hashes in
   let all_hashes = direct_hashes @ dependents in
@@ -203,8 +203,7 @@ let target_conflict_msg =
 let run (c : Terms.common) (bulk : bulk) ~dry_run ~target =
   Harness.run @@ fun ~sw env ->
   let { Harness.fs; clock; sys; os_key; cache; _ } =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let data_dir = c.data_dir in
   let has_bulk = any_bulk bulk in
@@ -216,8 +215,7 @@ let run (c : Terms.common) (bulk : bulk) ~dry_run ~target =
       end
       else
         let clk = (clock :> D10.Config.clk) in
-        ignore
-          (pkg_clean ~sys ~fs ~clock:clk ~cache ~os_key ~target:t ~dry_run)
+        ignore (pkg_clean ~sys ~fs ~clock:clk ~cache ~os_key ~target:t ~dry_run)
   | None when not has_bulk -> list_cleanable ~sys ~cache ~data_dir
   | None -> bulk_clean ~sys ~cache ~data_dir ~bulk ~dry_run
 
@@ -317,17 +315,19 @@ let man =
     `S Manpage.s_description;
     `P
       "Remove rebuildable cache data. With no flags or $(b,PKG), list each \
-       category and its disk usage. Flags are additive. A project's \
-       $(b,_oi/) and the reporepo are never touched.";
+       category and its disk usage. Flags are additive. A project's $(b,_oi/) \
+       and the reporepo are never touched.";
     `P
-      "$(b,PKG) drops every cached version of that package; \
-       $(b,PKG.VERSION) drops one. Layers that transitively depend on a \
-       removed entry are dropped too. Re-run $(b,oi build) to rebuild.";
+      "$(b,PKG) drops every cached version of that package; $(b,PKG.VERSION) \
+       drops one. Layers that transitively depend on a removed entry are \
+       dropped too. Re-run $(b,oi build) to rebuild.";
     `Pre "  oi clean --layers\n  oi clean dune\n  oi clean dune.3.22.1 -n";
   ]
 
 let cmd =
-  let info = Cmd.info "clean" ~doc:"Delete cached data to free disk space" ~man in
+  let info =
+    Cmd.info "clean" ~doc:"Delete cached data to free disk space" ~man
+  in
   let go c bulk dry_run target = run c bulk ~dry_run ~target in
   Cmd.v info
     Term.(const go $ Terms.common $ bulk_term $ dry_run_arg $ target_arg)

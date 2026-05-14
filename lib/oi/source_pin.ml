@@ -114,11 +114,7 @@ let fold_pin_resolution ~fs ~sys ~tbl pins =
       let origin = OpamUrl.to_string pin.url in
       let resolved_url = resolve_with_lock ~fs ~sys ~tbl ~pkg_s ~origin pin in
       let entry =
-        {
-          Lock.pkg = pkg_s;
-          origin;
-          resolved = OpamUrl.to_string resolved_url;
-        }
+        { Lock.pkg = pkg_s; origin; resolved = OpamUrl.to_string resolved_url }
       in
       ({ pin with url = resolved_url } :: pins_acc, entry :: entries_acc))
     pins ([], [])

@@ -7,7 +7,6 @@ type remote = [ `Http_remote of string ]
 
 let archives_dir ~cache_root = cache_root / "d10ir" / "archives"
 let archive_path ~cache_root ~sha = archives_dir ~cache_root / (sha ^ ".tar.zst")
-
 let sidecar_path ~cache_root ~sha = archives_dir ~cache_root / (sha ^ ".json")
 
 let trim_trailing_slash s =
@@ -78,10 +77,10 @@ let do_fetch_sidecar ~fs ~session ~cache_root ~remote ~sha =
     let tmp_p = Eio.Path.(fs / tmp) in
     let unlink_tmp () = try Eio.Path.unlink tmp_p with Eio.Exn.Io _ -> () in
     let url = sidecar_url_of ~remote ~sha in
-    if D10.Sysops.Http.fetch_session session ~url ~dst:tmp_p then begin
-      try Eio.Path.rename tmp_p Eio.Path.(fs / dst)
+    if D10.Sysops.Http.fetch_session session ~url ~dst:tmp_p then
+      begin try Eio.Path.rename tmp_p Eio.Path.(fs / dst)
       with Eio.Exn.Io _ -> unlink_tmp ()
-    end
+      end
     else unlink_tmp ()
 
 let do_fetch ~fs ~session ~cache_root ~remote ~sha ~dst =

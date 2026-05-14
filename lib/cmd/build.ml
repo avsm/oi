@@ -125,8 +125,9 @@ module Summary = struct
     Fmt.pr "%s@." tail
 
   let dump_one_failure ~seen (pkg, log_path) =
-    if log_path = "" || Hashtbl.mem seen log_path
-       || not (Sys.file_exists log_path)
+    if
+      log_path = "" || Hashtbl.mem seen log_path
+      || not (Sys.file_exists log_path)
     then ()
     else begin
       Hashtbl.replace seen log_path ();
@@ -318,13 +319,11 @@ let toolchain_for_overlay ~fs ~sys ~data_dir ~host_conf ~override
 let constraints_of_items items =
   List.fold_left
     (fun acc (name, c) ->
-      match c with
-      | None -> acc
-      | Some c -> OpamPackage.Name.Map.add name c acc)
+      match c with None -> acc | Some c -> OpamPackage.Name.Map.add name c acc)
     OpamPackage.Name.Map.empty items
 
-let solve_one_group ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~conf
-    ~tc_ctx ~handle group =
+let solve_one_group ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~conf ~tc_ctx
+    ~handle group =
   let ctx =
     Oi.Solver.Ctx.create ~prefix:build_prefix ~packages_dirs:pkg_dirs ~conf
       ?toolchain:tc_ctx ()
@@ -342,12 +341,12 @@ let solve_one_group ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~conf
           m "overlay depexts: %s group failed to solve: %s" handle msg);
       None
 
-let solve_overlay_groups ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs
-    ~host_conf ~toolchain ~handle groups =
+let solve_overlay_groups ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~host_conf
+    ~toolchain ~handle groups =
   let conf, tc_ctx = Oi.Pipeline.solver_inputs toolchain host_conf in
   List.filter_map
-    (solve_one_group ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~conf
-       ~tc_ctx ~handle)
+    (solve_one_group ~sys ~fs ~cache_root ~build_prefix ~pkg_dirs ~conf ~tc_ctx
+       ~handle)
     groups
 
 let walk_clone_pkgs ~path handle =
@@ -377,8 +376,8 @@ let process_overlay_input ~fs ~sys ~cache_root ~build_prefix ~data_dir
       | None -> []
       | Some _ ->
           solve_overlay_groups ~sys ~fs ~cache_root ~build_prefix
-            ~pkg_dirs:(pkg_dirs_for handle) ~host_conf ~toolchain ~handle
-            groups)
+            ~pkg_dirs:(pkg_dirs_for handle) ~host_conf ~toolchain ~handle groups
+      )
   | Walk_clone { handle } ->
       let pkg_dirs = pkg_dirs_for handle in
       let pkgs = walk_clone_pkgs ~path handle in
@@ -534,10 +533,7 @@ let target_test_request ~names ~req_with_repos ~pins ~all_extras
     targets =
       [
         Group
-          {
-            tokens = List.map OpamPackage.Name.to_string names;
-            handles = [];
-          };
+          { tokens = List.map OpamPackage.Name.to_string names; handles = [] };
       ];
     with_repos = req_with_repos;
     pins;
@@ -558,8 +554,16 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
     ~req_with_repos ~pins ~all_extras ~extra_constraints ~toolchain
     ~local_packages_dir ~refresh ~jobs =
   let pipeline_env : Oi.Build_pipeline.env =
-    { proc_mgr; fs; clock; sys; os_key; cache; data_dir;
-      http_session = session }
+    {
+      proc_mgr;
+      fs;
+      clock;
+      sys;
+      os_key;
+      cache;
+      data_dir;
+      http_session = session;
+    }
   in
   let req =
     target_test_request ~names ~req_with_repos ~pins ~all_extras
@@ -572,8 +576,15 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
   let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
   let _ : D10ir.Direct.result option =
     Oi.Build_pipeline.build pipeline_env ~reporter
-      { solved; layer_remote; source_remote; jobs; upload_archive_url = None;
-        archive_sources = false; snapshot_reporepo = false }
+      {
+        solved;
+        layer_remote;
+        source_remote;
+        jobs;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
+      }
   in
   Oi.Build_pipeline.layer_hashes solved
 
@@ -592,8 +603,8 @@ let exec_dune_runtest ~proc_mgr ~env ~build_dir =
   let cmd = Fmt.str "cd %s && dune runtest --profile=release" build_dir in
   let ec = Subprocess.run proc_mgr ~env [ "/bin/sh"; "-c"; cmd ] in
   if ec <> 0 then begin
-    Fmt.epr "%a (dune runtest exit %d)@." Oi.Style.pp_error_string
-      "Test failed" ec;
+    Fmt.epr "%a (dune runtest exit %d)@." Oi.Style.pp_error_string "Test failed"
+      ec;
     ec
   end
   else begin
@@ -601,8 +612,8 @@ let exec_dune_runtest ~proc_mgr ~env ~build_dir =
     0
   end
 
-let run_target_test_after_build ~target ~fs ~proc_mgr ~clock ~sys ~cache
-    ~os_key ~toolchain layer_hashes =
+let run_target_test_after_build ~target ~fs ~proc_mgr ~clock ~sys ~cache ~os_key
+    ~toolchain layer_hashes =
   match find_target_layer ~fs ~cache ~os_key ~pkg_name:target layer_hashes with
   | None ->
       Oi.Error.fail_not_found target
@@ -610,9 +621,7 @@ let run_target_test_after_build ~target ~fs ~proc_mgr ~clock ~sys ~cache
          package."
         target
   | Some (layer_hash, pkg_full) ->
-      let short =
-        String.sub layer_hash 0 (min 12 (String.length layer_hash))
-      in
+      let short = String.sub layer_hash 0 (min 12 (String.length layer_hash)) in
       let build_dir =
         Oi.Cache.root_s cache / "build" / "_build" / (pkg_full ^ "-" ^ short)
       in
@@ -691,8 +700,8 @@ let run_target_test ~target ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
     Terms.remotes_of ~url:registry ~mode:use_registry
   in
   let ts =
-    prepare_target_test_solve ~fs ~sys ~cache ~data_dir ~refresh ~conf
-      ~target ~with_repos ~with_deps ~toolchain
+    prepare_target_test_solve ~fs ~sys ~cache ~data_dir ~refresh ~conf ~target
+      ~with_repos ~with_deps ~toolchain
   in
   if dry_run then begin
     print_dry_run_test_plan ts.inp.target_display;
@@ -705,11 +714,10 @@ let run_target_test ~target ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
         ~target:ts.inp.target ~names:ts.names ~req_with_repos:ts.inp.with_repos
         ~pins:ts.url_project.pins ~all_extras:ts.all_extras
         ~extra_constraints:ts.extra_constraints ~toolchain:ts.toolchain
-        ~local_packages_dir:ts.url_project.packages_dir
-        ~refresh ~jobs
+        ~local_packages_dir:ts.url_project.packages_dir ~refresh ~jobs
     in
-    run_target_test_after_build ~target:ts.inp.target ~fs ~proc_mgr ~clock
-      ~sys ~cache ~os_key ~toolchain:ts.toolchain layer_hashes
+    run_target_test_after_build ~target:ts.inp.target ~fs ~proc_mgr ~clock ~sys
+      ~cache ~os_key ~toolchain:ts.toolchain layer_hashes
 
 (* -- Mirror sync helper (shared by --archives-only and --every-version) -- *)
 
@@ -818,8 +826,8 @@ let validate_build_flags ~targets ~all ~project_mode ~export ~depext_only
   if no_spec && archives_only then needs_spec "--archives-only";
   if every_version && not archives_only then
     Oi.Error.fail_config_error
-      "oi build --every-version: only valid with --archives-only (it skips \
-       the solver and walks every recorded reporepo opam file)"
+      "oi build --every-version: only valid with --archives-only (it skips the \
+       solver and walks every recorded reporepo opam file)"
 
 let collect_every_version_archives ~fs ~sys ~refresh ~only ~skip =
   let path = Terms.reporepo_path () in
@@ -846,10 +854,10 @@ let run_project_mode ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
     Project_build.depexts ~fs ~sys ~platform ~cache ~data_dir ~refresh
       ~with_repos ~with_deps ?toolchain:toolchain_override ~cwd:cwd_s ()
   else
-    Project_build.run ~action:`Build ~fs ~proc_mgr ~clock ~sys ~platform
-      ~os_key ~cache ~data_dir ~registry ~use_registry ~session:http_session
-      ~refresh ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override
-      ~envrc_mode ?dist ~cwd:cwd_s ()
+    Project_build.run ~action:`Build ~fs ~proc_mgr ~clock ~sys ~platform ~os_key
+      ~cache ~data_dir ~registry ~use_registry ~session:http_session ~refresh
+      ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override ~envrc_mode
+      ?dist ~cwd:cwd_s ()
 
 (* When [--all] is set, walk every overlay in the reporepo and derive
    targets from each one:
@@ -867,8 +875,7 @@ let run_project_mode ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
    [--only default]. *)
 let handle_default_skipped ~only_set h =
   h = "default"
-  &&
-  match only_set with None -> true | Some s -> not (List.mem h s)
+  && match only_set with None -> true | Some s -> not (List.mem h s)
 
 let handle_included ~only_set ~skip_set h =
   (match only_set with None -> true | Some s -> List.mem h s)
@@ -888,7 +895,8 @@ let groups_of_entry h (e : Oi.Source.Reporepo.entry) =
     [ [ "@" ^ h ] ]
   end
   else
-    List.map (fun group -> List.map (fun p -> "@" ^ h ^ "/" ^ p) group)
+    List.map
+      (fun group -> List.map (fun p -> "@" ^ h ^ "/" ^ p) group)
       e.root_packages
 
 let groups_for_handle ~entries ~only_set ~skip_set h =
@@ -933,8 +941,7 @@ let toolchain_pkg_names_of_entry ~names (e : Oi.Source.Reporepo.entry) =
       (fun s -> names := spec_name s :: !names)
       e.toolchain_compiler;
     List.iter
-      (fun group ->
-        List.iter (fun s -> names := spec_name s :: !names) group)
+      (fun group -> List.iter (fun s -> names := spec_name s :: !names) group)
       e.toolchain_roots
   end
 
@@ -971,7 +978,8 @@ let overlay_packages handle =
             m
               "Overlay %s: excluding %d toolchain package(s) from --all \
                expansion: %s"
-              handle (List.length dropped) (String.concat ", " dropped));
+              handle (List.length dropped)
+              (String.concat ", " dropped));
       kept
 
 (* Expand each raw group into package-name groups. A group containing
@@ -1030,9 +1038,7 @@ let partition_by ~key xs =
     Hashtbl.fold (fun k vs acc -> (Some k, List.rev vs) :: acc) by_k []
     |> List.sort (fun (a, _) (b, _) -> compare a b)
   in
-  match !none_bucket with
-  | [] -> keyed
-  | xs -> (None, List.rev xs) :: keyed
+  match !none_bucket with [] -> keyed | xs -> (None, List.rev xs) :: keyed
 
 let compute_buckets ~all ~toolchain_override ~depext_only ~archives_only
     ~reporepo_entries target_groups =
@@ -1052,7 +1058,8 @@ let compute_buckets ~all ~toolchain_override ~depext_only ~archives_only
   if not split_for_all then [ (toolchain_override, target_groups) ]
   else
     let buckets =
-      partition_by ~key:(fun (_, handles) -> toolchain_of_handles handles)
+      partition_by
+        ~key:(fun (_, handles) -> toolchain_of_handles handles)
         target_groups
     in
     if List.length buckets <= 1 then [ (toolchain_override, target_groups) ]
@@ -1070,8 +1077,8 @@ let compute_buckets ~all ~toolchain_override ~depext_only ~archives_only
 
 (* -- Per-bucket post-solve helpers -------------------------------------- *)
 
-let audit_solve_failure ~fs ~cache ~os_key
-    (gr : Oi.Build_pipeline.group_result) msg log_path =
+let audit_solve_failure ~fs ~cache ~os_key (gr : Oi.Build_pipeline.group_result)
+    msg log_path =
   let layer_hash =
     let key =
       String.concat " "
@@ -1145,8 +1152,7 @@ let do_depext_per_bucket ~conf (solved : Oi.Build_pipeline.solved) =
   in
   OpamSysPkg.Set.iter (fun p -> Fmt.pr "%s@." (OpamSysPkg.to_string p)) all
 
-let do_archives_only_per_bucket ~fs ~cache (solved : Oi.Build_pipeline.solved)
-    =
+let do_archives_only_per_bucket ~fs ~cache (solved : Oi.Build_pipeline.solved) =
   let archives =
     List.concat_map
       (fun (gr : Oi.Build_pipeline.group_result) ->
@@ -1157,8 +1163,7 @@ let do_archives_only_per_bucket ~fs ~cache (solved : Oi.Build_pipeline.solved)
   in
   mirror_archives ~fs ~cache ~label:"solved" archives
 
-let record_cycle_failures ~acc ~gi_offset (solved : Oi.Build_pipeline.solved)
-    =
+let record_cycle_failures ~acc ~gi_offset (solved : Oi.Build_pipeline.solved) =
   List.iteri
     (fun gi (gr : Oi.Build_pipeline.group_result) ->
       let gi = gi + gi_offset in
@@ -1248,8 +1253,7 @@ let audit_cached_layer ~fs ~cache ~os_key ~toolchain_handle ~audit_now ~pkgs_dir
     in
     Oi.Audit.append ~fs ~cache_root:(Oi.Cache.root_s cache) event
 
-let audit_cached_layers ~fs ~cache ~os_key (solved : Oi.Build_pipeline.solved)
-    =
+let audit_cached_layers ~fs ~cache ~os_key (solved : Oi.Build_pipeline.solved) =
   let audit_now = Unix.gettimeofday () in
   let toolchain_handle =
     Option.map (fun (i : Oi.Toolchain.info) -> i.handle) solved.toolchain
@@ -1279,8 +1283,7 @@ let collect_group_failures (exec_plan : Oi.Plan.t)
       Hashtbl.mem pkg_set pkg_str)
     result.failures
 
-let record_failed_layers ~failed_layers (exec_plan : Oi.Plan.t) group_failures
-    =
+let record_failed_layers ~failed_layers (exec_plan : Oi.Plan.t) group_failures =
   List.iter
     (fun (f : D10ir.Direct.failure) ->
       let pkg_str = Fmt.str "%s.%s" f.package.name f.package.version in
@@ -1344,8 +1347,8 @@ let record_one_group_result ~acc ~failed_layers ~gi_offset ~result gi
           in
           Hashtbl.replace acc.group_results gi outcome)
 
-let record_build_results ~acc ~gi_offset (solved : Oi.Build_pipeline.solved)
-    = function
+let record_build_results ~acc ~gi_offset (solved : Oi.Build_pipeline.solved) =
+  function
   | None -> ()
   | Some (result : D10ir.Direct.result) ->
       let failed_layers : (string, string) Hashtbl.t = Hashtbl.create 64 in
@@ -1474,8 +1477,8 @@ let target_label_of ~all targets =
 let fail_no_tokens ~all =
   if all then
     Oi.Error.fail_config_error
-      "--all expanded to nothing in %s (all overlays filtered by --skip/--only, \
-       or the reporepo only contains 'default')"
+      "--all expanded to nothing in %s (all overlays filtered by \
+       --skip/--only, or the reporepo only contains 'default')"
       (Terms.reporepo_path ())
   else
     Oi.Error.fail_config_error
@@ -1492,8 +1495,7 @@ let handles_of_parsed parsed =
 let extra_names_of_cli extra_cli (url_project : Oi.Project.Url.t) =
   List.filter_map
     (fun (d : Oi.Project.Script.dep) ->
-      if OpamPackage.Name.to_string d.name = "ocaml" then None
-      else Some d.name)
+      if OpamPackage.Name.to_string d.name = "ocaml" then None else Some d.name)
     extra_cli
   @ List.map OpamPackage.Name.of_string url_project.roots
 
@@ -1563,13 +1565,12 @@ let target_groups_of ~acc tk =
   let pkg_targets = List.concat_map fst raw_target_groups in
   if pkg_targets = [] && tk.url_project.roots = [] then
     Oi.Error.fail_config_error "no targets to build";
-  raw_target_groups
-  @ List.map (fun r -> ([ r ], [])) tk.url_project.roots
+  raw_target_groups @ List.map (fun r -> ([ r ], [])) tk.url_project.roots
 
 let prepare_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~registry
     ~use_registry ~with_repos ~with_deps ~toolchain_override ~depext_only
-    ~archives_only ~ui_reporter ~proc_mgr ~clock ~os_key ~http_session ~acc
-    ~all ~only ~skip ~cache_root targets =
+    ~archives_only ~ui_reporter ~proc_mgr ~clock ~os_key ~http_session ~acc ~all
+    ~only ~skip ~cache_root targets =
   Oi.Pipeline.init_opam_root ~fs ~data_dir;
   ignore
     (Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh
@@ -1630,7 +1631,9 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
     ~gi_offset_ref (override, bucket_groups) =
   let gi_offset = !gi_offset_ref in
   let req = bucket_req ~bi ~refresh ~override bucket_groups in
-  let solved = Oi.Build_pipeline.solve bi.pipeline_env ~reporter:ui_reporter req in
+  let solved =
+    Oi.Build_pipeline.solve bi.pipeline_env ~reporter:ui_reporter req
+  in
   record_solve_results ~fs ~cache ~os_key ~acc ~gi_offset solved;
   let any_solved =
     List.exists
@@ -1708,9 +1711,8 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
           ~with_repos:args.with_repos ~with_deps:args.with_deps
           ~toolchain_override:args.toolchain_override
           ~depext_only:args.depext_only ~archives_only:args.archives_only
-          ~ui_reporter ~proc_mgr ~clock ~os_key ~http_session ~acc
-          ~all:args.all ~only:args.only ~skip:args.skip ~cache_root
-          args.targets
+          ~ui_reporter ~proc_mgr ~clock ~os_key ~http_session ~acc ~all:args.all
+          ~only:args.only ~skip:args.skip ~cache_root args.targets
       in
       let bi =
         {
@@ -1730,9 +1732,8 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
 (* Dispatch any spec-less or short-circuit flag combination first; if
    none apply, fall through and return [`Continue] so [run] runs
    the full multi-bucket flow. *)
-let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform
-    ~proc_mgr ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s
-    ~args =
+let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
+    ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s ~args =
   if args.every_version then
     exit
       (mirror_archives ~fs ~cache ~label:"every-version"
@@ -1757,10 +1758,10 @@ let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform
     exit ec
   end
 
-let mk_args refresh locked skip_local all only skip registry
-    use_registry with_repos with_deps jobs toolchain_override depext_only
-    export envrc_mode archives_only every_version save_d10ir dist
-    upload_archive archive_sources snapshot_reporepo targets =
+let mk_args refresh locked skip_local all only skip registry use_registry
+    with_repos with_deps jobs toolchain_override depext_only export envrc_mode
+    archives_only every_version save_d10ir dist upload_archive archive_sources
+    snapshot_reporepo targets =
   {
     refresh = refresh && not locked;
     skip_local;
@@ -1768,8 +1769,7 @@ let mk_args refresh locked skip_local all only skip registry
     only;
     skip;
     registry;
-    use_registry =
-      (if locked then Oi.Use_registry.Never else use_registry);
+    use_registry = (if locked then Oi.Use_registry.Never else use_registry);
     with_repos;
     with_deps;
     jobs;
@@ -1787,8 +1787,8 @@ let mk_args refresh locked skip_local all only skip registry
     targets;
   }
 
-let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
-    ~(acc : acc) ~run_start_time ~registry ~export =
+let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~(acc : acc)
+    ~run_start_time ~registry ~export =
   print_build_summary ~targets:acc.targets ~target_handle:acc.target_handle
     ~solve_failures:acc.solve_failures ~target_group:acc.target_group
     ~group_results:acc.group_results;
@@ -1796,10 +1796,10 @@ let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root
   do_export_if_set ~fs ~clock ~sys ~os_key ~cache ~registry ~export ~ok:true;
   print_dist_artifacts acc.dist_mapping
 
-let run (c : Terms.common) refresh locked skip_local all only skip
-    registry use_registry with_repos with_deps jobs toolchain_override
-    depext_only export envrc_mode archives_only every_version save_d10ir dist
-    upload_archive archive_sources snapshot_reporepo targets =
+let run (c : Terms.common) refresh locked skip_local all only skip registry
+    use_registry with_repos with_deps jobs toolchain_override depext_only export
+    envrc_mode archives_only every_version save_d10ir dist upload_archive
+    archive_sources snapshot_reporepo targets =
   Harness.run @@ fun ~sw env ->
   let {
     Harness.proc_mgr;
@@ -1812,15 +1812,14 @@ let run (c : Terms.common) refresh locked skip_local all only skip
     http_session;
     _;
   } =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let data_dir = c.data_dir in
   let args =
-    mk_args refresh locked skip_local all only skip registry
-      use_registry with_repos with_deps jobs toolchain_override depext_only
-      export envrc_mode archives_only every_version save_d10ir dist
-      upload_archive archive_sources snapshot_reporepo targets
+    mk_args refresh locked skip_local all only skip registry use_registry
+      with_repos with_deps jobs toolchain_override depext_only export envrc_mode
+      archives_only every_version save_d10ir dist upload_archive archive_sources
+      snapshot_reporepo targets
   in
   let project_mode, cwd_s =
     detect_project_mode ~fs ~skip_local:args.skip_local ~targets:args.targets
@@ -1834,15 +1833,14 @@ let run (c : Terms.common) refresh locked skip_local all only skip
       ~export:args.export ~ok
   in
   dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh:args.refresh ~platform
-    ~proc_mgr ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s
-    ~args;
+    ~proc_mgr ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s ~args;
   let run_start_time = Unix.time () in
   let cache_root = Oi.Cache.root_s cache in
   let acc = new_acc () in
-  run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh:args.refresh
-    ~platform ~proc_mgr ~clock ~os_key ~http_session ~cache_root ~acc ~args;
-  finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~acc
-    ~run_start_time ~registry:args.registry ~export:args.export
+  run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh:args.refresh ~platform
+    ~proc_mgr ~clock ~os_key ~http_session ~cache_root ~acc ~args;
+  finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~acc ~run_start_time
+    ~registry:args.registry ~export:args.export
 
 let targets_arg =
   Arg.(
@@ -1862,8 +1860,8 @@ let all_arg =
 let only_arg =
   Arg.(
     value & opt_all string []
-    & info ~docv:"HANDLE"
-        ~doc:"Restrict $(b,--all) to $(i,HANDLE). Repeatable." [ "only" ])
+    & info ~docv:"HANDLE" ~doc:"Restrict $(b,--all) to $(i,HANDLE). Repeatable."
+        [ "only" ])
 
 let skip_arg =
   Arg.(
@@ -1926,8 +1924,8 @@ let dist_arg =
           "After a successful build, copy the $(b,bin/) and $(b,sbin/) \
            contents of every root layer (resolving symlinks) into \
            $(i,DIR/bin/) and $(i,DIR/sbin/). Used by the multi-stage $(b,oi \
-           docker) image to surface installed binaries for the runtime \
-           stage's $(b,COPY --from=build)."
+           docker) image to surface installed binaries for the runtime stage's \
+           $(b,COPY --from=build)."
         [ "dist" ])
 
 let upload_archive_arg =
@@ -1937,11 +1935,10 @@ let upload_archive_arg =
     & info ~docv:"URL"
         ~doc:
           "After the build, mirror every freshly built layer to \
-           $(i,URL)/$(b,<os_key>/layers/<hash>.tar.zst) plus its \
-           companion $(b,.json) manifest, every d10ir source-manifest \
-           sidecar to $(i,URL)/$(b,d10ir/<sha>.json), and the \
-           per-invocation build manifest to \
-           $(i,URL)/$(b,<os_key>/builds/...) via $(b,s3cmd put). \
+           $(i,URL)/$(b,<os_key>/layers/<hash>.tar.zst) plus its companion \
+           $(b,.json) manifest, every d10ir source-manifest sidecar to \
+           $(i,URL)/$(b,d10ir/<sha>.json), and the per-invocation build \
+           manifest to $(i,URL)/$(b,<os_key>/builds/...) via $(b,s3cmd put). \
            Assumes a working $(b,~/.s3cfg). Typical use: \
            $(b,--upload-archive=s3://oiu/)."
         [ "upload-archive" ])
@@ -1949,25 +1946,26 @@ let upload_archive_arg =
 let archive_sources_arg =
   Arg.(
     value & flag
-    & info ~doc:
-          "Also upload the consolidated source $(b,.tar.zst) tarballs \
-           to $(i,URL)/$(b,d10ir/<sha>.tar.zst) (in addition to the JSON \
-           sidecars). Default off: the sidecar's resolved $(b,commit_sha) \
-           + upstream URLs are enough for reproducibility while upstream \
-           git remotes remain alive. Flip on for self-contained, \
+    & info
+        ~doc:
+          "Also upload the consolidated source $(b,.tar.zst) tarballs to \
+           $(i,URL)/$(b,d10ir/<sha>.tar.zst) (in addition to the JSON \
+           sidecars). Default off: the sidecar's resolved $(b,commit_sha) + \
+           upstream URLs are enough for reproducibility while upstream git \
+           remotes remain alive. Flip on for self-contained, \
            upstream-deletion-proof buckets."
         [ "archive-sources" ])
 
 let snapshot_reporepo_arg =
   Arg.(
     value & flag
-    & info ~doc:
-          "After the build, tarball the local reporepo at the \
-           solve-time HEAD commit and PUT to \
-           $(i,URL)/$(b,reporepo/<commit>.tar.zst). Default off: a \
-           downstream consumer is expected to re-clone the reporepo \
-           from its own URL. Flip on when the reporepo is private and \
-           the bucket should be the canonical archival source."
+    & info
+        ~doc:
+          "After the build, tarball the local reporepo at the solve-time HEAD \
+           commit and PUT to $(i,URL)/$(b,reporepo/<commit>.tar.zst). Default \
+           off: a downstream consumer is expected to re-clone the reporepo \
+           from its own URL. Flip on when the reporepo is private and the \
+           bucket should be the canonical archival source."
         [ "snapshot-reporepo" ])
 
 let cmd_info =
@@ -2007,18 +2005,17 @@ let cmd_info =
 let cmd =
   Cmd.v cmd_info
     Term.(
-      const run $ Terms.common $ Terms.refresh $ Terms.locked
-      $ Terms.skip_local $ all_arg $ only_arg $ skip_arg $ Terms.registry
-      $ Terms.use_registry $ Terms.with_repos $ Terms.with_deps $ Terms.jobs
-      $ Terms.toolchain $ depext_only_arg $ export_arg $ Sync.envrc_mode_arg
-      $ archives_only_arg $ every_version_arg $ save_d10ir_arg $ dist_arg
-      $ upload_archive_arg $ archive_sources_arg $ snapshot_reporepo_arg
-      $ targets_arg)
+      const run $ Terms.common $ Terms.refresh $ Terms.locked $ Terms.skip_local
+      $ all_arg $ only_arg $ skip_arg $ Terms.registry $ Terms.use_registry
+      $ Terms.with_repos $ Terms.with_deps $ Terms.jobs $ Terms.toolchain
+      $ depext_only_arg $ export_arg $ Sync.envrc_mode_arg $ archives_only_arg
+      $ every_version_arg $ save_d10ir_arg $ dist_arg $ upload_archive_arg
+      $ archive_sources_arg $ snapshot_reporepo_arg $ targets_arg)
 
 (* -- oi test ------------------------------------------------------------ *)
 
-let test_project_mode_or_fail ~fs ~proc_mgr ~clock ~sys ~platform ~os_key
-    ~cache ~data_dir ~registry ~use_registry ~http_session ~refresh ~with_repos
+let test_project_mode_or_fail ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
+    ~data_dir ~registry ~use_registry ~http_session ~refresh ~with_repos
     ~with_deps ~jobs ~toolchain_override ~envrc_mode ~dry_run ~cwd_s
     ~project_mode =
   if not project_mode then
@@ -2041,10 +2038,9 @@ let dispatch_test ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache ~data_dir
         ~with_repos ~with_deps ~jobs ~toolchain_override ~envrc_mode ~dry_run
         ~cwd_s ~project_mode
   | [ target ] ->
-      run_target_test ~target ~fs ~proc_mgr ~clock ~sys ~platform ~os_key
-        ~cache ~data_dir ~registry ~use_registry ~session:http_session
-        ~refresh ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override
-        ~dry_run ()
+      run_target_test ~target ~fs ~proc_mgr ~clock ~sys ~platform ~os_key ~cache
+        ~data_dir ~registry ~use_registry ~session:http_session ~refresh
+        ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override ~dry_run ()
   | _ ->
       Oi.Error.fail_config_error
         "oi test takes at most one PKG / @HANDLE/PKG target."
@@ -2063,8 +2059,7 @@ let test_run (c : Terms.common) refresh skip_local registry use_registry
     http_session;
     _;
   } =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let data_dir = c.data_dir in
   let project_mode, cwd_s =

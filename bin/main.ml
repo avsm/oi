@@ -63,8 +63,7 @@ let man_quick_start =
       \  oi exec -- dune utop   # any command, project env applied\n\
       \  oi add logs            # edit dune-project + re-solve";
     `P
-      "$(b,oi build) writes $(b,.envrc) when $(b,direnv) is present. \
-       Otherwise:";
+      "$(b,oi build) writes $(b,.envrc) when $(b,direnv) is present. Otherwise:";
     `Pre "  eval \"\\$(oi env)\"";
     `P
       "$(b,4.) Pull from a curated overlay. $(b,oi repo) manages the reporepo \

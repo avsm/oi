@@ -69,7 +69,9 @@ module Preflight = struct
       (fun () -> f ~on_phase ~on_text ~preflight_done ~shared_display:None)
 
   let make_display () =
-    let cfg = Progress.Config.v ~ppf:Format.err_formatter ~persistent:false () in
+    let cfg =
+      Progress.Config.v ~ppf:Format.err_formatter ~persistent:false ()
+    in
     (* Open with [Multi.blank] (no built-in reporters) and attach the
        overall bar via [add_line]. Keeping the [Display.t] typed as
        [(unit, unit) Display.t] regardless of what's added later lets
@@ -108,11 +110,11 @@ module Preflight = struct
     Eio.Fiber.fork_daemon ~sw (fun () -> tick_loop ~clock ~stopped display)
 
   let make_push ~stopped overall_h msg =
-    fun ~advance ->
-      if not !stopped then
-        let delta = if advance then 1 else 0 in
-        try Progress.Reporter.report overall_h (delta, !msg)
-        with Sys_error _ | Failure _ -> ()
+   fun ~advance ->
+    if not !stopped then
+      let delta = if advance then 1 else 0 in
+      try Progress.Reporter.report overall_h (delta, !msg)
+      with Sys_error _ | Failure _ -> ()
 
   let with_bar_tty ~sw ~clock ~total f =
     let stopped = ref false in

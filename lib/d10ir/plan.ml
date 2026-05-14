@@ -367,9 +367,7 @@ let merge_combine ~first plans =
     {
       oi_version = first.metadata.oi_version;
       generated_at =
-        List.fold_left
-          (fun acc p -> max acc p.metadata.generated_at)
-          0. plans;
+        List.fold_left (fun acc p -> max acc p.metadata.generated_at) 0. plans;
       cli_invocation =
         List.concat_map (fun p -> p.metadata.cli_invocation) plans;
     }
@@ -472,7 +470,8 @@ let cycles_in (nodes : node list) : Layer_hash.t list list =
     end
   in
   List.iter
-    (fun n -> if not (Hashtbl.mem state.index n.layer_hash) then strongconnect n)
+    (fun n ->
+      if not (Hashtbl.mem state.index n.layer_hash) then strongconnect n)
     nodes;
   List.rev !(state.sccs)
 

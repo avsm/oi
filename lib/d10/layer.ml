@@ -278,8 +278,7 @@ let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir ~layer_dir
 let fetch_layer_sidecar (c : Config.t) ~session ~remote ~hash =
   let url =
     match remote with
-    | `Http_remote base_url ->
-        Fmt.str "%s/%s/%s.json" base_url c.os_key hash
+    | `Http_remote base_url -> Fmt.str "%s/%s/%s.json" base_url c.os_key hash
   in
   let os_layer_dir = Eio.Path.(c.root / "layers" / c.os_key) in
   let dst = Eio.Path.(os_layer_dir / (hash ^ ".json")) in
@@ -287,7 +286,7 @@ let fetch_layer_sidecar (c : Config.t) ~session ~remote ~hash =
   if Sysops.file_exists dst then ()
   else if Sysops.Http.fetch_session session ~url ~dst:tmp then
     try Eio.Path.rename tmp dst
-    with Eio.Exn.Io _ -> (try Eio.Path.unlink tmp with Eio.Exn.Io _ -> ())
+    with Eio.Exn.Io _ -> ( try Eio.Path.unlink tmp with Eio.Exn.Io _ -> ())
   else try Eio.Path.unlink tmp with Eio.Exn.Io _ -> ()
 
 let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
@@ -314,13 +313,13 @@ let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     (try Eio.Path.rmtree ~missing_ok:true staging_dir with Eio.Exn.Io _ -> ());
     let phase p = match on_phase with Some f -> f p | None -> () in
     phase Fetching;
-    if Sysops.Http.fetch_session ?on_progress session ~url ~dst:tmp_file then
+    if Sysops.Http.fetch_session ?on_progress session ~url ~dst:tmp_file then (
       let ok =
         finalize_remote_layer c ~hash ~tmp_file ~staging_dir ~layer_dir ~sha256
           ~phase
       in
       if ok then fetch_layer_sidecar c ~session ~remote ~hash;
-      ok
+      ok)
     else begin
       (try Eio.Path.unlink tmp_file with Eio.Exn.Io _ -> ());
       false

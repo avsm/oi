@@ -69,8 +69,7 @@ let sorted_subdirs root =
   else
     Sys.readdir root |> Array.to_list
     |> List.filter (fun n ->
-        (not (String.starts_with ~prefix:"." n))
-        && Sys.is_directory (root / n))
+        (not (String.starts_with ~prefix:"." n)) && Sys.is_directory (root / n))
     |> List.sort String.compare
 
 let strip_pkg_prefix pkg pkg_ver_dir =
@@ -197,8 +196,8 @@ let fresh_clone ~reporter ~fs ~sys ~url ~path =
 let ensure_clone ?(reporter = Build_progress.null) ~fs ~sys ~refresh ~path ~url
     () =
   let dot_git = path / ".git" in
-  if Sys.file_exists dot_git then
-    (if refresh then refresh_existing_clone ~reporter ~sys path)
+  if Sys.file_exists dot_git then (
+    if refresh then refresh_existing_clone ~reporter ~sys path)
   else if
     Sys.file_exists path && Sys.is_directory path
     && Array.length (Sys.readdir path) > 0
@@ -432,8 +431,7 @@ let validate_toolchain_fields ~path ~url_bare ~toolchain_name
       path Keys.toolchain_name Keys.toolchain_compiler;
   if default_toolchain && toolchain_name = None then
     Error.fail_config_error
-      "%s: %s is only meaningful on toolchain definitions (entries with %s \
-       set)"
+      "%s: %s is only meaningful on toolchain definitions (entries with %s set)"
       path Keys.default_toolchain Keys.toolchain_name
 
 let build_entry ~path opam : entry =
@@ -534,8 +532,7 @@ let check_default_toolchains ~path entries =
         "reporepo at %s has %d toolchains marked as default (%s: true): %s. \
          Exactly one toolchain may be the default — clear the flag on the \
          others."
-        path (List.length many) Keys.default_toolchain
-        (String.concat ", " many)
+        path (List.length many) Keys.default_toolchain (String.concat ", " many)
 
 let load ~path =
   let packages_dir = meta_packages_dir ~path in
@@ -588,9 +585,7 @@ let default_toolchain entries =
   | e :: _ -> Some e
 
 let visit_dep ~by_handle ~visit (h, _v) =
-  match Hashtbl.find_opt by_handle h with
-  | Some dep -> visit dep
-  | None -> ()
+  match Hashtbl.find_opt by_handle h with Some dep -> visit dep | None -> ()
 
 let topo_sort entries =
   let by_handle = Hashtbl.create 16 in
@@ -699,8 +694,7 @@ let compute_effective_refresh ~refresh path =
   if refresh then true
   else
     let threshold = auto_refresh_after_s () in
-    if threshold <= 0. then false
-    else refresh_needed_by_age ~threshold path
+    if threshold <= 0. then false else refresh_needed_by_age ~threshold path
 
 let ensure_base ~fs ~sys ~data_dir:_ ?(refresh = false)
     ?(reporter = Build_progress.null) () =
@@ -768,7 +762,8 @@ let pick_default_branch_sha ~url refs =
       | None -> (
           match refs with
           | (sha, _) :: _ -> sha
-          | [] -> Error.fail_config_error "git ls-remote %s returned no refs" url))
+          | [] ->
+              Error.fail_config_error "git ls-remote %s returned no refs" url))
 
 let ls_remote_default_sha ~sys url =
   let head = try_ls_remote ~sys url [ "HEAD" ] in
@@ -919,7 +914,8 @@ let is_base_handle h = h = "default" || h = "relocatable"
 let default_base_handles = [ "relocatable"; "default" ]
 
 let base_dep_for entries ~handle h =
-  if h = handle then None
+  if h = handle then
+    None
     (* A handle never depends on itself. Filtering here keeps
        [base_handles_of_toolchain] callers safe even when the
        toolchain definition's own [depends:] lists the overlay
@@ -1078,9 +1074,7 @@ let process_main_url ~fs ~sys ~package opam =
     end
 
 let resolve_pin_dep ~fs ~sys ~package (pkg, url) =
-  let where =
-    Fmt.str "%s pin-depends %s" package (OpamPackage.to_string pkg)
-  in
+  let where = Fmt.str "%s pin-depends %s" package (OpamPackage.to_string pkg) in
   match try_resolve_url ~fs ~sys ~where url ~has_checksum:false with
   | `Keep -> ((pkg, url), 0)
   | `Replace_url u' -> ((pkg, u'), 1)

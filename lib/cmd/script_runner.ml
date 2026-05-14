@@ -1,5 +1,4 @@
 let ( / ) = Filename.concat
-
 let ocaml_name = OpamPackage.Name.of_string "ocaml"
 
 (* Drop the [ocaml] dependency: it's provided by the toolchain prefix
@@ -54,7 +53,9 @@ let build_extra_deps_prefix ~sys ~fs ~proc_mgr ~clock ~os_key ~conf ~cache
         layer_remote = None;
         source_remote;
         jobs = None;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   Oi.Pipeline.assemble_prefix ~sys ~fs ~clock ~cache ~os_key
@@ -87,7 +88,8 @@ let compile_and_exec ~fs ~proc_mgr ~cache ~prefix ~script_path ~all_deps
   Oi.Project.Script.generate_project ~script:script_path ~deps:all_deps
     ~dir:build_dir;
   let build_env =
-    Oi.Solver.Env.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache) ()
+    Oi.Solver.Env.make_env ~prefix ~dune_cache_root:(Oi.Cache.dune_root cache)
+      ()
   in
   Eio.Process.run proc_mgr ~env:build_env
     [ "/bin/sh"; "-c"; Fmt.str "cd %s && dune build main.exe 2>&1" build_dir ];

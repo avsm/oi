@@ -12,8 +12,7 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 (* Multi-directory Dir_context for opam-0install with first-wins lookup
    across multiple [packages_dirs]. Private to this module. *)
 module Dir_context = struct
-  type rejection =
-    | User_constraint of OpamFormula.atom
+  type rejection = User_constraint of OpamFormula.atom
 
   let with_dir path fn =
     let ch = Unix.opendir path in
@@ -99,7 +98,8 @@ module Dir_context = struct
 
   let version_of_dir t ~name dir =
     match OpamPackage.of_string_opt dir with
-    | Some pkg when version_dir_exists t ~name dir -> Some (OpamPackage.version pkg)
+    | Some pkg when version_dir_exists t ~name dir ->
+        Some (OpamPackage.version pkg)
     | _ -> None
 
   let load_candidate t name v =
@@ -473,7 +473,10 @@ module Ctx = struct
     let st =
       match toolchain with
       | None | Some { relocatable = true; _ } -> st
-      | Some tc -> OpamPackage.Set.fold (fun p s -> install_toolchain_pkg s p) tc.packages st
+      | Some tc ->
+          OpamPackage.Set.fold
+            (fun p s -> install_toolchain_pkg s p)
+            tc.packages st
     in
     { st; conf; prefix; toolchain }
 
@@ -957,8 +960,7 @@ let direct_deps_env ~conf pkg v =
     match OpamVariable.Full.to_string v with
     | "version" ->
         Some
-          (OpamTypes.S
-             (OpamPackage.Version.to_string (OpamPackage.version pkg)))
+          (OpamTypes.S (OpamPackage.Version.to_string (OpamPackage.version pkg)))
     | x -> std_env conf x
 
 let names_in_solution ~in_solution atoms =

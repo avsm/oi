@@ -268,7 +268,8 @@ let output_term =
         ~doc:
           "Output path. Default file: $(b,Dockerfile.oi-{build,test}.<distro>) \
            in cwd. With $(b,--all): directory for the project (default: cwd). \
-           With target args: $(b,Dockerfile.oi-<slug>.<distro>) (or directory)."
+           With target args: $(b,Dockerfile.oi-<slug>.<distro>) (or \
+           directory)."
         [ "o"; "output" ])
 
 let targets_term =
@@ -413,8 +414,8 @@ let run_with ~c ~args =
     Harness.bootstrap ~sw ~data_dir:c.Terms.data_dir ~format:c.Terms.format env
       c.Terms.cache_dir
   in
-  validate_flags ~test_mode:args.test_mode ~all:args.all
-    ~obuilder:args.obuilder ~no_recipe:args.no_recipe ~targets:args.targets;
+  validate_flags ~test_mode:args.test_mode ~all:args.all ~obuilder:args.obuilder
+    ~no_recipe:args.no_recipe ~targets:args.targets;
   let cwd_s, _ = Workspace.resolved_cwd harness.fs in
   dispatch_emit ~harness ~data_dir:c.Terms.data_dir ~cwd_s ~args
 
@@ -454,8 +455,9 @@ let cmd =
   in
   Cmd.v cmd_info
     Term.(
-      const run $ Terms.common $ Terms.refresh $ Terms.registry $ oi_version_term
-      $ no_recipe_term $ no_cache_mount_term $ obuilder_term $ test_mode_term
-      $ all_term $ distro_term $ src_context_term $ s3_bucket_term
-      $ s3_host_base_term $ s3_host_bucket_term $ s3_bucket_location_term
-      $ s3_enable_multipart_term $ output_term $ targets_term)
+      const run $ Terms.common $ Terms.refresh $ Terms.registry
+      $ oi_version_term $ no_recipe_term $ no_cache_mount_term $ obuilder_term
+      $ test_mode_term $ all_term $ distro_term $ src_context_term
+      $ s3_bucket_term $ s3_host_base_term $ s3_host_bucket_term
+      $ s3_bucket_location_term $ s3_enable_multipart_term $ output_term
+      $ targets_term)

@@ -310,8 +310,7 @@ let project_summary_of ~fs cwd_s (p : Oi.Project.t) =
       (fun (pin : Oi.Project.pin) ->
         {
           name = OpamPackage.Name.to_string (OpamPackage.name pin.pkg);
-          version =
-            OpamPackage.Version.to_string (OpamPackage.version pin.pkg);
+          version = OpamPackage.Version.to_string (OpamPackage.version pin.pkg);
           url = OpamUrl.to_string pin.url;
         })
       p.pins
@@ -327,8 +326,13 @@ let project_summary_of ~fs cwd_s (p : Oi.Project.t) =
         })
       (Oi.Project.Tool.probe ~fs cwd_s)
   in
-  { extra_repos; pins; overlays = p.overlays;
-    packages_dir = p.packages_dir; dev_tools }
+  {
+    extra_repos;
+    pins;
+    overlays = p.overlays;
+    packages_dir = p.packages_dir;
+    dev_tools;
+  }
 
 let gather_project ~fs ~skip_local =
   if skip_local then None

@@ -269,8 +269,8 @@ module Ls = struct
       if had_overlays then Fmt.pr "@.";
       Fmt.pr "%a@." Oi.Style.pp_header_string "TOOLCHAINS";
       Fmt.pr "%a@.@." pp_subtitle
-        "Compiler bundles. Select with --toolchain=NAME; the DEFAULT entry \
-         is used otherwise.";
+        "Compiler bundles. Select with --toolchain=NAME; the DEFAULT entry is \
+         used otherwise.";
       render_toolchain_table (List.map toolchain_row toolchains)
     end
 
@@ -470,8 +470,7 @@ module Add = struct
         Fmt.pr "Depends:@.";
         List.iter print_dep e.depends
       end;
-      if e.url <> "" then
-        print_materialise_summary ~fs ~sys ~path:reporepo e;
+      if e.url <> "" then print_materialise_summary ~fs ~sys ~path:reporepo e;
       auto_commit ~sys ~reporepo ~op:(Fmt.str "add %s" handle)
     in
     let handle =
@@ -653,7 +652,8 @@ module Bump = struct
      the inputs, so the re-bake produces the same sha. *)
   let sidecar_present ~(d10 : D10.Config.t) ~sha =
     let archives_dir =
-      Filename.concat (Eio.Path.native_exn d10.root)
+      Filename.concat
+        (Eio.Path.native_exn d10.root)
         (Filename.concat "d10ir" "archives")
     in
     Sys.file_exists (Filename.concat archives_dir (sha ^ ".json"))
@@ -665,8 +665,8 @@ module Bump = struct
     iter_handle_opams ~reporepo ~handle
       (fun ~pkg ~version ~pkg_dir ~opam_path ->
         match read_source_identity_and_sha opam_path with
-        | Some (_, Some sha) when sidecar_present ~d10 ~sha -> ()
-            (* already has x-d10-archive AND a sidecar — nothing to do *)
+        | Some (_, Some sha) when sidecar_present ~d10 ~sha ->
+            () (* already has x-d10-archive AND a sidecar — nothing to do *)
         | _ -> (
             try
               let built =
@@ -862,8 +862,8 @@ module Bump = struct
       else snapshot_handle ~reporepo:ctx.reporepo ~handle
     in
     let entry =
-      bump_one ~fs:ctx.fs ~sys:ctx.sys ~reporepo:ctx.reporepo ~handle ~url
-        ~ref_ ~toolchain ~depends ~default
+      bump_one ~fs:ctx.fs ~sys:ctx.sys ~reporepo:ctx.reporepo ~handle ~url ~ref_
+        ~toolchain ~depends ~default
     in
     if entry.url <> "" then begin
       restore_or_discard_shas ctx ~handle ~snap;
@@ -1109,12 +1109,12 @@ module Bake = struct
 
   (* Bake every missing archive for a handle, strip files dirs, then
      publish the resulting shas as hardlinks into [to_dir]. *)
-  let bake_one ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~reporepo
-      ~to_dir handle =
+  let bake_one ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~reporepo ~to_dir
+      handle =
     let missing = Bump.count_packages_missing_archive ~reporepo ~handle in
     if missing = 0 then
-      Fmt.pr "@.%a %s: every package already baked@." Oi.Style.pp_ok_string
-        "✓" handle
+      Fmt.pr "@.%a %s: every package already baked@." Oi.Style.pp_ok_string "✓"
+        handle
     else begin
       Fmt.pr "@.%a %s: baking %d missing archive(s)...@."
         Oi.Style.pp_info_string "▸" handle missing;
@@ -1140,8 +1140,8 @@ module Bake = struct
       Oi.Style.pp_ok_string "✓" total to_dir linked present;
     if missing > 0 then
       Fmt.pr
-        "  %a %d archive(s) referenced by %s opams but not in local cache; \
-         run [oi repo bump %s] to bake them@."
+        "  %a %d archive(s) referenced by %s opams but not in local cache; run \
+         [oi repo bump %s] to bake them@."
         Oi.Style.pp_warn_string "!" missing handle handle
 
   let bake_all_handles ~reporepo ~bake_handle =
@@ -1429,8 +1429,8 @@ module Push = struct
         Fmt.pr "  push:   %a (nothing to push)@." Oi.Style.pp_dim_string
           "skipped"
     | Oi.Source.Reporepo.Step_push { commits } ->
-        Fmt.pr "  push:   %a (%d local commit(s) sent)@."
-          Oi.Style.pp_ok_string "ok" commits
+        Fmt.pr "  push:   %a (%d local commit(s) sent)@." Oi.Style.pp_ok_string
+          "ok" commits
 
   let cmd =
     let run () reporepo reporepo_url push_url =
@@ -1538,9 +1538,7 @@ module Lint = struct
   type acc = { mutable items : problem list }
 
   let add_problem acc ~where ~paths fmt =
-    Fmt.kstr
-      (fun msg -> acc.items <- { where; paths; msg } :: acc.items)
-      fmt
+    Fmt.kstr (fun msg -> acc.items <- { where; paths; msg } :: acc.items) fmt
 
   (* Basic shape checks: empty handle/version, url/commit consistency. *)
   let check_entry_shape ~acc ~where (e : Oi.Source.Reporepo.entry) =
@@ -1577,8 +1575,7 @@ module Lint = struct
         if e.toolchain_roots = [] then
           here "toolchain %S has empty [%s]" name Oi.Keys.toolchain_roots;
         if e.toolchain_compiler = None then
-          here
-            "toolchain %S missing [%s] (e.g. \"ocaml-base-compiler.5.4.1\")"
+          here "toolchain %S missing [%s] (e.g. \"ocaml-base-compiler.5.4.1\")"
             name Oi.Keys.toolchain_compiler
 
   let check_toolchain_ref ~acc ~where ~toolchain_names ~known_toolchain
@@ -1614,8 +1611,7 @@ module Lint = struct
     let here fmt = add_problem acc ~where ~paths:[ e.opam_path ] fmt in
     match Hashtbl.find_opt latest h with
     | None ->
-        here
-          "depends on unknown handle %S (no entry for it in this reporepo)" h
+        here "depends on unknown handle %S (no entry for it in this reporepo)" h
     | Some (latest_dep : Oi.Source.Reporepo.entry)
       when version_compare pinned latest_dep.version < 0 -> (
         match latest_dep.toolchain_name with
@@ -1661,8 +1657,8 @@ module Lint = struct
           (String.concat ", " toolchain_names)
     in
     add_problem acc ~where:"(reporepo)" ~paths:[]
-      "no entry has [%s: true] — %s. Without a default, [oi run] / [oi sync] \
-       / etc. hard-error when the user omits [--toolchain]."
+      "no entry has [%s: true] — %s. Without a default, [oi run] / [oi sync] / \
+       etc. hard-error when the user omits [--toolchain]."
       Oi.Keys.default_toolchain hint
 
   let report_many_defaults ~acc many =
@@ -1676,10 +1672,11 @@ module Lint = struct
       List.map (fun (e : Oi.Source.Reporepo.entry) -> e.opam_path) many
     in
     add_problem acc ~where:"(reporepo)" ~paths
-      "multiple handles flagged [%s: true]: %s — only one toolchain handle \
-       may be the default. Clear the flag on the losing handle with 'oi repo \
-       bump <handle> --no-default'."
-      Oi.Keys.default_toolchain (String.concat ", " labels)
+      "multiple handles flagged [%s: true]: %s — only one toolchain handle may \
+       be the default. Clear the flag on the losing handle with 'oi repo bump \
+       <handle> --no-default'."
+      Oi.Keys.default_toolchain
+      (String.concat ", " labels)
 
   let report_stale_default ~acc ~latest (e : Oi.Source.Reporepo.entry) =
     let where = Fmt.str "%s.%s" e.handle e.version in

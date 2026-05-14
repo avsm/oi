@@ -31,7 +31,9 @@ let load_manifest ~fs ~output_dir ~os_key =
 let load_audit_events ~fs:_ ~output_dir ~os_key =
   (* Replaces the legacy [<output_dir>/<os_key>/audit.jsonl] read with a
      walk over the new per-invocation build manifests. *)
-  let builds_root = Filename.concat (Filename.concat output_dir os_key) "builds" in
+  let builds_root =
+    Filename.concat (Filename.concat output_dir os_key) "builds"
+  in
   Manifest_build.read_all_at ~root:builds_root
   |> List.concat_map (fun (m : Manifest_build.t) -> m.events)
   |> List.sort (fun (a : Audit.event) b -> String.compare a.event_id b.event_id)

@@ -172,7 +172,9 @@ let project_solve ~fs ~sys ~cache ~data_dir ~refresh ~platform ~with_repos
   in
   let packages_dirs =
     collect_packages_dirs ~fs ~sys ~cache ~data_dir ~refresh ~toolchain
-      ~all_extras ~pins:(project.pins @ url_project.pins) ~local_packages_dir
+      ~all_extras
+      ~pins:(project.pins @ url_project.pins)
+      ~local_packages_dir
   in
   let cache_root = Oi.Cache.root_s cache in
   let build_prefix = cache_root / "build" / "prefix" in
@@ -258,7 +260,7 @@ let render_dist_tree ~cwd ~dir =
 let publish_artifacts ~action ~cwd ~os_key ~dist =
   match action with
   | `Test | `Deps_only -> ()
-  | `Build ->
+  | `Build -> (
       (match collect_dist ~cwd ~os_key with
       | [] -> ()
       | mapping ->
@@ -267,9 +269,7 @@ let publish_artifacts ~action ~cwd ~os_key ~dist =
             (fun (name, dst) ->
               Fmt.pr "  %s %a %s@." name Oi.Style.pp_dim_string "→" dst)
             mapping);
-      match dist with
-      | None -> ()
-      | Some dir -> render_dist_tree ~cwd ~dir
+      match dist with None -> () | Some dir -> render_dist_tree ~cwd ~dir)
 
 (* Dry-run path: print the would-be command and the topo order, exit 0. *)
 let print_dry_run ~action ~cwd ~order =
@@ -289,7 +289,9 @@ let run_dune_target ~action ~target ~label ~proc_mgr ~env ~opams ~order ~cwd
     ~os_key ~dist =
   Fmt.pr "@.%a %d package(s): %s@." Oi.Style.pp_header_string (label ^ "ing")
     (List.length opams) (String.concat ", " order);
-  let ec = Subprocess.run proc_mgr ~env [ "dune"; target; "--profile=release" ] in
+  let ec =
+    Subprocess.run proc_mgr ~env [ "dune"; target; "--profile=release" ]
+  in
   if ec <> 0 then begin
     Fmt.epr "%a (dune %s exit %d)@." Oi.Style.pp_error_string
       (label ^ " failed") target ec;

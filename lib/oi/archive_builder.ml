@@ -294,8 +294,8 @@ let write_source_manifest_for_plan ~proc_mgr ~fs ~d10 (p : Plan.package_plan)
   let m =
     Source_manifest.make ~proc_mgr ~build_dir:p.build_dir ~name ~version
       ?overlay_handle ?overlay_version ~sha256:sha ~size ~strip_components:0
-      ~source:p.source ~extra_sources:p.extra_sources
-      ~extra_files:p.extra_files ~patches:p.patches ~substs:p.substs ()
+      ~source:p.source ~extra_sources:p.extra_sources ~extra_files:p.extra_files
+      ~patches:p.patches ~substs:p.substs ()
   in
   Source_manifest.write ~fs ~archives_dir:(archives_dir ~d10) m
 

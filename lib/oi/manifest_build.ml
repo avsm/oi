@@ -105,7 +105,7 @@ let reporepo_codec =
   |> Object.opt_mem "url" string ~enc:(fun (r : reporepo) -> r.url)
   |> Object.opt_mem "commit" string ~enc:(fun (r : reporepo) -> r.commit)
   |> Object.opt_mem "snapshot_key" string ~enc:(fun (r : reporepo) ->
-         r.snapshot_key)
+      r.snapshot_key)
   |> Object.finish
 
 let overlay_pin_codec =
@@ -138,8 +138,8 @@ let solve_codec =
       { solve_key; schema; from_cache; resolved })
   |> Object.opt_mem "solve_key" string ~enc:(fun (s : solve) -> s.solve_key)
   |> Object.opt_mem "schema" string ~enc:(fun (s : solve) -> s.schema)
-  |> Object.mem "from_cache" bool ~dec_absent:false
-       ~enc:(fun (s : solve) -> s.from_cache)
+  |> Object.mem "from_cache" bool ~dec_absent:false ~enc:(fun (s : solve) ->
+      s.from_cache)
   |> Object.mem "resolved" (list dep_codec) ~dec_absent:[]
        ~enc:(fun (s : solve) -> s.resolved)
        ~enc_omit:(( = ) [])
@@ -147,13 +147,14 @@ let solve_codec =
 
 let summary_codec =
   let open Jsont in
-  Object.map ~kind:"summary"
-    (fun ok fail timeout skipped cached exit ->
+  Object.map ~kind:"summary" (fun ok fail timeout skipped cached exit ->
       { ok; fail; timeout; skipped; cached; exit })
   |> Object.mem "ok" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.ok)
   |> Object.mem "fail" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.fail)
-  |> Object.mem "timeout" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.timeout)
-  |> Object.mem "skipped" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.skipped)
+  |> Object.mem "timeout" int ~dec_absent:0 ~enc:(fun (s : summary) ->
+      s.timeout)
+  |> Object.mem "skipped" int ~dec_absent:0 ~enc:(fun (s : summary) ->
+      s.skipped)
   |> Object.mem "cached" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.cached)
   |> Object.mem "exit" int ~dec_absent:0 ~enc:(fun (s : summary) -> s.exit)
   |> Object.finish
@@ -239,9 +240,7 @@ let unix_of_invocation_id_first_event events =
 
 let write ~fs ~cache_root m =
   let ts =
-    match m.events with
-    | [] -> Unix.gettimeofday ()
-    | first :: _ -> first.ts
+    match m.events with [] -> Unix.gettimeofday () | first :: _ -> first.ts
   in
   let dir = builds_dir ~cache_root ~os_key:m.os_key ts in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / dir);
@@ -249,8 +248,7 @@ let write ~fs ~cache_root m =
     path_for ~cache_root ~os_key:m.os_key ~ts ~invocation_id:m.invocation_id
   in
   match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec m with
-  | Error e ->
-      Log.warn (fun mlog -> mlog "build manifest encode %s: %s" dst e)
+  | Error e -> Log.warn (fun mlog -> mlog "build manifest encode %s: %s" dst e)
   | Ok s -> (
       let tmp = dst ^ ".tmp" in
       try
@@ -287,15 +285,13 @@ let read_all_at ~root : t list =
     in
     let read_one dir entry =
       let path = dir / entry in
-      if Filename.check_suffix entry ".json" then try_read ~path
-      else None
+      if Filename.check_suffix entry ".json" then try_read ~path else None
     in
     collect root
     |> List.concat_map (fun y ->
-           collect (root / y)
-           |> List.concat_map (fun m ->
-                  collect (root / y / m)
-                  |> List.filter_map (read_one (root / y / m))))
+        collect (root / y)
+        |> List.concat_map (fun m ->
+            collect (root / y / m) |> List.filter_map (read_one (root / y / m))))
 
 let read_all_for_os ~cache_root ~os_key : t list =
   read_all_at ~root:(cache_root / "layers" / os_key / "builds")
@@ -303,16 +299,14 @@ let read_all_for_os ~cache_root ~os_key : t list =
 (* -- Construction ------------------------------------------------------- *)
 
 let make ~invocation_id ~os_key ~started_at ?finished_at ?reporepo
-    ?(overlays = []) ~context ?(targets = []) ?solve ~(events : Audit.event list)
-    ?(crashed = false) ?(exit_code = 0) () =
+    ?(overlays = []) ~context ?(targets = []) ?solve
+    ~(events : Audit.event list) ?(crashed = false) ?(exit_code = 0) () =
   let summary =
     let base = summary_of_events events in
     { base with exit = exit_code }
   in
   let duration_s =
-    match finished_at with
-    | Some f -> f -. started_at
-    | None -> 0.0
+    match finished_at with Some f -> f -. started_at | None -> 0.0
   in
   {
     schema = 1;

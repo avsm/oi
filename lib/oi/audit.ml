@@ -230,14 +230,14 @@ let reap_orphan_staging_files ~cache_root ~current =
   if Sys.file_exists dir then
     collect_dir dir
     |> List.iter (fun name ->
-           if Filename.check_suffix name ".events.jsonl" then
-             let inv = Filename.chop_suffix name ".events.jsonl" in
-             if inv <> current then
-               let path = dir / name in
-               match try Some (Unix.stat path).Unix.st_mtime with _ -> None with
-               | Some mtime when now -. mtime > one_hour ->
-                   (try Sys.remove path with Sys_error _ -> ())
-               | _ -> ())
+        if Filename.check_suffix name ".events.jsonl" then
+          let inv = Filename.chop_suffix name ".events.jsonl" in
+          if inv <> current then
+            let path = dir / name in
+            match try Some (Unix.stat path).Unix.st_mtime with _ -> None with
+            | Some mtime when now -. mtime > one_hour -> (
+                try Sys.remove path with Sys_error _ -> ())
+            | _ -> ())
 
 let reaper_done = ref false
 
@@ -300,7 +300,9 @@ let read_one_build ~os_key path =
         |> Object.mem "os_key" string ~enc:(fun (_, k) -> k)
         |> Object.finish
       in
-      match Jsont_bytesrw.decode_string ~locs:false ~file:path events_only s with
+      match
+        Jsont_bytesrw.decode_string ~locs:false ~file:path events_only s
+      with
       | Ok (events, k) when k = os_key -> events
       | Ok _ -> []
       | Error msg ->
@@ -318,13 +320,12 @@ let read_all ~(fs : _ Eio.Path.t) ~cache_root ~os_key =
   else
     collect_dir root
     |> List.concat_map (fun y ->
-           let yd = root / y in
-           collect_dir yd
-           |> List.concat_map (fun m ->
-                  let md = yd / m in
-                  collect_dir md
-                  |> List.concat_map (fun e ->
-                         read_one_build ~os_key (md / e))))
+        let yd = root / y in
+        collect_dir yd
+        |> List.concat_map (fun m ->
+            let md = yd / m in
+            collect_dir md
+            |> List.concat_map (fun e -> read_one_build ~os_key (md / e))))
     |> List.sort (fun a b -> String.compare a.event_id b.event_id)
 
 (* Read all events written during this invocation (i.e. that still live
@@ -354,7 +355,6 @@ let staged_invocation_ids ~cache_root =
   else
     collect_dir dir
     |> List.filter_map (fun name ->
-           if Filename.check_suffix name ".events.jsonl" then
-             Some (Filename.chop_suffix name ".events.jsonl")
-           else None)
-
+        if Filename.check_suffix name ".events.jsonl" then
+          Some (Filename.chop_suffix name ".events.jsonl")
+        else None)

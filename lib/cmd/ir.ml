@@ -218,8 +218,7 @@ let emit_target_term =
     required
     & pos 0 (some string) None
     & info ~docv:"TARGET"
-        ~doc:"Build target: package name, $(b,@HANDLE/PKG), or $(b,@HANDLE)"
-        [])
+        ~doc:"Build target: package name, $(b,@HANDLE/PKG), or $(b,@HANDLE)" [])
 
 let emit_out_dir_term =
   Arg.(
@@ -247,8 +246,17 @@ let emit_cmd =
   let term =
     Term.(
       const
-        (fun c refresh registry use_registry with_repos with_deps
-             toolchain_override target out ->
+        (fun
+          c
+          refresh
+          registry
+          use_registry
+          with_repos
+          with_deps
+          toolchain_override
+          target
+          out
+        ->
           let code =
             emit_run c refresh registry use_registry with_repos with_deps
               toolchain_override out target

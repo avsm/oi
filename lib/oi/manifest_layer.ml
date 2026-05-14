@@ -140,15 +140,13 @@ let dep_codec =
 
 let findlib_entry_codec =
   let open Jsont in
-  Object.map ~kind:"findlib_entry"
-    (fun package_dir findlib_pkg archive ->
+  Object.map ~kind:"findlib_entry" (fun package_dir findlib_pkg archive ->
       { package_dir; findlib_pkg; archive })
   |> Object.mem "package_dir" string ~enc:(fun (f : findlib_entry) ->
-         f.package_dir)
+      f.package_dir)
   |> Object.mem "findlib_pkg" string ~enc:(fun (f : findlib_entry) ->
-         f.findlib_pkg)
-  |> Object.opt_mem "archive" string ~enc:(fun (f : findlib_entry) ->
-         f.archive)
+      f.findlib_pkg)
+  |> Object.opt_mem "archive" string ~enc:(fun (f : findlib_entry) -> f.archive)
   |> Object.finish
 
 let subst_pair_codec =
@@ -192,16 +190,14 @@ let log_tail_codec =
 
 let failure_codec =
   let open Jsont in
-  Object.map ~kind:"failure"
-    (fun phase exit_status duration_s log ->
+  Object.map ~kind:"failure" (fun phase exit_status duration_s log ->
       { phase; exit_status; duration_s; log })
   |> Object.mem "phase" string ~enc:(fun (f : failure_info) -> f.phase)
   |> Object.opt_mem "exit_status" int ~enc:(fun (f : failure_info) ->
-         f.exit_status)
+      f.exit_status)
   |> Object.mem "duration_s" number ~enc:(fun (f : failure_info) ->
-         f.duration_s)
-  |> Object.opt_mem "log" log_tail_codec ~enc:(fun (f : failure_info) ->
-         f.log)
+      f.duration_s)
+  |> Object.opt_mem "log" log_tail_codec ~enc:(fun (f : failure_info) -> f.log)
   |> Object.finish
 
 let codec : t Jsont.t =
@@ -289,7 +285,7 @@ let codec : t Jsont.t =
   |> Object.opt_mem "failure" failure_codec ~enc:(fun r -> r.failure)
   |> Object.opt_mem "invocation_id" string ~enc:(fun r -> r.invocation_id)
   |> Object.opt_mem "source_archive" source_archive_codec ~enc:(fun r ->
-         r.source_archive)
+      r.source_archive)
   |> Object.mem "deps" (list dep_codec) ~dec_absent:[]
        ~enc:(fun r -> r.deps)
        ~enc_omit:(( = ) [])
@@ -297,7 +293,7 @@ let codec : t Jsont.t =
        ~enc:(fun r -> r.depexts_declared)
        ~enc_omit:(( = ) [])
   |> Object.opt_mem "build_env_ocaml_version" string ~enc:(fun r ->
-         r.build_env_ocaml_version)
+      r.build_env_ocaml_version)
   |> Object.finish
 
 (* -- Filesystem extraction --------------------------------------------- *)
@@ -306,8 +302,7 @@ let codec : t Jsont.t =
    matters for an indexer: regular files, symlinks, and directories.
    Mirrors the classification rules of [D10.Index.scan_files] but emits
    richer metadata (kind/size/mode/target). *)
-let octal_mode_of stat =
-  Fmt.str "%04o" (stat.Unix.st_perm land 0o7777)
+let octal_mode_of stat = Fmt.str "%04o" (stat.Unix.st_perm land 0o7777)
 
 let rec scan_fs ~fs_dir ~rel_prefix acc =
   let abs = if rel_prefix = "" then fs_dir else fs_dir / rel_prefix in
@@ -320,9 +315,7 @@ let rec scan_fs ~fs_dir ~rel_prefix acc =
         acc entries
 
 and visit ~fs_dir ~rel_prefix ~name acc =
-  let rel =
-    if rel_prefix = "" then name else rel_prefix / name
-  in
+  let rel = if rel_prefix = "" then name else rel_prefix / name in
   let abs = fs_dir / rel in
   match try Some (Unix.lstat abs) with Unix.Unix_error _ -> None with
   | None -> acc
@@ -431,16 +424,14 @@ let registry_dir ~cache_root ~os_key = cache_root / "layers" / os_key
 let path_for ~cache_root ~os_key ~hash =
   registry_dir ~cache_root ~os_key / (hash ^ ".json")
 
-let same_digest a b =
-  Digest.string a = Digest.string b
+let same_digest a b = Digest.string a = Digest.string b
 
 let write ~fs ~cache_root m =
   let dir = registry_dir ~cache_root ~os_key:m.os_key in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / dir);
   let dst = path_for ~cache_root ~os_key:m.os_key ~hash:m.hash in
   match Jsont_bytesrw.encode_string ~format:Jsont.Indent codec m with
-  | Error e ->
-      Log.warn (fun mlog -> mlog "layer manifest encode %s: %s" dst e)
+  | Error e -> Log.warn (fun mlog -> mlog "layer manifest encode %s: %s" dst e)
   | Ok s -> (
       (* Dedup on identical content (esp. for the failure-retry case). *)
       let same =
@@ -461,9 +452,7 @@ let try_read ~path : t option =
   if not (Sys.file_exists path) then None
   else
     try
-      let s =
-        In_channel.with_open_text path In_channel.input_all
-      in
+      let s = In_channel.with_open_text path In_channel.input_all in
       match Jsont_bytesrw.decode_string ~locs:true ~file:path codec s with
       | Stdlib.Ok r -> Some r
       | Error e ->

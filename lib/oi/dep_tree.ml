@@ -8,8 +8,7 @@ let branch_string ~is_root ~is_last =
   if is_root then "" else if is_last then "└── " else "├── "
 
 let child_indent_string ~is_root ~is_last parent_indent =
-  if is_root then ""
-  else parent_indent ^ if is_last then "    " else "│   "
+  if is_root then "" else parent_indent ^ if is_last then "    " else "│   "
 
 let label_of ~label_first ~label_ref ~repeated n =
   if repeated then
@@ -41,7 +40,9 @@ let render ~label_first ~label_ref ~key_of ~children roots =
         Fmt.pr "%s%s%s@." parent_indent branch label;
         if not repeated then begin
           Hashtbl.add expanded key ();
-          let child_indent = child_indent_string ~is_root ~is_last parent_indent in
+          let child_indent =
+            child_indent_string ~is_root ~is_last parent_indent
+          in
           walk_children ~child_indent ~walk (children n)
         end
       in

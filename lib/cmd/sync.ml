@@ -59,7 +59,8 @@ let say_info_ctx (c : tools_ctx) fmt =
   if c.quiet then Fmt.kstr (fun s -> Log.info (fun m -> m "%s" s)) fmt
   else Fmt.kstr (fun s -> Oi.Say.info "%s" s) fmt
 
-let warn_named name fmt = Fmt.kstr (fun s -> Oi.Say.warn "tool %s: %s" name s) fmt
+let warn_named name fmt =
+  Fmt.kstr (fun s -> Oi.Say.warn "tool %s: %s" name s) fmt
 
 (* Solve and build one tool [tool_name], returning the dep-closure layer
    hashes. Surfaces per-tool [Build_pipeline.build] phases (build solver
@@ -109,7 +110,9 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
         layer_remote = c.layer_remote;
         source_remote = c.source_remote;
         jobs = c.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -129,7 +132,8 @@ let install_named (c : tools_ctx) ~tool_name ~constraints =
         None
     | Some h ->
         say_info_ctx c "tool %s: %d dep(s) built, leaf layer %s" tool_name
-          (List.length hashes - 1) (short_hash h);
+          (List.length hashes - 1)
+          (short_hash h);
         Some h
   with
   | Oi.Error.E e ->
@@ -163,8 +167,7 @@ let assemble_tools_prefix (c : tools_ctx) ~leaves =
       ~os_key:c.os_key
   in
   let unique = List.sort_uniq String.compare leaves in
-  D10.Prefix.assemble d10 ~layer_hashes:unique
-    ~dst:Eio.Path.(c.fs / tools_dir);
+  D10.Prefix.assemble d10 ~layer_hashes:unique ~dst:Eio.Path.(c.fs / tools_dir);
   say_step_ctx c "Tools assembled at %s (%d tool(s), %d leaf layer(s))"
     tools_dir (List.length leaves) (List.length unique);
   tools_dir
@@ -219,8 +222,7 @@ let install_tools ?(quiet = false) ?refresh ?jobs ~proc_mgr ~fs ~clock ~sys
       let from_toolchain =
         List.filter_map
           (fun n ->
-            install_named c ~tool_name:n
-              ~constraints:OpamPackage.Name.Map.empty)
+            install_named c ~tool_name:n ~constraints:OpamPackage.Name.Map.empty)
           toolchain_tools
       in
       let from_probes = List.filter_map (install_probed c) probed_hits in
@@ -285,8 +287,7 @@ let dir_has_direnv d = d <> "" && executable_exists (d / "direnv")
 let direnv_on_path () =
   match Sys.getenv_opt "PATH" with
   | None | Some "" -> false
-  | Some path ->
-      String.split_on_char ':' path |> List.exists dir_has_direnv
+  | Some path -> String.split_on_char ':' path |> List.exists dir_has_direnv
 
 let envrc_should_write = function
   | `Skip -> false
@@ -304,10 +305,10 @@ let say_info ~quiet fmt =
   else Fmt.kstr (fun s -> Oi.Say.info "%s" s) fmt
 
 let say_field_list ~quiet label items =
-  if quiet then begin
-    if items <> [] then
+  if quiet then
+    begin if items <> [] then
       Log.info (fun m -> m "%s: %s" label (String.concat ", " items))
-  end
+    end
   else Oi.Say.field_list label items
 
 (* Build the human-readable error summary for a sync that returned no
@@ -349,8 +350,8 @@ let check_sync_outcome ~solved ~build_result =
           (D10ir.Direct.string_of_phase f.phase)
           f.log_path
       in
-      Oi.Error.fail_config_error
-        "project sync had %d build failure(s):@\n  %s" r.failed
+      Oi.Error.fail_config_error "project sync had %d build failure(s):@\n  %s"
+        r.failed
         (String.concat "\n  " (List.map pp_fail r.failures))
   | Some _ -> ()
 
@@ -399,9 +400,8 @@ type run_inputs = {
 
 (* Build the solver-input [names] (deps from *.opam + extras from --with
    + URL-project roots, with toolchain compiler roots stripped). *)
-let build_root_names ~(project : Oi.Project.t)
-    ~(url_project : Oi.Project.Url.t) ~extra_cli ~toolchain_override
-    ~toolchain =
+let build_root_names ~(project : Oi.Project.t) ~(url_project : Oi.Project.Url.t)
+    ~extra_cli ~toolchain_override ~toolchain =
   let extra_names =
     List.filter_map
       (fun (d : Oi.Project.Script.dep) ->
@@ -411,8 +411,8 @@ let build_root_names ~(project : Oi.Project.t)
   in
   let url_names = List.map OpamPackage.Name.of_string url_project.roots in
   List.map OpamPackage.Name.of_string project.deps @ extra_names @ url_names
-  |> Oi.Pipeline.strip_compiler_roots_for_override
-       ~override:toolchain_override ~toolchain
+  |> Oi.Pipeline.strip_compiler_roots_for_override ~override:toolchain_override
+       ~toolchain
 
 (* Load *.opam metadata + classify [--with]-derived deps. Errors out
    when nothing buildable was found. *)
@@ -433,11 +433,10 @@ let load_project_and_deps (i : run_inputs) =
 
 (* Pick the toolchain, then derive the [with_repos] handle set that
    matches it and the merged extra-repo list. *)
-let resolve_overlays_and_toolchain (i : run_inputs)
-    ~(project : Oi.Project.t) ~(url_project : Oi.Project.Url.t) =
+let resolve_overlays_and_toolchain (i : run_inputs) ~(project : Oi.Project.t)
+    ~(url_project : Oi.Project.Url.t) =
   let conf =
-    Oi.Pipeline.conf ~platform:i.platform
-      ~ocaml_version:Workspace.ocaml_version
+    Oi.Pipeline.conf ~platform:i.platform ~ocaml_version:Workspace.ocaml_version
   in
   let candidate_overlays = project.overlays @ url_project.overlays in
   let tc_handles =
@@ -451,8 +450,8 @@ let resolve_overlays_and_toolchain (i : run_inputs)
   let conf, _ = Oi.Pipeline.solver_inputs toolchain conf in
   let project_overlays =
     Oi.Pipeline.filter_compatible_overlays
-      ~reporepo_path:(Terms.reporepo_path ()) ~override:i.toolchain
-      ~toolchain candidate_overlays
+      ~reporepo_path:(Terms.reporepo_path ()) ~override:i.toolchain ~toolchain
+      candidate_overlays
   in
   say_field_list ~quiet:i.quiet "overlays" project_overlays;
   let with_repos = project_overlays @ i.with_repos in
@@ -509,10 +508,7 @@ let prepare_state (i : run_inputs) : state =
       targets =
         [
           Group
-            {
-              tokens = List.map OpamPackage.Name.to_string names;
-              handles = [];
-            };
+            { tokens = List.map OpamPackage.Name.to_string names; handles = [] };
         ];
       (* The project's overlay handles (from [x-repos: ["@HANDLE"]] in
          every *.opam, plus any [--with-repo @HANDLE] CLI flag) must
@@ -563,7 +559,9 @@ let solve_and_build (i : run_inputs) (s : state) =
         layer_remote = s.layer_remote;
         source_remote = s.source_remote;
         jobs = i.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   check_sync_outcome ~solved ~build_result;
@@ -607,8 +605,7 @@ let run_with_inputs (i : run_inputs) =
       ~proc_mgr:i.proc_mgr ~fs:i.fs ~clock:i.clock ~sys:i.sys ~cache:i.cache
       ~data_dir:i.data_dir ~conf:s.conf ~os_key:i.os_key ~session:i.session
       ~extra_repos:s.all_extras ~pins:s.project.pins ?toolchain:s.toolchain
-      ?layer_remote:s.layer_remote ?source_remote:s.source_remote
-      ~cwd:i.cwd ()
+      ?layer_remote:s.layer_remote ?source_remote:s.source_remote ~cwd:i.cwd ()
   in
   if envrc_should_write i.envrc_mode then write_envrc i s ~prefix ~tools
   else

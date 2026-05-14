@@ -64,8 +64,8 @@ let cmd_info =
         `S Manpage.s_description;
         `P
           "Run $(b,CMD) with $(b,_oi/tools/bin) and $(b,_oi/prefix/bin) \
-           prepended to $(b,PATH), and OCaml environment variables pointing \
-           at $(b,_oi/prefix/).";
+           prepended to $(b,PATH), and OCaml environment variables pointing at \
+           $(b,_oi/prefix/).";
         `P
           "Syncs first when $(b,_oi/prefix/) is missing or older than any \
            $(b,*.opam). $(b,--with), $(b,--with-repo), $(b,--toolchain), and \
@@ -90,7 +90,8 @@ let cmd =
       with_deps jobs toolchain cmd args =
     Harness.run @@ fun ~sw env ->
     let harness =
-      Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
+      Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
+        c.cache_dir
     in
     let cwd, _ = Workspace.resolved_cwd harness.fs in
     let prefix = cwd / "_oi" / "prefix" in
@@ -107,7 +108,8 @@ let cmd =
     let tc_ctx = Option.map Oi.Toolchain.opam_ctx_of_info tc_info in
     let env_arr =
       Oi.Solver.Env.make_env ?toolchain:tc_ctx ~prefix ?tools
-        ~dune_cache_root:(Oi.Cache.dune_root harness.cache) ()
+        ~dune_cache_root:(Oi.Cache.dune_root harness.cache)
+        ()
     in
     exit (Subprocess.run harness.proc_mgr ~env:env_arr (cmd :: args))
   in

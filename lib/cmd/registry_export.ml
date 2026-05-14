@@ -72,8 +72,7 @@ let export_d10ir_archives = Oi.D10ir_archives.publish_all
 
 let merge_remote_into ~sys ~fs ~registry ~output ~os_key db =
   let scratch = output / os_key / ".remote-index.db" in
-  if
-    fetch_remote_to ~sys ~fs ~registry ~rel:(os_key / "index.db") ~dst:scratch
+  if fetch_remote_to ~sys ~fs ~registry ~rel:(os_key / "index.db") ~dst:scratch
   then begin
     (try D10.Index.merge_remote db ~remote_path:scratch
      with Failure msg ->
@@ -137,9 +136,7 @@ let copy_builds_subtree ~fs ~cache_root ~output ~os_key =
     Filename.concat cache_root
       (Filename.concat "layers" (Filename.concat os_key "builds"))
   in
-  let dst_root =
-    Filename.concat output (Filename.concat os_key "builds")
-  in
+  let dst_root = Filename.concat output (Filename.concat os_key "builds") in
   if not (Sys.file_exists src_root) then 0
   else
     let n = ref 0 in
@@ -165,9 +162,7 @@ let copy_builds_subtree ~fs ~cache_root ~output ~os_key =
    [<output>/<os_key>/*.json] — alongside each
    [<hash>.tar.zst] that [D10.Layer.export_all] writes. *)
 let copy_layer_manifests ~fs ~cache_root ~output ~os_key =
-  let src_root =
-    Filename.concat cache_root (Filename.concat "layers" os_key)
-  in
+  let src_root = Filename.concat cache_root (Filename.concat "layers" os_key) in
   let dst_root = Filename.concat output os_key in
   if not (Sys.file_exists src_root) then 0
   else
@@ -180,12 +175,9 @@ let copy_layer_manifests ~fs ~cache_root ~output ~os_key =
         (* Top-level [registry.json] is copied by its own helper; skip
            the [builds/] subdir + the hash-named layer dirs; pick up
            only [<hash>.json] sidecars. *)
-        if
-          Filename.check_suffix name ".json"
-          && name <> "registry.json"
-        then begin
+        if Filename.check_suffix name ".json" && name <> "registry.json" then begin
           let abs = src_root / name in
-          if (try (Unix.lstat abs).st_kind = Unix.S_REG with _ -> false) then begin
+          if try (Unix.lstat abs).st_kind = Unix.S_REG with _ -> false then begin
             copy_file ~fs ~src:abs ~dst:(dst_root / name);
             incr n
           end
@@ -223,8 +215,8 @@ let write_manifest_and_audit ~fs ~cache_root ~output ~os_key =
   end;
   let n_layers = copy_layer_manifests ~fs ~cache_root ~output ~os_key in
   if n_layers > 0 then
-    Oi.Say.field "layers.json" "%d layer manifest(s) at %s/<hash>.json"
-      n_layers (output / os_key);
+    Oi.Say.field "layers.json" "%d layer manifest(s) at %s/<hash>.json" n_layers
+      (output / os_key);
   let n_builds = copy_builds_subtree ~fs ~cache_root ~output ~os_key in
   if n_builds > 0 then
     Oi.Say.field "builds" "%d invocation manifest(s) at %s/builds/" n_builds

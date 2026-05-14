@@ -257,8 +257,8 @@ let resolve_update_targets () =
       (path, Filename.dirname path / "oix")
   | Fallback { current; install_dir } ->
       Oi.Say.warn
-        "%s is not writable; installing into %s/oi (and oi/oix) instead"
-        current install_dir;
+        "%s is not writable; installing into %s/oi (and oi/oix) instead" current
+        install_dir;
       (install_dir / "oi", install_dir / "oix")
 
 (* In release mode, walk the freshly-refreshed reporepo for oi releases
@@ -298,8 +298,7 @@ let root_names ~dev ~(url_project : Oi.Project.Url.t) ~toolchain =
     if dev then List.map OpamPackage.Name.of_string url_project.roots
     else [ OpamPackage.Name.of_string "oi" ]
   in
-  Oi.Pipeline.strip_compiler_roots_for_override ~override:None ~toolchain
-    names
+  Oi.Pipeline.strip_compiler_roots_for_override ~override:None ~toolchain names
 
 (* Everything the build_pipeline solve+build needs, computed up-front so
    the solve helper is straight-line. *)
@@ -325,7 +324,9 @@ let run_solve_build (b : build_inputs) =
         layer_remote = b.layer_remote;
         source_remote = b.source_remote;
         jobs = b.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -390,9 +391,7 @@ let resolve_update_ctx ~harness ~refresh ~dev ~pinned_update : update_ctx =
      [@avsm/oi] is where the release pin lives — see
      {!list_oi_versions} for the matching enumeration. *)
   let with_repos = if dev then url_overlays else [ "avsm" ] in
-  let cli_extras =
-    Target.cli_extra_repos ~fs ~sys ?toolchain:None with_repos
-  in
+  let cli_extras = Target.cli_extra_repos ~fs ~sys ?toolchain:None with_repos in
   let all_extras =
     Target.merge_extras ~cli:cli_extras ~project:url_project.extra_repos
   in
@@ -407,8 +406,19 @@ let resolve_update_ctx ~harness ~refresh ~dev ~pinned_update : update_ctx =
    together the toolchain pick, with-repo / overlay handling, pin
    metadata from [classify_with_args], and the [--dev] root expansion. *)
 let prepare_request ~harness ~refresh ~dev ~pinned_update =
-  let { Harness.proc_mgr; fs; clock; sys; os_key; cache; http_session;
-        data_dir; _ } = harness in
+  let {
+    Harness.proc_mgr;
+    fs;
+    clock;
+    sys;
+    os_key;
+    cache;
+    http_session;
+    data_dir;
+    _;
+  } =
+    harness
+  in
   let ctx = resolve_update_ctx ~harness ~refresh ~dev ~pinned_update in
   let names =
     root_names ~dev ~url_project:ctx.url_project ~toolchain:ctx.toolchain
@@ -421,10 +431,7 @@ let prepare_request ~harness ~refresh ~dev ~pinned_update =
       targets =
         [
           Group
-            {
-              tokens = List.map OpamPackage.Name.to_string names;
-              handles = [];
-            };
+            { tokens = List.map OpamPackage.Name.to_string names; handles = [] };
         ];
       (* The [@avsm] overlay (or [url_overlays] in dev mode) carries the
          [oi] pin, so the handle must reach [packages_dirs_for_group]
@@ -448,8 +455,7 @@ let prepare_request ~harness ~refresh ~dev ~pinned_update =
 let update_run (c : Terms.common) ~registry ~use_registry ~jobs ~dev =
   Harness.run @@ fun ~sw env ->
   let harness =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let { Harness.fs; sys; clock; cache; os_key; _ } = harness in
   (* Always refresh on self-update. A bare [oi self update] right after
@@ -507,8 +513,8 @@ let update_cmd =
   in
   Cmd.v info
     Term.(
-      const go $ Terms.common $ Terms.registry $ Terms.use_registry
-      $ Terms.jobs $ dev)
+      const go $ Terms.common $ Terms.registry $ Terms.use_registry $ Terms.jobs
+      $ dev)
 
 let cmd =
   let info =

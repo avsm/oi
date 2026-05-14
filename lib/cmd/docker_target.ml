@@ -88,8 +88,7 @@ let build_run_prefix ~no_cache_mount =
   if no_cache_mount then
     "RUN mkdir -p /cache/d10ir/archives /cache/layers && \\\n    "
   else
-    "RUN \
-     --mount=type=cache,target=/cache/d10ir/archives,id=oi-d10ir-archives \\\n\
+    "RUN --mount=type=cache,target=/cache/d10ir/archives,id=oi-d10ir-archives \\\n\
     \    --mount=type=cache,target=/cache/layers,id=oi-layers \\\n\
     \    "
 
@@ -101,8 +100,7 @@ let render_cache_doc ~no_cache_mount =
   else
     "#   RUN fetch-archives      -> ONE layer; busts only when the sha list \
      inside\n\
-     #                              the heredoc changes. Archive bytes live \
-     in a\n\
+     #                              the heredoc changes. Archive bytes live in a\n\
      #                              BuildKit cache mount, so unchanged shas \
      aren't\n\
      #                              re-downloaded.\n\
@@ -344,7 +342,8 @@ let solve_targets ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir ~session
    generated Dockerfile, exactly like {!solve_targets} does for the
    non-local path. *)
 (* Resolve toolchain + project overlays + extras for a local project. *)
-let resolve_local_project_inputs ~fs ~sys ~data_dir ~conf ~project ~url_project =
+let resolve_local_project_inputs ~fs ~sys ~data_dir ~conf ~project ~url_project
+    =
   let candidate_overlays =
     project.Oi.Project.overlays @ url_project.Oi.Project.Url.overlays
   in
@@ -503,8 +502,7 @@ ENV OI_REGISTRY=${OI_REGISTRY} OI_REPOREPO_URL=${OI_REPOREPO_URL}
 
 let no_recipe_cache_doc ~no_cache_mount =
   if no_cache_mount then
-    "#   oi build TARGET         -> writes /cache into the image layer (no \
-     cache\n\
+    "#   oi build TARGET         -> writes /cache into the image layer (no cache\n\
      #                              mount); rebuilds re-fetch and re-solve."
   else
     "#   oi build TARGET         -> one cached layer per target. The BuildKit \

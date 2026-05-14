@@ -180,8 +180,8 @@ let ensure_prefix_writable ~fs ~prefix =
    [_build/install/default/] tree into [--prefix]. The Project_build
    step is the heavy lift — sync deps into [_oi/], run dune; if it
    exits non-zero we propagate that immediately. *)
-let do_project ~harness ~refresh ~registry ~use_registry ~with_repos
-    ~with_deps ~jobs ~toolchain_override ~prefix ~bin_dir ~force ~cwd_s =
+let do_project ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
+    ~jobs ~toolchain_override ~prefix ~bin_dir ~force ~cwd_s =
   let {
     Harness.fs;
     proc_mgr;
@@ -197,10 +197,9 @@ let do_project ~harness ~refresh ~registry ~use_registry ~with_repos
     harness
   in
   let ec =
-    Project_build.run ~action:`Build ~fs ~proc_mgr ~clock ~sys ~platform
-      ~os_key ~cache ~data_dir ~registry ~use_registry ~session:http_session
-      ~refresh ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override
-      ~cwd:cwd_s ()
+    Project_build.run ~action:`Build ~fs ~proc_mgr ~clock ~sys ~platform ~os_key
+      ~cache ~data_dir ~registry ~use_registry ~session:http_session ~refresh
+      ~with_repos ~with_deps ?jobs ?toolchain:toolchain_override ~cwd:cwd_s ()
   in
   if ec <> 0 then exit ec;
   let install_root = cwd_s / "_build" / "install" / "default" in
@@ -233,14 +232,14 @@ let check_build_result = function
         r.skipped summary
   | Some (r : D10ir.Direct.result) ->
       Oi.Error.fail_config_error
-        "oi install: build failed (%d skipped). Re-run with \
-         --verbosity=debug for the per-node trace."
+        "oi install: build failed (%d skipped). Re-run with --verbosity=debug \
+         for the per-node trace."
         r.skipped
 
 (* Run the solve + build under the progress UI and return both results.
    Same idiom as the other [Pipeline_setup]-driven commands. *)
-let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs
-    ~clock ~target_label =
+let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs ~clock
+    ~target_label =
   Progress_ui.with_ui ~target:target_label
     ~clock:(clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
@@ -253,7 +252,9 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs
         layer_remote;
         source_remote;
         jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   (solved, result)
@@ -268,9 +269,8 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs
    (the CLI flag) still controls project_mode in [run]; here we force
    project skipping unconditionally because we already decided we're
    not in project mode. *)
-let do_targets ~harness ~refresh ~locked ~registry ~use_registry
-    ~with_repos ~with_deps ~jobs ~toolchain_override ~prefix ~bin_dir ~force
-    ~targets =
+let do_targets ~harness ~refresh ~locked ~registry ~use_registry ~with_repos
+    ~with_deps ~jobs ~toolchain_override ~prefix ~bin_dir ~force ~targets =
   let { Harness.clock; cache; os_key; _ } = harness in
   let {
     Pipeline_setup.env = pipeline_env;
@@ -279,15 +279,15 @@ let do_targets ~harness ~refresh ~locked ~registry ~use_registry
     source_remote;
     _;
   } =
-    Pipeline_setup.prepare ~harness ~refresh ~locked ~skip_local:true
-      ~registry ~use_registry ~with_repos ~with_deps ~toolchain_override
+    Pipeline_setup.prepare ~harness ~refresh ~locked ~skip_local:true ~registry
+      ~use_registry ~with_repos ~with_deps ~toolchain_override
       ~targets:(List.map parse_target targets)
       ()
   in
   let target_label = String.concat ", " targets in
   let solved, build_result =
-    solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs
-      ~clock ~target_label
+    solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs ~clock
+      ~target_label
   in
   let cache_root = Oi.Cache.root_s cache in
   if
@@ -301,8 +301,8 @@ let do_targets ~harness ~refresh ~locked ~registry ~use_registry
   let root_hashes = Oi.Build_pipeline.root_layer_hashes solved in
   if root_hashes = [] then
     Oi.Error.fail_config_error
-      "oi install: solve succeeded but no root packages matched the \
-       requested targets. Re-run with --refresh.";
+      "oi install: solve succeeded but no root packages matched the requested \
+       targets. Re-run with --refresh.";
   let roots =
     List.map (fun h -> cache_root / "layers" / os_key / h / "fs") root_hashes
   in
@@ -328,8 +328,7 @@ type cli = {
 let run (c : Terms.common) (cli : cli) =
   Harness.run @@ fun ~sw env ->
   let harness =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let { Harness.fs; _ } = harness in
   let prefix = expand_tilde cli.prefix in
@@ -362,8 +361,8 @@ let prefix_arg =
     & opt string (default_prefix ())
     & info ~docv:"DIR"
         ~doc:
-          "Install prefix; files land in $(i,DIR)/bin, /sbin, /share. \
-           Leading $(b,~) is expanded."
+          "Install prefix; files land in $(i,DIR)/bin, /sbin, /share. Leading \
+           $(b,~) is expanded."
         [ "prefix" ])
 
 let force_arg =
@@ -384,14 +383,14 @@ let man =
   [
     `S Manpage.s_description;
     `P
-      "Solve and build $(i,TARGET), then copy each root package's \
-       $(b,bin/), $(b,sbin/), and $(b,share/) into $(b,--prefix) (default \
+      "Solve and build $(i,TARGET), then copy each root package's $(b,bin/), \
+       $(b,sbin/), and $(b,share/) into $(b,--prefix) (default \
        $(b,\\$HOME/.local)).";
     `P
-      "With no $(i,TARGET) and a cwd containing $(b,*.opam) files, builds \
-       the cwd project via $(b,dune build) and promotes \
-       $(b,_build/install/default/) instead. $(b,--skip-local) forces \
-       target mode in a project directory.";
+      "With no $(i,TARGET) and a cwd containing $(b,*.opam) files, builds the \
+       cwd project via $(b,dune build) and promotes \
+       $(b,_build/install/default/) instead. $(b,--skip-local) forces target \
+       mode in a project directory.";
     `P
       "Refuses to clobber existing files; $(b,--force) overrides. Prints a \
        $(b,\\$PATH) hint when $(b,--prefix/bin) is missing from it.";
@@ -408,8 +407,8 @@ let cmd =
     Cmd.info "install"
       ~doc:"Build a target and copy its binaries into a user prefix" ~man
   in
-  let go c refresh locked skip_local registry use_registry with_repos
-      with_deps jobs toolchain_override prefix force targets =
+  let go c refresh locked skip_local registry use_registry with_repos with_deps
+      jobs toolchain_override prefix force targets =
     run c
       {
         refresh;

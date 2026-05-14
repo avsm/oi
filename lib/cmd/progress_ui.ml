@@ -124,9 +124,7 @@ let render_bar ~width (current : int) (total : int) =
         let f = current * inner / max 1 total in
         if f < 0 then 0 else if f > inner then inner else f
     in
-    let n_solid, n_dark, n_mid, n_empty =
-      bar_segment_counts ~inner ~filled
-    in
+    let n_solid, n_dark, n_mid, n_empty = bar_segment_counts ~inner ~filled in
     let buf = Buffer.create (bar_with_color_bytes ~inner) in
     Buffer.add_string buf "│";
     Buffer.add_string buf ansi_camel_full;
@@ -865,8 +863,7 @@ let drop_rows s ~get_reporter tbl =
   Hashtbl.iter
     (fun _ r ->
       let rep = get_reporter r in
-      (try Progress.Reporter.finalise rep
-       with Sys_error _ | Failure _ -> ());
+      (try Progress.Reporter.finalise rep with Sys_error _ | Failure _ -> ());
       try Progress.Display.remove_line s.display rep
       with Sys_error _ | Failure _ -> ())
     tbl;
@@ -1001,8 +998,7 @@ let on_fetch_finished s ~key =
   let contribution =
     if Int64.compare declared final_bytes > 0 then declared else final_bytes
   in
-  s.phase_bytes_done_base <-
-    Int64.add s.phase_bytes_done_base contribution;
+  s.phase_bytes_done_base <- Int64.add s.phase_bytes_done_base contribution;
   if Hashtbl.mem s.fetches key then s.running <- max 0 (s.running - 1);
   Hashtbl.remove s.fetches key;
   drop_fetch_row s ~key;
@@ -1067,8 +1063,7 @@ let handle_event s (e : Oi.Build_progress.event) =
       with_lock s (fun () -> on_fetch_progress s ~key ~bytes ~total)
   | Fetch_finished { key; _ } ->
       with_lock s (fun () -> on_fetch_finished s ~key)
-  | Solve_started { label } ->
-      with_lock s (fun () -> on_solve_started s ~label)
+  | Solve_started { label } -> with_lock s (fun () -> on_solve_started s ~label)
   | Solve_finished { label } ->
       with_lock s (fun () -> on_solve_finished s ~label)
   | Plan_ready plan -> with_lock s (fun () -> on_plan_ready s plan)
@@ -1199,8 +1194,7 @@ let cleanup_ui (s : state) =
   let display = s.display in
   with_lock s (fun () ->
       let drop_reporter rep =
-        (try Progress.Reporter.finalise rep
-         with Sys_error _ | Failure _ -> ());
+        (try Progress.Reporter.finalise rep with Sys_error _ | Failure _ -> ());
         try Progress.Display.remove_line display rep
         with Sys_error _ | Failure _ -> ()
       in
@@ -1215,8 +1209,7 @@ let cleanup_ui (s : state) =
         s.fetch_rows;
       Hashtbl.clear s.fetches;
       Hashtbl.clear s.fetch_sizes;
-      try Progress.Reporter.finalise s.agg
-      with Sys_error _ | Failure _ -> ());
+      try Progress.Reporter.finalise s.agg with Sys_error _ | Failure _ -> ());
   Logs_progress.clear_active ();
   Oi.Say.set_around_emit (fun f -> f ());
   try Progress.Display.finalise display with Sys_error _ | Failure _ -> ()
@@ -1280,5 +1273,6 @@ let with_ui ?(target = "") ~clock ~enabled f =
     let reporter : Oi.Build_progress.reporter =
       { event = (fun e -> handle_event s e) }
     in
-    Fun.protect ~finally:(fun () -> cleanup_ui s) (fun () ->
-        run_ui s ~reporter ~clock f)
+    Fun.protect
+      ~finally:(fun () -> cleanup_ui s)
+      (fun () -> run_ui s ~reporter ~clock f)

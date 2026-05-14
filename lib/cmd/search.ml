@@ -120,7 +120,9 @@ let absorb_handle_prefix ~pattern ~overlay_filter =
       | Some (h, rest) -> (rest, h :: overlay_filter))
 
 let open_index ~sys ~fs ~cache ~os_key ~registry ~clk =
-  let index_path = Layer_index.ensure_local ~sys ~fs ~clock:clk ~cache ~os_key in
+  let index_path =
+    Layer_index.ensure_local ~sys ~fs ~clock:clk ~cache ~os_key
+  in
   (match Layer_index.ensure_remote ~sys ~fs ~cache ~os_key ~registry () with
   | Some remote_path ->
       Layer_index.merge_remote_into_local ~fs ~index_path ~remote_path
@@ -130,8 +132,8 @@ let open_index ~sys ~fs ~cache ~os_key ~registry ~clk =
 let overlay_of ~overlay_filter = function
   | None -> "-"
   | Some (o : D10.Overlay.t) ->
-      if overlay_filter <> [] && not (List.mem o.handle overlay_filter) then
-        "-" (* shouldn't happen after later filter, but defensive *)
+      if overlay_filter <> [] && not (List.mem o.handle overlay_filter) then "-"
+        (* shouldn't happen after later filter, but defensive *)
       else "@" ^ o.handle
 
 let state_of_hash ~d10 hash =
@@ -378,7 +380,9 @@ let collect_rows ~db ~d10 ~reporepo_path ~os_key ~overlay_filter ~pattern =
   let bin = bin_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
   let pkg_built = pkg_built_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
   let lib = lib_rows_of ~db ~d10 ~os_key ~overlay_filter ~pattern in
-  let pkg_declared = pkg_declared_rows_of ~reporepo_path ~pattern ~overlay_filter in
+  let pkg_declared =
+    pkg_declared_rows_of ~reporepo_path ~pattern ~overlay_filter
+  in
   filter_by_overlay ~overlay_filter bin
   @ filter_by_overlay ~overlay_filter pkg_built
   @ filter_by_overlay ~overlay_filter lib
@@ -452,8 +456,8 @@ let overlay_arg =
     value & opt_all string []
     & info ~docv:"HANDLE"
         ~doc:
-          "Restrict results to an overlay. Repeatable. $(b,@HANDLE/PATTERN) \
-           is shorthand."
+          "Restrict results to an overlay. Repeatable. $(b,@HANDLE/PATTERN) is \
+           shorthand."
         [ "overlay" ])
 
 let long_arg =
@@ -499,5 +503,5 @@ let cmd =
   in
   Cmd.v info
     Term.(
-      const run $ Terms.common $ Terms.registry $ all_versions_arg
-      $ overlay_arg $ long_arg $ pattern_arg)
+      const run $ Terms.common $ Terms.registry $ all_versions_arg $ overlay_arg
+      $ long_arg $ pattern_arg)

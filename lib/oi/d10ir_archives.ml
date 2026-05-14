@@ -110,8 +110,8 @@ let publish_all ~cache ~output =
       try
         Sys.readdir src |> Array.to_list
         |> List.filter (fun n ->
-               Filename.check_suffix n ".tar.zst"
-               || Filename.check_suffix n ".json")
+            Filename.check_suffix n ".tar.zst"
+            || Filename.check_suffix n ".json")
       with Sys_error _ -> []
     in
     publish_files ~src ~dst entries

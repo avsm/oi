@@ -57,20 +57,20 @@ val event_codec : event Jsont.t
 val log_pointer_codec : log_pointer Jsont.t
 
 val context_codec : context Jsont.t
-(** Exposed so {!Manifest_build} can embed it inside the per-invocation
-    build manifest. *)
+(** Exposed so {!Manifest_build} can embed it inside the per-invocation build
+    manifest. *)
 
 (** {1 Storage}
 
     Events are staged to a per-invocation JSONL file under
-    [<cache>/registry-staging/<invocation_id>.events.jsonl] during the
-    run, then rolled into a build manifest at
-    [<cache>/registry/<os_key>/builds/<YYYY>/<MM>/<date>-<id>.json]
-    by {!Manifest_build.write} when the invocation finalises. *)
+    [<cache>/registry-staging/<invocation_id>.events.jsonl] during the run, then
+    rolled into a build manifest at
+    [<cache>/registry/<os_key>/builds/<YYYY>/<MM>/<date>-<id>.json] by
+    {!Manifest_build.write} when the invocation finalises. *)
 
 val staging_path : cache_root:string -> invocation_id:string -> string
-(** [staging_path ~cache_root ~invocation_id] is the per-invocation
-    staging file path. *)
+(** [staging_path ~cache_root ~invocation_id] is the per-invocation staging file
+    path. *)
 
 val append : fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> event -> unit
 (** [append ~fs ~cache_root e] appends [e] as a single JSON line to
@@ -83,21 +83,21 @@ val read_all :
   os_key:string ->
   event list
 (** [read_all ~fs ~cache_root ~os_key] walks every build manifest under
-    [<cache>/registry/<os_key>/builds/] and returns all embedded events,
-    sorted by [event_id]. Replaces the legacy [audit.jsonl] reader. *)
+    [<cache>/registry/<os_key>/builds/] and returns all embedded events, sorted
+    by [event_id]. Replaces the legacy [audit.jsonl] reader. *)
 
 val read_staged : cache_root:string -> invocation_id:string -> event list
-(** [read_staged] returns the events written so far during a specific
-    invocation (i.e. that haven't been rolled into a build manifest yet).
-    Used by the finaliser. *)
+(** [read_staged] returns the events written so far during a specific invocation
+    (i.e. that haven't been rolled into a build manifest yet). Used by the
+    finaliser. *)
 
 val delete_staged : cache_root:string -> invocation_id:string -> unit
-(** [delete_staged] removes the staging file for an invocation. Called
-    after [Manifest_build.write] succeeds. *)
+(** [delete_staged] removes the staging file for an invocation. Called after
+    [Manifest_build.write] succeeds. *)
 
 val staged_invocation_ids : cache_root:string -> string list
-(** [staged_invocation_ids] lists invocation IDs whose staging files
-    still exist. Used by the crash-recovery reaper. *)
+(** [staged_invocation_ids] lists invocation IDs whose staging files still
+    exist. Used by the crash-recovery reaper. *)
 
 (** {1 IDs and helpers} *)
 

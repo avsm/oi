@@ -125,8 +125,7 @@ let extra_source_codec =
 
 let extra_file_codec =
   let open Jsont in
-  Object.map ~kind:"extra_file" (fun path sha256 size ->
-      { path; sha256; size })
+  Object.map ~kind:"extra_file" (fun path sha256 size -> { path; sha256; size })
   |> Object.mem "path" string ~enc:(fun (f : extra_file) -> f.path)
   |> Object.mem "sha256" string ~enc:(fun (f : extra_file) -> f.sha256)
   |> Object.mem "size" int ~enc:(fun (f : extra_file) -> f.size)
@@ -185,9 +184,7 @@ let codec : t Jsont.t =
   |> Object.opt_mem "overlay_handle" string ~enc:(fun r -> r.overlay_handle)
   |> Object.opt_mem "overlay_version" string ~enc:(fun r -> r.overlay_version)
   |> Object.mem "source" source_codec ~enc:(fun r -> r.source)
-  |> Object.mem "extra_sources"
-       (list extra_source_codec)
-       ~dec_absent:[]
+  |> Object.mem "extra_sources" (list extra_source_codec) ~dec_absent:[]
        ~enc:(fun r -> r.extra_sources)
        ~enc_omit:(( = ) [])
   |> Object.mem "extra_files" (list extra_file_codec) ~dec_absent:[]
@@ -200,7 +197,7 @@ let codec : t Jsont.t =
        ~enc:(fun r -> r.substs)
        ~enc_omit:(( = ) [])
   |> Object.mem "strip_components" int ~dec_absent:0 ~enc:(fun r ->
-         r.strip_components)
+      r.strip_components)
   |> Object.opt_mem "size" int ~enc:(fun r -> r.size)
   |> Object.finish
 
@@ -225,13 +222,7 @@ let source_of ~proc_mgr ~build_dir (src : Plan.source_info option) =
       let commit_sha =
         if kind = "git" then resolve_git_commit ~proc_mgr ~build_dir else None
       in
-      {
-        kind;
-        url = Some base_url;
-        ref_;
-        commit_sha;
-        checksums = s.checksums;
-      }
+      { kind; url = Some base_url; ref_; commit_sha; checksums = s.checksums }
 
 let extra_source_of (name, (s : Plan.source_info)) =
   { name; url = strip_git_prefix s.url; checksums = s.checksums }
@@ -289,8 +280,7 @@ let try_read ~path : t option =
   else
     try
       let s =
-        In_channel.with_open_text path (fun ic ->
-            In_channel.input_all ic)
+        In_channel.with_open_text path (fun ic -> In_channel.input_all ic)
       in
       match Jsont_bytesrw.decode_string ~locs:true ~file:path codec s with
       | Ok r -> Some r

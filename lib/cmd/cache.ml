@@ -323,8 +323,8 @@ let package_prefix_match ~prefix s =
   String.length s >= String.length prefix
   && String.sub s 0 (String.length prefix) = prefix
 
-let match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~events_for ~package
-    hash =
+let match_for_hash ~fs ~os_key ~cache_root ~layers_dir ~root ~events_for
+    ~package hash =
   let json = Eio.Path.(root / "layers" / os_key / hash / "layer.json") in
   match D10.Layer.load_meta json with
   | Some m when package_prefix_match ~prefix:package m.package ->

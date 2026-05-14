@@ -86,8 +86,8 @@ let build_env_codec =
   |> Object.mem "ocaml_version" string ~enc:(fun e -> e.ocaml_version)
   |> Object.finish
 
-let of_fields schema layer_hash os_key pkg method_ built_at duration_s
-    phases opam source deps depexts_declared build_env =
+let of_fields schema layer_hash os_key pkg method_ built_at duration_s phases
+    opam source deps depexts_declared build_env =
   {
     schema;
     layer_hash;

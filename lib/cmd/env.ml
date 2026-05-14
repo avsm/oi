@@ -49,8 +49,8 @@ let oneshot_extras (i : oneshot_inputs) =
   in
   (url_project, extras, extra_constraints, extra_names)
 
-let oneshot_request (i : oneshot_inputs) ~url_project ~extras
-    ~extra_constraints ~extra_names : Oi.Build_pipeline.request =
+let oneshot_request (i : oneshot_inputs) ~url_project ~extras ~extra_constraints
+    ~extra_names : Oi.Build_pipeline.request =
   let names = "ocaml" :: List.map OpamPackage.Name.to_string extra_names in
   {
     targets = [ Group { tokens = names; handles = [] } ];
@@ -86,7 +86,8 @@ let build_oneshot_prefix (i : oneshot_inputs) =
     i.harness
   in
   Oi.Pipeline.init_opam_root ~fs ~data_dir;
-  ignore (Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh:i.refresh ());
+  ignore
+    (Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh:i.refresh ());
   let url_project, extras, extra_constraints, extra_names = oneshot_extras i in
   let pipeline_env : Oi.Build_pipeline.env =
     { proc_mgr; fs; clock; sys; os_key; cache; data_dir; http_session }
@@ -102,7 +103,9 @@ let build_oneshot_prefix (i : oneshot_inputs) =
         layer_remote = None;
         source_remote = None;
         jobs = i.jobs;
-        upload_archive_url = None; archive_sources = false; snapshot_reporepo = false;
+        upload_archive_url = None;
+        archive_sources = false;
+        snapshot_reporepo = false;
       }
   in
   Oi.Pipeline.assemble_prefix ~sys ~fs ~clock ~cache ~os_key
@@ -112,8 +115,7 @@ let build_oneshot_prefix (i : oneshot_inputs) =
    asks for no extras; otherwise build a one-shot prefix. *)
 let resolve_prefix (i : oneshot_inputs) ~skip_local ~toolchain ~cwd ~oi_prefix =
   let want_extras =
-    skip_local || i.with_repos <> [] || i.with_deps <> []
-    || toolchain <> None
+    skip_local || i.with_repos <> [] || i.with_deps <> [] || toolchain <> None
   in
   if (not want_extras) && Workspace.path_exists cwd "_oi/prefix" then oi_prefix
   else build_oneshot_prefix i
@@ -142,8 +144,7 @@ let run (c : Terms.common) ~refresh ~skip_local ~with_repos ~with_deps ~jobs
     ~toolchain =
   Harness.run @@ fun ~sw env ->
   let harness =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-      c.cache_dir
+    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
   let { Harness.fs; sys; cache; _ } = harness in
   let data_dir = c.data_dir in
@@ -162,9 +163,9 @@ let run (c : Terms.common) ~refresh ~skip_local ~with_repos ~with_deps ~jobs
      the toolchain the existing prefix was actually built with (project
      [x-repos:] declarations and all). *)
   let tc_info =
-    Sync.resolve_project_toolchain ~refresh ~skip_local ~with_repos
-      ~with_deps ~fs ~sys ~cache ~data_dir ~conf ~install:true
-      ~override:toolchain ~cwd:cwd_s ()
+    Sync.resolve_project_toolchain ~refresh ~skip_local ~with_repos ~with_deps
+      ~fs ~sys ~cache ~data_dir ~conf ~install:true ~override:toolchain
+      ~cwd:cwd_s ()
   in
   let conf, tc_ctx = Oi.Pipeline.solver_inputs tc_info conf in
   let oneshot =
@@ -188,8 +189,8 @@ let man =
       "Reuses $(b,_oi/prefix/) when it exists and no extras are requested. \
        With $(b,--with), $(b,--with-repo), $(b,--toolchain), \
        $(b,--skip-local), or a missing prefix, builds a one-shot prefix \
-       in-process; $(b,.envrc) and dev tools are not updated. Use $(b,oi \
-       build --deps-only) for that.";
+       in-process; $(b,.envrc) and dev tools are not updated. Use $(b,oi build \
+       --deps-only) for that.";
     `S "TOOLCHAIN";
     `P "Active toolchain, in order:";
     `I ("1.", "$(b,--toolchain=NAME).");

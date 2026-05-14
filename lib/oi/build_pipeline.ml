@@ -838,21 +838,17 @@ let s3_put_quiet ~sys ~src ~dst =
   with exn ->
     Logs.warn (fun m -> m "upload-archive: %s: %s" dst (Printexc.to_string exn))
 
-let stat_size_of path =
-  try Some (Unix.stat path).Unix.st_size with _ -> None
+let stat_size_of path = try Some (Unix.stat path).Unix.st_size with _ -> None
 
 let sha256_of_file_quiet path =
-  try
-    Some (OpamHash.contents (OpamHash.compute ~kind:`SHA256 path))
+  try Some (OpamHash.contents (OpamHash.compute ~kind:`SHA256 path))
   with _ -> None
 
 (* Once a layer's [.tar.zst] is staged, fill in [tarball.{sha256,size,key}]
    on the existing layer manifest (which P2 wrote with placeholder zeros)
    so the uploaded manifest accurately describes the blob it accompanies. *)
 let patch_layer_manifest_tarball ~fs ~cache_root ~os_key ~hash ~tar_path =
-  let manifest_path =
-    Manifest_layer.path_for ~cache_root ~os_key ~hash
-  in
+  let manifest_path = Manifest_layer.path_for ~cache_root ~os_key ~hash in
   if not (Sys.file_exists manifest_path) then ()
   else
     match Manifest_layer.try_read ~path:manifest_path with
@@ -1011,8 +1007,9 @@ let layer_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
   in
   let findlib =
     D10.Index.scan_meta ~fs:d10.fs fs_dir
-    |> List.map (fun (package_dir, findlib_pkg, archive) :
-                  Manifest_layer.findlib_entry ->
+    |> List.map
+         (fun
+           (package_dir, findlib_pkg, archive) : Manifest_layer.findlib_entry ->
            { package_dir; findlib_pkg; archive })
   in
   let provenance =
@@ -1049,11 +1046,10 @@ let layer_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
     ?overlay_version:
       (Stdlib.Option.bind pp.overlay (fun (o : D10.Overlay.t) ->
            if o.version = "" then None else Some o.version))
-    ~tarball ~files ~binaries ~findlib ~exit_status:0 ~provenance
-    ?recipe ?source_archive
+    ~tarball ~files ~binaries ~findlib ~exit_status:0 ~provenance ?recipe
+    ?source_archive
     ~deps:(List.map dep_of_identity pp.dep_layers)
-    ~depexts_declared:pp.depexts ~build_env_ocaml_version:ocaml_version
-    ()
+    ~depexts_declared:pp.depexts ~build_env_ocaml_version:ocaml_version ()
 
 let write_layer_manifest_for_package ~fs ~cache_root ~os_key ~ocaml_version
     ~built_at ~nodes_by_hash (d10 : D10.Config.t) (pp : Plan.package_plan) =
@@ -1289,8 +1285,7 @@ let snapshot_reporepo ~sys ~cache_root ~url_base ~commit =
     if not (Sys.file_exists path) then ()
     else
       let staging =
-        Filename.concat cache_root
-          (Filename.concat "upload-staging" "reporepo")
+        Filename.concat cache_root (Filename.concat "upload-staging" "reporepo")
       in
       (try Unix.mkdir staging 0o755 with Unix.Unix_error _ -> ());
       let tar_dst = Filename.concat staging (commit ^ ".tar.zst") in
@@ -1309,13 +1304,11 @@ let snapshot_reporepo ~sys ~cache_root ~url_base ~commit =
       s3_put_quiet ~sys ~src:tar_dst
         ~dst:(Fmt.str "%sreporepo/%s.tar.zst" url_base commit)
   with exn ->
-    Logs.warn (fun m ->
-        m "snapshot-reporepo: %s" (Printexc.to_string exn))
+    Logs.warn (fun m -> m "snapshot-reporepo: %s" (Printexc.to_string exn))
 
 let url_base_of raw_url =
-  if
-    String.length raw_url = 0 || raw_url.[String.length raw_url - 1] = '/'
-  then raw_url
+  if String.length raw_url = 0 || raw_url.[String.length raw_url - 1] = '/' then
+    raw_url
   else raw_url ^ "/"
 
 let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url
@@ -1348,8 +1341,8 @@ let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url
         match head_commit_of_reporepo ~sys:env.sys with
         | None -> ()
         | Some commit ->
-            Say.step "Snapshotting reporepo @ %s to %s"
-              (String.sub commit 0 12) url_base;
+            Say.step "Snapshotting reporepo @ %s to %s" (String.sub commit 0 12)
+              url_base;
             snapshot_reporepo ~sys:env.sys ~cache_root ~url_base ~commit)
 
 (* PUT a single build manifest JSON. Called from [build] after
@@ -1359,8 +1352,7 @@ let maybe_upload_built ~env ~cache_root ~d10_cfg ~upload_archive_url
 let upload_build_manifest ~env ~cache_root ~url_base ~os_key ~invocation_id
     ~started_at =
   let path =
-    Manifest_build.path_for ~cache_root ~os_key ~ts:started_at
-      ~invocation_id
+    Manifest_build.path_for ~cache_root ~os_key ~ts:started_at ~invocation_id
   in
   if Sys.file_exists path then
     let layers_prefix = Filename.concat cache_root "layers/" in
@@ -1409,8 +1401,8 @@ let resolved_deps_of_solved (s : solved) : Manifest_layer.dep list =
                   | None -> (pp.pkg, "")
                   | Some i ->
                       ( String.sub pp.pkg 0 i,
-                        String.sub pp.pkg (i + 1)
-                          (String.length pp.pkg - i - 1) )
+                        String.sub pp.pkg (i + 1) (String.length pp.pkg - i - 1)
+                      )
                 in
                 Hashtbl.add tbl pp.layer_hash
                   { Manifest_layer.name; version; hash = pp.layer_hash })
@@ -1429,8 +1421,12 @@ let finalize_build_manifest ~env ~started_at ~finished_at ?targets
     | None -> None
     | Some commit ->
         Some
-          ({ Manifest_build.url = None; commit = Some commit;
-             snapshot_key = None } : Manifest_build.reporepo)
+          ({
+             Manifest_build.url = None;
+             commit = Some commit;
+             snapshot_key = None;
+           }
+            : Manifest_build.reporepo)
   in
   let overlays = unique_overlays_of_solved solved in
   let context = Audit.default_context () in
@@ -1448,8 +1444,7 @@ let finalize_build_manifest ~env ~started_at ~finished_at ?targets
       ?reporepo ~overlays ~context ?targets ?solve ~events ()
   in
   Manifest_build.write ~fs:env.fs ~cache_root m;
-  Manifest_registry.ensure ~fs:env.fs ~cache_root ~os_key
-    ~wrote_by:"oi";
+  Manifest_registry.ensure ~fs:env.fs ~cache_root ~os_key ~wrote_by:"oi";
   Audit.delete_staged ~cache_root ~invocation_id
 
 let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
@@ -1517,10 +1512,8 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
           if Sys.file_exists registry_path then
             s3_put_quiet ~sys:env.sys ~src:registry_path
               ~dst:(Fmt.str "%s%s/registry.json" url_base env.os_key);
-          upload_build_manifest ~env ~cache_root
-            ~url_base ~os_key:env.os_key
-            ~invocation_id:(Audit.invocation_id ())
-            ~started_at);
+          upload_build_manifest ~env ~cache_root ~url_base ~os_key:env.os_key
+            ~invocation_id:(Audit.invocation_id ()) ~started_at);
       Some result
 
 let layer_hashes (s : solved) : string list =

@@ -210,17 +210,17 @@ let latest_version_in_dirs ~pkg dirs =
 let resolve_handle_pin ~overlay_pkg_dirs acc { handle; pkg; user_constr } =
   match user_constr with
   | Some c -> OpamPackage.Name.Map.add pkg c acc
-  | None ->
+  | None -> (
       let pkg_s = OpamPackage.Name.to_string pkg in
-      (match latest_version_in_dirs ~pkg:pkg_s overlay_pkg_dirs with
-       | None ->
-           Error.fail_config_error
-             "overlay %s does not provide a package named %s" handle pkg_s
-       | Some v ->
-           log_overlay "pinning %s = %s from overlay %s" pkg_s v handle;
-           OpamPackage.Name.Map.add pkg
-             (`Eq, OpamPackage.Version.of_string v)
-             acc)
+      match latest_version_in_dirs ~pkg:pkg_s overlay_pkg_dirs with
+      | None ->
+          Error.fail_config_error
+            "overlay %s does not provide a package named %s" handle pkg_s
+      | Some v ->
+          log_overlay "pinning %s = %s from overlay %s" pkg_s v handle;
+          OpamPackage.Name.Map.add pkg
+            (`Eq, OpamPackage.Version.of_string v)
+            acc)
 
 let handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras handle_pins =
   if handle_pins = [] then OpamPackage.Name.Map.empty

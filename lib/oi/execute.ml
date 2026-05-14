@@ -31,15 +31,13 @@ let opam_cache_urls () =
   match Sys.getenv_opt "OI_OPAM_CACHE_URLS" with
   | None -> default_opam_cache_urls
   | Some s ->
-      String.split_on_char ',' s
-      |> List.map String.trim
+      String.split_on_char ',' s |> List.map String.trim
       |> List.filter (( <> ) "")
 
 let merge_with_cache_fallback cache_urls =
   let extra =
     List.filter_map
-      (fun s ->
-        try Some (OpamUrl.parse ~handle_suffix:true s) with _ -> None)
+      (fun s -> try Some (OpamUrl.parse ~handle_suffix:true s) with _ -> None)
       (opam_cache_urls ())
   in
   cache_urls @ extra
@@ -84,10 +82,8 @@ let do_fetch_source ~fs ~cache_root ~cache_urls (p : Plan.package_plan)
   let error_log_path = fetch_log_path_of ~cache_root ~p in
   Cache.Logs.ensure ~fs ~cache_root;
   try
-    Retry.with_attempts
-      ~label:(Fmt.str "fetch %s (%s)" p.pkg src.url)
-      ~error_log_path
-      (fun () ->
+    Retry.with_attempts ~label:(Fmt.str "fetch %s (%s)" p.pkg src.url)
+      ~error_log_path (fun () ->
         pull_source_once ~fs ~cache_root ~cache_dir ~cache_urls ~url ~dst_dir
           ~checksums p)
   with Failure msg ->
@@ -132,8 +128,7 @@ let do_fetch_extra_source ~fs ~cache_root ~cache_urls (p : Plan.package_plan)
   Cache.Logs.ensure ~fs ~cache_root;
   try
     Retry.with_attempts
-      ~label:(Fmt.str "fetch extra source %s (%s)" name src.url)
-      ~error_log_path
+      ~label:(Fmt.str "fetch extra source %s (%s)" name src.url) ~error_log_path
       (fun () ->
         pull_extra_once ~fs ~cache_root ~cache_dir ~cache_urls ~url ~dst_file
           ~checksums ~name)

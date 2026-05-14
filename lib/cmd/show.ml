@@ -333,8 +333,7 @@ let pp_depexts_status all_depexts (st : Oi.Depexts.status) =
     else name
   in
   let rendered =
-    OpamSysPkg.Set.elements all_depexts
-    |> List.map render |> String.concat ", "
+    OpamSysPkg.Set.elements all_depexts |> List.map render |> String.concat ", "
   in
   pp_meta_line "Depexts" rendered;
   if not (OpamSysPkg.Set.is_empty st.missing) then
@@ -368,8 +367,7 @@ let pp_repositories_section = function
         rows left
 
 let pp_description_body body =
-  String.split_on_char '\n' body
-  |> List.iter (fun line -> Fmt.pr "  %s@," line)
+  String.split_on_char '\n' body |> List.iter (fun line -> Fmt.pr "  %s@," line)
 
 let pp_descriptions = function
   | [] -> ()
@@ -541,8 +539,7 @@ let log_group_failures groups =
       match gr.error with
       | Ok () -> ()
       | Error e ->
-          Log.warn (fun m ->
-              m "skip %s: %s" gr.group.label (group_error_msg e)))
+          Log.warn (fun m -> m "skip %s: %s" gr.group.label (group_error_msg e)))
     groups
 
 let merged_groups groups =
@@ -564,7 +561,9 @@ let merged_groups groups =
    groups → same logical node; first occurrence wins (preserves the
    overlay attribution we'd otherwise lose). *)
 let by_hash_of plans =
-  let by_hash : (string, Oi.Plan.package_plan) Hashtbl.t = Hashtbl.create 1024 in
+  let by_hash : (string, Oi.Plan.package_plan) Hashtbl.t =
+    Hashtbl.create 1024
+  in
   List.iter
     (fun (p : Oi.Plan.package_plan) ->
       if not (Hashtbl.mem by_hash p.layer_hash) then
@@ -665,7 +664,8 @@ let consumers_index by_hash =
   fun h ->
     Hashtbl.find_opt consumers_of h
     |> Stdlib.Option.value ~default:[]
-    |> List.sort (fun (a : Oi.Plan.package_plan) b -> String.compare a.pkg b.pkg)
+    |> List.sort (fun (a : Oi.Plan.package_plan) b ->
+        String.compare a.pkg b.pkg)
 
 let take n xs =
   let head, _ =
@@ -711,10 +711,8 @@ let union_keys ma mb =
 let print_dep_diff_entry n = function
   | Some x, Some y ->
       Fmt.pr "    %s: %s \u{2192} %s@." n (short_hash x) (short_hash y)
-  | Some x, None ->
-      Fmt.pr "    %s: %s \u{2192} (absent)@." n (short_hash x)
-  | None, Some y ->
-      Fmt.pr "    %s: (absent) \u{2192} %s@." n (short_hash y)
+  | Some x, None -> Fmt.pr "    %s: %s \u{2192} (absent)@." n (short_hash x)
+  | None, Some y -> Fmt.pr "    %s: (absent) \u{2192} %s@." n (short_hash y)
   | None, None -> ()
 
 let print_dep_diff (a : Oi.Plan.package_plan) (b : Oi.Plan.package_plan) =
@@ -779,8 +777,18 @@ let report_divergence by_hash =
   end
 
 let solve_merged ~harness ~handles ~refresh =
-  let { Harness.proc_mgr; fs; clock; sys; platform; os_key; cache; data_dir;
-        http_session; _ } =
+  let {
+    Harness.proc_mgr;
+    fs;
+    clock;
+    sys;
+    platform;
+    os_key;
+    cache;
+    data_dir;
+    http_session;
+    _;
+  } =
     harness
   in
   let env : Oi.Build_pipeline.env =
@@ -829,8 +837,7 @@ let overlay_latest_packages ~pkgs_dir =
   in
   List.filter_map
     (fun name ->
-      Stdlib.Option.map (fun v -> (name, v))
-        (latest_version_of ~pkgs_dir ~name))
+      Stdlib.Option.map (fun v -> (name, v)) (latest_version_of ~pkgs_dir ~name))
     names
   |> List.sort (fun (a, _) (b, _) -> String.compare a b)
 
@@ -919,9 +926,7 @@ let cache_row_of ~fs ~sys ~layers_dir ~cache_root ~os_key ~handle hash =
         Oi.Provenance.overlay_of_layer ~fs ~cache_root ~os_key ~hash
       in
       if overlay_matches_handle ~handle overlay then
-        let sz =
-          Oi.Cache.size ~sys Eio.Path.(fs / layers_dir / hash / "fs")
-        in
+        let sz = Oi.Cache.size ~sys Eio.Path.(fs / layers_dir / hash / "fs") in
         Some (m, overlay, hash, sz)
       else None
 
@@ -1028,13 +1033,13 @@ let suggest_for ~pkgs_dirs target =
   if String.length lower < 4 then []
   else
     List.concat_map
-      (fun dir ->
-        try Sys.readdir dir |> Array.to_list with Sys_error _ -> [])
+      (fun dir -> try Sys.readdir dir |> Array.to_list with Sys_error _ -> [])
       pkgs_dirs
     |> List.sort_uniq String.compare
     |> List.filter (fun name ->
         let ln = String.lowercase_ascii name in
-        String.length ln >= 4 && ln <> lower
+        String.length ln >= 4
+        && ln <> lower
         && (contains ~needle:lower ln || contains ~needle:ln lower))
 
 let did_you_mean_hint ~pkgs_dirs targets =
@@ -1073,9 +1078,7 @@ let exec_plan_or_fail ~(group : Oi.Build_pipeline.group_result) ~targets =
 let json_plan_node (p : Oi.Plan.package_plan) =
   let opam_pkg = opam_pkg_of_package_plan p in
   let name = OpamPackage.Name.to_string (OpamPackage.name opam_pkg) in
-  let version =
-    OpamPackage.Version.to_string (OpamPackage.version opam_pkg)
-  in
+  let version = OpamPackage.Version.to_string (OpamPackage.version opam_pkg) in
   let method_ = Oi.Identity.string_of_method p.method_ in
   let deps = List.map (fun (d : Oi.Identity.dep) -> d.id.name) p.dep_layers in
   (name, version, method_, p.layer_hash, deps)
@@ -1097,8 +1100,8 @@ let json_envelope_codec =
   let open Jsont in
   Object.map ~kind:"oi_show"
     (fun
-      _schema_version target os_key ocaml_version toolchain packages depexts
-    -> (target, os_key, ocaml_version, toolchain, packages, depexts))
+      _schema_version target os_key ocaml_version toolchain packages depexts ->
+      (target, os_key, ocaml_version, toolchain, packages, depexts))
   |> Object.mem "schema_version" string ~enc:(fun _ ->
       Oi.Stamp.json_schema_version)
   |> Object.mem "target" string ~enc:(fun (t, _, _, _, _, _) -> t)
@@ -1136,9 +1139,7 @@ let render_json_plan ~(conf : Oi.Solver.Ctx.conf) ~packages_dirs
   let nodes = List.map json_plan_node exec_plan.packages in
   let target_label = json_target_label ~targets ~project_local_packages in
   let toolchain_handle =
-    Stdlib.Option.map
-      (fun (info : Oi.Toolchain.info) -> info.handle)
-      toolchain
+    Stdlib.Option.map (fun (info : Oi.Toolchain.info) -> info.handle) toolchain
   in
   match
     Jsont_bytesrw.encode_string ~format:Jsont.Indent json_envelope_codec
@@ -1266,7 +1267,8 @@ let render_plan_view (group : Oi.Build_pipeline.group_result) =
    Intended for piping into a package manager; the caller handles
    which ones are already installed. *)
 let render_only_depexts all_depexts =
-  OpamSysPkg.Set.iter (fun p -> Fmt.pr "%s@." (OpamSysPkg.to_string p))
+  OpamSysPkg.Set.iter
+    (fun p -> Fmt.pr "%s@." (OpamSysPkg.to_string p))
     all_depexts
 
 let target_primary_fields = function
@@ -1394,13 +1396,10 @@ let split_target_constraints targets =
 let extra_names_of extra_deps =
   List.filter_map
     (fun (d : Oi.Project.Script.dep) ->
-      if OpamPackage.Name.to_string d.name = "ocaml" then None
-      else Some d.name)
+      if OpamPackage.Name.to_string d.name = "ocaml" then None else Some d.name)
     extra_deps
 
-let solve_label_of = function
-  | [] -> "."
-  | xs -> String.concat " " xs
+let solve_label_of = function [] -> "." | xs -> String.concat " " xs
 
 let pipeline_solve ~pipeline_env ~clock ~solve_label req =
   Progress_ui.with_ui ~target:solve_label
@@ -1432,15 +1431,25 @@ type solve_outputs = {
 }
 
 let pipeline_env_of ~harness =
-  let { Harness.proc_mgr; fs; clock; sys; os_key; cache; data_dir;
-        http_session; _ } = harness
+  let {
+    Harness.proc_mgr;
+    fs;
+    clock;
+    sys;
+    os_key;
+    cache;
+    data_dir;
+    http_session;
+    _;
+  } =
+    harness
   in
   ({ proc_mgr; fs; clock; sys; os_key; cache; data_dir; http_session }
     : Oi.Build_pipeline.env)
 
 let build_request ~with_repos ~project_pins ~all_extras ~extra_constraints
-    ~toolchain_override ~toolchain ~conf ~local_packages_dir ~refresh ~names
-    : Oi.Build_pipeline.request =
+    ~toolchain_override ~toolchain ~conf ~local_packages_dir ~refresh ~names :
+    Oi.Build_pipeline.request =
   let token_strs = List.map OpamPackage.Name.to_string names in
   {
     targets = [ Group { tokens = token_strs; handles = [] } ];
@@ -1460,9 +1469,9 @@ let build_request ~with_repos ~project_pins ~all_extras ~extra_constraints
 
 (* Pick the toolchain and assemble [(extras, with_repos, all_extras,
    local_packages_dir)] from the project + cli + url-project sources. *)
-let resolve_overlays_and_toolchain ~fs ~sys ~data_dir ~conf
-    ~toolchain_override ~handle_pins ~with_repos ~project_extras
-    ~project_overlays ~project_packages_dir ~url_project =
+let resolve_overlays_and_toolchain ~fs ~sys ~data_dir ~conf ~toolchain_override
+    ~handle_pins ~with_repos ~project_extras ~project_overlays
+    ~project_packages_dir ~url_project =
   let tc_handles =
     Target.pin_handles handle_pins
     @ Target.handles_of_tokens with_repos
@@ -1495,8 +1504,8 @@ let resolve_overlays_and_toolchain ~fs ~sys ~data_dir ~conf
 let solve_names ~toolchain_override ~toolchain ~target_names ~project_dep_names
     ~extra_names ~url_names =
   target_names @ project_dep_names @ extra_names @ url_names
-  |> Oi.Pipeline.strip_compiler_roots_for_override
-       ~override:toolchain_override ~toolchain
+  |> Oi.Pipeline.strip_compiler_roots_for_override ~override:toolchain_override
+       ~toolchain
 
 (* Run the [oi show] solve flow end-to-end (toolchain pick, project
    load, classify, request build, solve, exec-plan extraction). Returns
@@ -1511,8 +1520,7 @@ type solve_request = {
   with_repos : string list;
   project_pins : Oi.Project.pin list;
   all_extras : Oi.Project.extra_repo list;
-  extra_constraints :
-    OpamFormula.version_constraint OpamPackage.Name.Map.t;
+  extra_constraints : OpamFormula.version_constraint OpamPackage.Name.Map.t;
   toolchain : Oi.Toolchain.info option;
   local_packages_dir : string option;
   proj : project_state;
@@ -1533,8 +1541,7 @@ let collect_constraints ~fs ~data_dir ~refresh ~cli_extras ~handle_pins
     ~extra_deps ~target_constraints =
   let base = Oi.Project.Script.constraints extra_deps in
   let handle_constraints =
-    Target.handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras
-      handle_pins
+    Target.handle_pin_constraints ~fs ~data_dir ~refresh ~cli_extras handle_pins
   in
   let cs = OpamPackage.Name.Map.union (fun a _ -> a) handle_constraints base in
   OpamPackage.Name.Map.union (fun existing _ -> existing) cs target_constraints
@@ -1559,9 +1566,9 @@ let collect_solve_request ~harness ~refresh ~skip_local ~toolchain_override
   let project_pins = proj.pins @ url_project.pins in
   let project_overlays = proj.overlays @ url_project.overlays in
   let toolchain, with_repos, cli_extras, all_extras, local_packages_dir =
-    resolve_overlays_and_toolchain ~fs ~sys ~data_dir ~conf
-      ~toolchain_override ~handle_pins ~with_repos ~project_extras
-      ~project_overlays ~project_packages_dir:proj.packages_dir ~url_project
+    resolve_overlays_and_toolchain ~fs ~sys ~data_dir ~conf ~toolchain_override
+      ~handle_pins ~with_repos ~project_extras ~project_overlays
+      ~project_packages_dir:proj.packages_dir ~url_project
   in
   let target_names, target_constraints = split_target_constraints targets in
   let extra_constraints =
@@ -1569,16 +1576,15 @@ let collect_solve_request ~harness ~refresh ~skip_local ~toolchain_override
       ~extra_deps ~target_constraints
   in
   let names =
-    solve_names ~toolchain_override ~toolchain
-      ~target_names
+    solve_names ~toolchain_override ~toolchain ~target_names
       ~project_dep_names:(List.map OpamPackage.Name.of_string proj.deps)
       ~extra_names:(extra_names_of extra_deps)
       ~url_names:(List.map OpamPackage.Name.of_string url_project.roots)
   in
   if names = [] then
     Oi.Error.fail_config_error
-      "oi show: nothing to show (no TARGET, no --with, and no *.opam files \
-       in %s)"
+      "oi show: nothing to show (no TARGET, no --with, and no *.opam files in \
+       %s)"
       cwd_s;
   {
     conf;
@@ -1597,8 +1603,8 @@ let collect_solve_request ~harness ~refresh ~skip_local ~toolchain_override
 (* Drive the solve through [Build_pipeline.solve] — same path as [oi
    build TARGET] so target classification, toolchain pickup, and
    pin/extra-repo handling match. *)
-let prepare_and_solve ~harness ~refresh ~skip_local ~toolchain_override
-    ~targets ~with_repos ~with_deps ~os_override ~data_dir =
+let prepare_and_solve ~harness ~refresh ~skip_local ~toolchain_override ~targets
+    ~with_repos ~with_deps ~os_override ~data_dir =
   let req_inputs =
     collect_solve_request ~harness ~refresh ~skip_local ~toolchain_override
       ~targets ~with_repos ~with_deps ~os_override ~data_dir
@@ -1640,8 +1646,8 @@ let man_block =
     `P "With no $(b,TARGET), reads $(b,*.opam) in the cwd.";
     `P
       "Multiple $(b,TARGET)s are solved as a single group. Bare $(b,@HANDLE) \
-       targets switch to the merged-overlay view: every overlay root is \
-       solved and rendered as one deduped tree.";
+       targets switch to the merged-overlay view: every overlay root is solved \
+       and rendered as one deduped tree.";
     `S "MODES";
     `I ("(default)", "Dependency tree.");
     `I ("$(b,--tree)", "Same as the default.");
@@ -1720,18 +1726,18 @@ let run_render ~(common : Terms.common) ~os_override ~os_key ~cache_root
       exit 0
   | Text -> ());
   let view =
-    pick_view ~tree:flags.tree ~plan_view:flags.plan_view
-      ~summary:flags.summary ~only_depexts:flags.only_depexts
-      ~show_all:flags.show_all
+    pick_view ~tree:flags.tree ~plan_view:flags.plan_view ~summary:flags.summary
+      ~only_depexts:flags.only_depexts ~show_all:flags.show_all
   in
   render_view ~view ~conf:out.conf ~packages_dirs:out.packages_dirs
     ~exec_plan:out.exec_plan ~os_override ~group:out.group ~targets:out.targets
-    ~with_repos:out.with_repos ~project_local_packages:out.project_local_packages
+    ~with_repos:out.with_repos
+    ~project_local_packages:out.project_local_packages
     ~project_deps:out.project_deps ~cwd_s:out.cwd_s ~toolchain:out.toolchain
     ~cache_root ~os_key ~names:out.names ~only_depexts:flags.only_depexts
 
-let run_show (c : Terms.common) refresh ~skip_local ~toolchain_override
-    ~targets ~with_repos ~with_deps ~os_override ~(flags : view_flags)
+let run_show (c : Terms.common) refresh ~skip_local ~toolchain_override ~targets
+    ~with_repos ~with_deps ~os_override ~(flags : view_flags)
     ~show_cache_listing =
   Harness.run @@ fun ~sw env ->
   let harness =
@@ -1746,8 +1752,8 @@ let run_show (c : Terms.common) refresh ~skip_local ~toolchain_override
   Oi.Pipeline.init_opam_root ~fs ~data_dir;
   ignore (Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh ());
   let out =
-    prepare_and_solve ~harness ~refresh ~skip_local ~toolchain_override
-      ~targets ~with_repos ~with_deps ~os_override ~data_dir
+    prepare_and_solve ~harness ~refresh ~skip_local ~toolchain_override ~targets
+      ~with_repos ~with_deps ~os_override ~data_dir
   in
   run_render ~common:c ~os_override ~os_key ~cache_root ~flags ~out
 
@@ -1830,10 +1836,21 @@ let view_flags_term =
 
 let run_show_term =
   Term.(
-    const (fun c refresh skip_local toolchain_override targets with_repos
-              with_deps flags os_override show_cache_listing ->
-        run_show c refresh ~skip_local ~toolchain_override ~targets
-          ~with_repos ~with_deps ~os_override ~flags ~show_cache_listing)
+    const
+      (fun
+        c
+        refresh
+        skip_local
+        toolchain_override
+        targets
+        with_repos
+        with_deps
+        flags
+        os_override
+        show_cache_listing
+      ->
+        run_show c refresh ~skip_local ~toolchain_override ~targets ~with_repos
+          ~with_deps ~os_override ~flags ~show_cache_listing)
     $ Terms.common $ Terms.refresh $ Terms.skip_local $ Terms.toolchain
     $ targets_arg $ Terms.with_repos $ Terms.with_deps $ view_flags_term
     $ os_override_arg $ cache_listing_arg)

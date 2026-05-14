@@ -93,8 +93,8 @@ type request = {
           packages in the solve. Off for [oi run] / [oi build] / [oi install] /
           [oi env] / [oi sync] so the solve is as small as possible; on for
           [oi build --test] and any flow that needs to run a package's
-          testsuite. Folded into the solve cache key (see
-          {!Solver.Memo.key}) so toggling it never reuses a stale solve. *)
+          testsuite. Folded into the solve cache key (see {!Solver.Memo.key}) so
+          toggling it never reuses a stale solve. *)
   refresh : bool;
 }
 
@@ -190,28 +190,26 @@ type build_inputs = {
   jobs : int option;  (** Build parallelism. [None] uses the d10ir default. *)
   upload_archive_url : string option;
       (** [Some "s3://oiu/"]: after the build completes, mirror every
-          {b freshly built} layer to
-          [<URL>/<os_key>/layers/<hash>.tar.zst] (and its companion
-          [<hash>.json] manifest) via [s3cmd put]. Also publishes the
-          d10ir source-manifest sidecars under [<URL>/d10ir/<sha>.json]
-          and the per-invocation build manifest under
-          [<URL>/<os_key>/builds/<YYYY>/<MM>/...]. [None] disables the
-          upload entirely. Per-layer failures are logged via the
-          reporter but do not abort the build — the layer is already in
-          the local cache regardless of upload outcome. *)
+          {b freshly built} layer to [<URL>/<os_key>/layers/<hash>.tar.zst] (and
+          its companion [<hash>.json] manifest) via [s3cmd put]. Also publishes
+          the d10ir source-manifest sidecars under [<URL>/d10ir/<sha>.json] and
+          the per-invocation build manifest under
+          [<URL>/<os_key>/builds/<YYYY>/<MM>/...]. [None] disables the upload
+          entirely. Per-layer failures are logged via the reporter but do not
+          abort the build — the layer is already in the local cache regardless
+          of upload outcome. *)
   archive_sources : bool;
       (** When [true], also PUT the consolidated source tarballs at
-          [<URL>/d10ir/<sha>.tar.zst]. Default [false]: only the JSON
-          sidecars are uploaded, on the assumption that upstream remotes
-          can be re-fetched on demand. Flip on for self-contained,
+          [<URL>/d10ir/<sha>.tar.zst]. Default [false]: only the JSON sidecars
+          are uploaded, on the assumption that upstream remotes can be
+          re-fetched on demand. Flip on for self-contained,
           upstream-deletion-proof buckets. *)
   snapshot_reporepo : bool;
-      (** When [true], tarball the reporepo at the solve-time HEAD
-          commit and PUT it to [<URL>/reporepo/<commit>.tar.zst].
-          Default [false]: a downstream consumer is expected to clone
-          the reporepo from its own URL. Flip on when the reporepo is
-          private and the bucket needs to be the canonical archival
-          source. *)
+      (** When [true], tarball the reporepo at the solve-time HEAD commit and
+          PUT it to [<URL>/reporepo/<commit>.tar.zst]. Default [false]: a
+          downstream consumer is expected to clone the reporepo from its own
+          URL. Flip on when the reporepo is private and the bucket needs to be
+          the canonical archival source. *)
 }
 
 val build :
