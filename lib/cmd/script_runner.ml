@@ -96,7 +96,7 @@ let compile_and_exec ~fs ~proc_mgr ~cache ~prefix ~script_path ~all_deps
   let built = build_dir / "_build" / "default" / "main.exe" in
   cache_built_binary ~fs ~built ~cached_bin;
   let exe = if Workspace.path_exists fs cached_bin then cached_bin else built in
-  exit (Subprocess.run proc_mgr ~env:build_env (exe :: args))
+  Harness.exec ~env:build_env (exe :: args)
 
 (* The [run.ml] caller has already built the [--with] deps via
    [Build_pipeline.build] and assembled them into [prefix]. Here we read
@@ -121,12 +121,11 @@ let run ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache ~data_dir
   let run_dir_s = Eio.Path.native_exn run_dir in
   let cached_bin = run_dir_s / "main.exe" in
   if Workspace.path_exists fs cached_bin then
-    exit
-      (Subprocess.run proc_mgr
-         ~env:
-           (Oi.Solver.Env.make_env ~prefix
-              ~dune_cache_root:(Oi.Cache.dune_root cache) ())
-         (cached_bin :: args))
+    Harness.exec
+      ~env:
+        (Oi.Solver.Env.make_env ~prefix
+           ~dune_cache_root:(Oi.Cache.dune_root cache) ())
+      (cached_bin :: args)
   else
     let prefix =
       resolve_prefix ~sys ~fs ~proc_mgr ~clock ~os_key ~prefix ~conf ~cache

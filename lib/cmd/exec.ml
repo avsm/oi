@@ -88,30 +88,40 @@ let cmd_info =
 let cmd =
   let run (c : Terms.common) refresh skip_local registry use_registry with_repos
       with_deps jobs toolchain cmd args =
-    Harness.run @@ fun ~sw env ->
-    let harness =
-      Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
-        c.cache_dir
+    let resolved =
+      Harness.run @@ fun ~sw env ->
+      try
+        let harness =
+          Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
+            c.cache_dir
+        in
+        let cwd, _ = Workspace.resolved_cwd harness.fs in
+        let prefix = cwd / "_oi" / "prefix" in
+        let conf =
+          Oi.Pipeline.conf ~platform:harness.platform
+            ~ocaml_version:Workspace.ocaml_version
+        in
+        let tc_info =
+          resolve_toolchain ~harness ~conf ~cwd ~prefix ~data_dir:c.data_dir
+            ~refresh ~skip_local ~registry ~use_registry ~with_repos ~with_deps
+            ~jobs ~toolchain
+        in
+        let tools = Workspace.tools_dir_for ~cwd in
+        let tc_ctx = Option.map Oi.Toolchain.opam_ctx_of_info tc_info in
+        let env_arr =
+          Oi.Solver.Env.make_env ?toolchain:tc_ctx ~prefix ?tools
+            ~dune_cache_root:(Oi.Cache.dune_root harness.cache)
+            ()
+        in
+        (* Hand the resolved command back to the cmd layer; the spawn
+           runs after the Harness switch (and the cache lock) is gone,
+           so [oi exec utop] doesn't block other [oi] invocations. *)
+        Harness.exec ~env:env_arr (cmd :: args)
+      with Harness.Exec t -> Some t
     in
-    let cwd, _ = Workspace.resolved_cwd harness.fs in
-    let prefix = cwd / "_oi" / "prefix" in
-    let conf =
-      Oi.Pipeline.conf ~platform:harness.platform
-        ~ocaml_version:Workspace.ocaml_version
-    in
-    let tc_info =
-      resolve_toolchain ~harness ~conf ~cwd ~prefix ~data_dir:c.data_dir
-        ~refresh ~skip_local ~registry ~use_registry ~with_repos ~with_deps
-        ~jobs ~toolchain
-    in
-    let tools = Workspace.tools_dir_for ~cwd in
-    let tc_ctx = Option.map Oi.Toolchain.opam_ctx_of_info tc_info in
-    let env_arr =
-      Oi.Solver.Env.make_env ?toolchain:tc_ctx ~prefix ?tools
-        ~dune_cache_root:(Oi.Cache.dune_root harness.cache)
-        ()
-    in
-    exit (Subprocess.run harness.proc_mgr ~env:env_arr (cmd :: args))
+    match resolved with
+    | None -> ()
+    | Some { Harness.env; argv } -> Subprocess.exec ~env argv
   in
   Cmd.v cmd_info
     Term.(

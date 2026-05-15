@@ -36,3 +36,13 @@ let run proc_mgr ~env cmd =
   Eio.Switch.run @@ fun sw ->
   let child = Eio.Process.spawn ~sw proc_mgr ~env cmd in
   match Eio.Process.await child with `Exited n -> n | `Signaled n -> 128 + n
+
+let exec ~env cmd =
+  match cmd with
+  | [] -> invalid_arg "Subprocess.exec: empty argv"
+  | exe :: _ -> (
+      let prog = resolve_in_env ~env exe in
+      try Unix.execve prog (Array.of_list (prog :: List.tl cmd)) env
+      with Unix.Unix_error (e, _, _) ->
+        Printf.eprintf "oi: cannot exec %s: %s\n%!" prog (Unix.error_message e);
+        exit 126)

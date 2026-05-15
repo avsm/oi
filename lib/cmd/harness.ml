@@ -13,6 +13,28 @@ type env = {
   http_session : D10.Sysops.Http.session;
 }
 
+(* The resolved target a command wants to hand control to once it has
+   nothing left to do but run it. Carries only plain data — no Eio
+   resources — so it stays valid after the Eio scheduler has shut down. *)
+type target = { env : string array; argv : string list }
+
+(* Raised by {!exec} from deep in a command body as a non-local return:
+   "the cache is fully staged; the only thing left is to run [argv]".
+   The command body catches it itself and returns [Some target] out of
+   {!run}; the spawn then happens in the cmd layer, {b after} {!run} has
+   returned and the Harness switch has torn down.
+
+   That switch owns the process-wide cache lock fd
+   ([<data_dir>/.oi.lock], see {!Oi.Lock.acquire_global}); ordinary
+   teardown closes it and releases the lock. Spawning the target from
+   the cmd layer therefore runs it with no oi cache lock held, so a
+   long-lived / interactive target ([oi run utop]) no longer blocks
+   every other [oi] invocation for its whole lifetime. The locking
+   semantics are unchanged — only where we spawn moves. *)
+exception Exec of target
+
+let exec ~env argv = raise (Exec { env; argv })
+
 (* Set by {!bootstrap} from [c.format] before the command body runs;
    read by {!with_error_handling} when an exception bubbles out. The
    ref defaults to [Text] so cmdliner-time errors (before bootstrap)

@@ -24,4 +24,7 @@ val run :
   Oi.Project.Script.dep list ->
   string list ->
   'a
-(** [run] never returns: it [exit]s with the script's status code. *)
+(** [run] never returns normally: once the script binary is built/located it
+    raises {!Harness.Exec} so the [oi run] cmd layer execs it after the Harness
+    switch (and the global cache lock) has torn down. The [dune build]
+    compilation still runs in-switch (it writes the cache). *)

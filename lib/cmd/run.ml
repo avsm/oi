@@ -122,7 +122,7 @@ let tc_ctx_of_info tc_info : Oi.Solver.Ctx.toolchain option =
           root_names = OpamPackage.Name.Set.empty;
         }
 
-let try_fast_cache_exec ~proc_mgr ~cache_root ~dune_cache_root ~fast_key ~args =
+let try_fast_cache_exec ~cache_root ~dune_cache_root ~fast_key ~args =
   match fast_key with
   | None -> ()
   | Some key -> (
@@ -132,7 +132,7 @@ let try_fast_cache_exec ~proc_mgr ~cache_root ~dune_cache_root ~fast_key ~args =
           let env =
             Oi.Solver.Env.make_env ?toolchain:tc_ctx ~prefix ~dune_cache_root ()
           in
-          exit (Subprocess.run proc_mgr ~env (bin_path :: args))
+          Harness.exec ~env (bin_path :: args)
       | _ -> ())
 
 (* -- project + URL extras --------------------------------------------- *)
@@ -560,7 +560,7 @@ let exec_in_prefix ctx ~prefix ~tc_ctx ~bin_path ~args =
   in
   store_fast_cache ~fs:ctx.fs ~cache_root:ctx.cache_root ~fast_key:ctx.fast_key
     ~bin_path ~prefix ~tc_ctx;
-  exit (Subprocess.run ctx.proc_mgr ~env:(env_vars ()) (bin_path :: args))
+  Harness.exec ~env:(env_vars ()) (bin_path :: args)
 
 (* Non-relocatable toolchains keep their compiler binaries (ocamlc,
    ocamlfind, ...) at the fixed toolchain prefix rather than in the
@@ -924,34 +924,49 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
 
 (* -- top-level impl --------------------------------------------------- *)
 
+(* The build/solve work runs under {!Harness.run} (which owns the
+   global cache lock for its switch's lifetime); the resolved target is
+   handed back as {!Harness.target} via the {!Harness.Exec} non-local
+   return, caught here so {!Harness.run} returns normally. The actual
+   process replacement happens below — after {!Harness.run} has returned
+   and the switch (hence the cache lock) is gone — so a long-lived or
+   interactive target never holds the lock against other [oi]s. *)
 let impl (c : Terms.common) (flags : flags) registry use_registry
     toolchain_override target with_deps with_repos jobs save_d10ir args =
-  Harness.run @@ fun ~sw env ->
-  let pt = parse_target ~target ~with_repos ~with_deps in
-  let is_script = is_script_target pt.target in
-  let h =
-    Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
+  let resolved =
+    Harness.run @@ fun ~sw env ->
+    try
+      let pt = parse_target ~target ~with_repos ~with_deps in
+      let is_script = is_script_target pt.target in
+      let h =
+        Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
+          c.cache_dir
+      in
+      let cache_root = Oi.Cache.root_s h.cache in
+      let dune_cache_root = Oi.Cache.dune_root h.cache in
+      let refresh = flags.refresh && not flags.locked in
+      let fast_key =
+        fast_cache_key ~dry_run:flags.dry_run ~refresh ~os_key:h.os_key
+          ~binary_name:pt.binary_name ~toolchain_override ~registry
+          ~skip_local:flags.skip_local ~with_deps:pt.with_deps
+          ~with_repos:pt.with_repos ~is_script
+      in
+      try_fast_cache_exec ~cache_root ~dune_cache_root ~fast_key ~args;
+      let ctx =
+        build_ctx_from_harness h flags registry use_registry toolchain_override
+          pt save_d10ir jobs ~fast_key ~data_dir:c.data_dir
+      in
+      let target = fetch_script_url ~fs:ctx.fs ~sys:ctx.sys pt.target in
+      (if Filename.check_suffix target ".ml" then script ~ctx ~target ~args
+       else
+         let unfound_bins = ref [] in
+         binary ~ctx ~env ~pt:{ pt with target } ~unfound_bins ~args);
+      None
+    with Harness.Exec t -> Some t
   in
-  let cache_root = Oi.Cache.root_s h.cache in
-  let dune_cache_root = Oi.Cache.dune_root h.cache in
-  let refresh = flags.refresh && not flags.locked in
-  let fast_key =
-    fast_cache_key ~dry_run:flags.dry_run ~refresh ~os_key:h.os_key
-      ~binary_name:pt.binary_name ~toolchain_override ~registry
-      ~skip_local:flags.skip_local ~with_deps:pt.with_deps
-      ~with_repos:pt.with_repos ~is_script
-  in
-  try_fast_cache_exec ~proc_mgr:h.proc_mgr ~cache_root ~dune_cache_root
-    ~fast_key ~args;
-  let ctx =
-    build_ctx_from_harness h flags registry use_registry toolchain_override pt
-      save_d10ir jobs ~fast_key ~data_dir:c.data_dir
-  in
-  let target = fetch_script_url ~fs:ctx.fs ~sys:ctx.sys pt.target in
-  if Filename.check_suffix target ".ml" then script ~ctx ~target ~args
-  else
-    let unfound_bins = ref [] in
-    binary ~ctx ~env ~pt:{ pt with target } ~unfound_bins ~args
+  match resolved with
+  | None -> ()
+  | Some { Harness.env; argv } -> Subprocess.exec ~env argv
 
 (* -- cmdliner term + cmd --------------------------------------------- *)
 

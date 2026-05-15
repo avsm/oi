@@ -36,6 +36,33 @@ type env = {
 (** What every command body needs after Eio + cache setup. Returned by
     {!bootstrap}. *)
 
+type target = { env : string array; argv : string list }
+(** A resolved target to hand control to: the [env] to run it under and the full
+    [argv] (with [argv.(0)] the program). Plain data only — no Eio resources —
+    so it remains valid after {!run} has returned and the Eio scheduler has shut
+    down. *)
+
+exception Exec of target
+(** Raised by {!exec} as a non-local return out of a command body. A command
+    body that wants to run a target catches this itself and returns
+    [Some target] from its {!run} callback; see {!exec}. *)
+
+val exec : env:string array -> string list -> 'a
+(** [exec ~env argv] is called from deep in a command body once the cache is
+    fully staged and the only thing left is to run [argv]. It does {b not} spawn
+    anything — it raises {!Exec} so the body can return the {!target} out of
+    {!run}, after which the cmd layer ([oi run] / [oi exec]) runs it via
+    {!Subprocess.exec}.
+
+    Spawning from the cmd layer happens {e after} {!run} returns and the Harness
+    switch has torn down. Teardown closes the [<data_dir>/.oi.lock] fd
+    ({!Oi.Lock.acquire_global}), so the target runs with the process-wide cache
+    lock already released and concurrent [oi] invocations proceed — important
+    for long-lived / interactive targets ([oi run utop], [oi exec dune build]).
+    The global locking semantics are unchanged; only the spawn point moves.
+
+    Never returns (raises). *)
+
 val run : (sw:Eio.Switch.t -> Eio_unix.Stdenv.base -> 'a) -> 'a
 (** [run f] sets up the Eio root, installs the SIGINT/SIGTERM handler under a
     fresh switch, and calls [f ~sw env]. The switch owns long-lived resources
