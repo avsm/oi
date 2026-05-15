@@ -883,12 +883,38 @@ let patch_layer_manifest_tarball ~fs ~cache_root ~os_key ~hash ~tar_path =
             Manifest_layer.write ~fs ~cache_root m'
         | _ -> ())
 
+(* Fold the build-log tail into the layer manifest's [log] field so the
+   registry's only per-layer artefact is the [<hash>.json] (no sibling
+   [<hash>.log]). Mirrors [patch_layer_manifest_tarball]: read the
+   already-written manifest, splice in the tail, write back. Best-effort
+   — a missing/short log just leaves [log = None]. *)
+let log_tail_of_file ~path : Manifest_layer.log_tail option =
+  match Audit.tail_of_file ~lines:200 ~path () with
+  | None | Some "" -> None
+  | Some text ->
+      let n = List.length (String.split_on_char '\n' text) in
+      Some { lines = n; truncated = n >= 200; text }
+
+let patch_layer_manifest_log ~fs ~cache_root ~os_key ~hash ~log_path =
+  let manifest_path = Manifest_layer.path_for ~cache_root ~os_key ~hash in
+  if not (Sys.file_exists manifest_path && Sys.file_exists log_path) then ()
+  else
+    match Manifest_layer.try_read ~path:manifest_path with
+    | None -> ()
+    | Some m -> (
+        match log_tail_of_file ~path:log_path with
+        | None -> ()
+        | Some _ as log -> Manifest_layer.write ~fs ~cache_root { m with log })
+
 (* Upload one freshly built layer: stage the .tar.zst, patch the local
-   manifest with its real sha256+size, then PUT the tarball, the JSON
-   manifest, and (when present) the per-package build log to
-   <url_base>/<os_key>/layers/<hash>.{tar.zst,json,log}. *)
+   manifest with its real sha256+size, then PUT the tarball and the JSON
+   manifest to <url_base>/<os_key>/layers/<hash>.{tar.zst,json}. The
+   build-log tail rides inside the .json (folded in by
+   [patch_layer_manifest_log] before this runs) — there is no separate
+   <hash>.log object, so the Clickhouse indexer that scans
+   */layers/*.json picks the log up for free. *)
 let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
-    ~url_base ?log_path hash =
+    ~url_base hash =
   let os_key = d10.os_key in
   let staged =
     try D10.Layer.export d10 ~hash ~dst:Eio.Path.(d10.fs / staging)
@@ -905,13 +931,7 @@ let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
   let manifest_src = Manifest_layer.path_for ~cache_root ~os_key ~hash in
   if Sys.file_exists manifest_src then
     s3_put_quiet ~sys ~src:manifest_src
-      ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash);
-  match log_path with
-  | None -> ()
-  | Some lp when Sys.file_exists lp ->
-      s3_put_quiet ~sys ~src:lp
-        ~dst:(Fmt.str "%s%s/layers/%s.log" url_base os_key hash)
-  | Some _ -> ()
+      ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash)
 
 (* Provenance is written here rather than inside [D10ir.Direct] because the
    richer [Plan.package_plan] (opam_path, pkgs_dir, source, depexts, dep_layers
@@ -1057,7 +1077,10 @@ let source_archive_of (pp : Plan.package_plan) :
     Manifest_layer.source_archive option =
   Stdlib.Option.map
     (fun sha ->
-      { Manifest_layer.sha256 = sha; key = Some ("d10ir/" ^ sha ^ ".tar.zst") })
+      {
+        Manifest_layer.sha256 = sha;
+        key = Some ("d10ir-archives/" ^ sha ^ ".tar.zst");
+      })
     pp.d10_archive
 
 let overlay_handle_of pp =
@@ -1207,9 +1230,13 @@ let stream_upload_built_layer (ctx : stream_ctx) ~hash ~log_path =
       write_layer_manifest_for_package ~fs:ctx.env.fs ~cache_root:ctx.cache_root
         ~os_key ~ocaml_version ~built_at:ctx.built_at
         ~nodes_by_hash:ctx.nodes_by_hash ctx.d10_cfg pp);
+  (match log_path with
+  | Some lp ->
+      patch_layer_manifest_log ~fs:ctx.env.fs ~cache_root:ctx.cache_root ~os_key
+        ~hash ~log_path:lp
+  | None -> ());
   upload_one_layer ~fs:ctx.env.fs ~sys:ctx.env.sys ~d10:ctx.d10_cfg
-    ~staging:ctx.staging ~cache_root:ctx.cache_root ~url_base:ctx.url_base
-    ?log_path hash
+    ~staging:ctx.staging ~cache_root:ctx.cache_root ~url_base:ctx.url_base hash
 
 let direct_reporter_tracking ~reporter ?stream () : D10ir.Direct.reporter =
   {
@@ -1317,7 +1344,14 @@ let validate_plan_or_fail ~d10_cfg ~fs ~plan_dir merged =
    (only when [archive_sources] is true) for one [<sha>]. The sidecar
    is what powers source-to-binary stitching for an indexer; the
    tarball makes the bucket fully self-contained against upstream
-   deletion. *)
+   deletion.
+
+   The remote prefix is [d10ir-archives/], NOT the local cache's
+   [d10ir/archives/] dir name: that is exactly the relative shape
+   {!D10ir.Registry.url_of} / {!D10ir.Registry.sidecar_url_of} fetch
+   from ([<base>/d10ir-archives/<sha>.{tar.zst,json}]). Keeping these
+   in lock-step is what makes an upload-only bucket usable by the
+   source-archive prefetch path. *)
 let upload_one_d10ir ~sys ~cache_root ~url_base ~archive_sources sha =
   let archives_dir =
     Filename.concat cache_root (Filename.concat "d10ir" "archives")
@@ -1326,10 +1360,10 @@ let upload_one_d10ir ~sys ~cache_root ~url_base ~archive_sources sha =
   let tar_src = Filename.concat archives_dir (sha ^ ".tar.zst") in
   if Sys.file_exists json_src then
     s3_put_quiet ~sys ~src:json_src
-      ~dst:(Fmt.str "%sd10ir/%s.json" url_base sha);
+      ~dst:(Fmt.str "%sd10ir-archives/%s.json" url_base sha);
   if archive_sources && Sys.file_exists tar_src then
     s3_put_quiet ~sys ~src:tar_src
-      ~dst:(Fmt.str "%sd10ir/%s.tar.zst" url_base sha)
+      ~dst:(Fmt.str "%sd10ir-archives/%s.tar.zst" url_base sha)
 
 let iter_solved_packages (s : solved) f =
   List.iter

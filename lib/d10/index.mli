@@ -24,9 +24,10 @@
     built before tagging was introduced or for packages that came from a
     pin-depends tree.
 
-    [tarball_sha256] / [tarball_size] are populated for every layer published in
-    a registry export ({!record_tarball}). NULL on a bin-index registry that
-    ships only the SQLite index without the per-layer [.tar.zst] payload.
+    [tarball_sha256] / [tarball_size] are legacy columns: they were only ever
+    filled by the deleted registry-export path. The live remote-resolution path
+    reads tarball sha/size from the server-published [index.json] instead, so
+    these are NULL in the purely-local cache index this module now backs.
 
     [layer_binaries] enables [oi run <binary>] to look up the package providing
     a binary without scanning layer trees. [layer_meta] is the equivalent for
@@ -107,13 +108,6 @@ val rebuild :
     [provenance.json] sidecar; tools that don't care about overlay routing can
     leave it at the default. *)
 
-val record_tarball : db -> hash:string -> sha256:string -> size:int64 -> unit
-(** [record_tarball db ~hash ~sha256 ~size] populates the [tarball_sha256] /
-    [tarball_size] columns on the [layers] row. Called per-layer after the
-    [.tar.zst] has been written to the export dir. A row whose tarball columns
-    are NULL belongs to a bin-index registry — no layer restore is possible from
-    there. *)
-
 (** {1 Queries} *)
 
 val find_layer :
@@ -167,12 +161,6 @@ val meta_for :
     version descending. Use [*] as a wildcard for substring search. Reads the
     [layer_meta] table populated by {!rebuild}. *)
 
-val all_tarballs : db -> os_key:string -> (string * string * int64) list
-(** [all_tarballs db ~os_key] returns [(hash, sha256, size)] for every layer in
-    [os_key] that has a published tarball. Empty list on a bin-index registry.
-    The cmdliner layer's [fetch_remote_index] consumes this to populate
-    {!Layer.remote_index}. *)
-
 val deps : db -> hash:string -> (string * string * string) list
 (** [deps db ~hash] returns the direct dependencies of a layer as
     [(dep_name, dep_version, dep_hash)]. *)
@@ -193,8 +181,8 @@ type stats = {
 }
 (** Row counts for a single [os_key], scoped to that platform via the [layers]
     join. [files] is zero unless the index was rebuilt with
-    [include_files:true]; [tarballs] counts layers that carry a published
-    [.tar.zst] (i.e. would survive a registry export). *)
+    [include_files:true]; [tarballs] counts layers whose legacy [tarball_sha256]
+    column is non-NULL (always 0 for a fresh local index). *)
 
 val stats : db -> os_key:string -> stats
 (** [stats db ~os_key] gathers every count for one platform in a single sqlite
@@ -214,11 +202,3 @@ val delete_layers : db -> hashes:string list -> unit
     layer directories are not touched — the caller must
     [rmtree <root>/layers/<os_key>/<hash>/] for each entry. No-op when [hashes]
     is empty. *)
-
-(** {1 Remote merge} *)
-
-val merge_remote : db -> remote_path:string -> unit
-(** [merge_remote db ~remote_path] imports layers from a remote index database
-    into [db]. Only layers whose hash does not already exist in [db] are
-    inserted (local entries take precedence). Associated deps, binaries, and
-    files for new layers are also imported. *)

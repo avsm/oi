@@ -585,22 +585,6 @@ let meta_for db ~findlib_pkg ~os_key =
         (OpamPackage.Version.of_string v1))
     (List.rev !results)
 
-let all_tarballs db ~os_key =
-  let results = ref [] in
-  let cb row =
-    match row with
-    | [| hash; sha; size_s |] -> (
-        try results := (hash, sha, Int64.of_string size_s) :: !results
-        with Failure _ -> ())
-    | _ -> ()
-  in
-  ignore
-    (exec_rows db ~cb
-       "SELECT hash, tarball_sha256, tarball_size FROM layers WHERE os_key = \
-        %s AND tarball_sha256 IS NOT NULL"
-       (quote os_key));
-  List.rev !results
-
 let deps db ~hash =
   let results = ref [] in
   let cb row =
@@ -644,11 +628,6 @@ let all_binaries db ~os_key =
   List.rev !results
 
 (* -- Stats ---------------------------------------------------------------- *)
-
-let record_tarball db ~hash ~sha256 ~size =
-  execf db
-    "UPDATE layers SET tarball_sha256 = %s, tarball_size = %Ld WHERE hash = %s"
-    (quote sha256) size (quote hash)
 
 let stats db ~os_key =
   let get_count sql =
@@ -709,55 +688,3 @@ let delete_layers db ~hashes =
       execf db "DELETE FROM layer_deps WHERE layer_hash IN (%s)" in_;
       execf db "DELETE FROM layers WHERE hash IN (%s)" in_;
       exec db "COMMIT"
-
-(* -- Remote merge --------------------------------------------------------- *)
-
-(* Column names of [<schema>.<table>]. Uses [PRAGMA table_info]
-   driven through [Sqlite3.exec] (not [exec_not_null_no_headers] —
-   that variant silently drops rows whose [dflt_value] is NULL,
-   which is most of our columns). The [schema] qualifier lets us
-   inspect the attached "remote" database during a merge so that
-   {!copy_table_intersection} can tolerate older registries missing
-   newer columns (e.g. [tarball_sha256]). *)
-let column_names db ~schema ~table =
-  let cols = ref [] in
-  let cb row _headers =
-    match row with
-    | [| _cid; Some name; _ty; _nn; _dflt; _pk |] -> cols := name :: !cols
-    | _ -> ()
-  in
-  let sql =
-    if schema = "main" then Fmt.str "PRAGMA table_info(%s)" table
-    else Fmt.str "PRAGMA %s.table_info(%s)" schema table
-  in
-  ignore (Sqlite3.exec db ~cb sql);
-  List.rev !cols
-
-let copy_table_intersection db ~table ~where =
-  let local = column_names db ~schema:"main" ~table in
-  let remote = column_names db ~schema:"remote" ~table in
-  let common = List.filter (fun c -> List.mem c remote) local in
-  if local = [] || remote = [] || common = [] then ()
-  else
-    let cols = String.concat ", " common in
-    execf db "INSERT INTO %s (%s) SELECT %s FROM remote.%s WHERE %s" table cols
-      cols table where
-
-let merge_remote db ~remote_path =
-  execf db "ATTACH DATABASE %s AS remote" (quote remote_path);
-  exec db
-    "CREATE TEMP TABLE _new_hashes AS SELECT hash FROM remote.layers WHERE \
-     hash NOT IN (SELECT hash FROM main.layers)";
-  copy_table_intersection db ~table:"layers"
-    ~where:"hash IN (SELECT hash FROM _new_hashes)";
-  let dep_where = "layer_hash IN (SELECT hash FROM _new_hashes)" in
-  copy_table_intersection db ~table:"layer_deps" ~where:dep_where;
-  copy_table_intersection db ~table:"layer_binaries" ~where:dep_where;
-  copy_table_intersection db ~table:"layer_meta" ~where:dep_where;
-  (* [layer_files] is dropped in the new index.db shape (it was
-     88% of the index size with no consumer in [oi search]).
-     Skip it on merge too — even if a remote registry was exported
-     by an older version that still wrote the table, importing it
-     locally just re-bloats the index for no gain. *)
-  exec db "DROP TABLE _new_hashes";
-  exec db "DETACH DATABASE remote"

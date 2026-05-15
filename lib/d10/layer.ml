@@ -285,15 +285,18 @@ let finalize_remote_layer (c : Config.t) ~hash ~tmp_file ~staging_dir ~layer_dir
   end
 
 (* Best-effort companion fetch for the layer-manifest sidecar JSON. The
-   sidecar lives at [<URL>/<os_key>/<hash>.json] and downloads into
-   [<cache>/layers/<os_key>/<hash>.json], next to the [<hash>/] layer
-   dir that [pull_remote] just published. Old registries that
-   pre-date the sidecar scheme have only tarballs, so any HTTP error
-   is silently swallowed. *)
+   sidecar lives at [<URL>/<os_key>/layers/<hash>.json] and downloads
+   into [<cache>/layers/<os_key>/<hash>.json], next to the [<hash>/]
+   layer dir that [pull_remote] just published. The [layers/] prefix
+   matches the streaming uploader's S3 key and the Clickhouse indexer's
+   [*/layers/*.json] glob — it is the single registry layout. Old
+   registries that pre-date the sidecar scheme have only tarballs, so
+   any HTTP error is silently swallowed. *)
 let fetch_layer_sidecar (c : Config.t) ~session ~remote ~hash =
   let url =
     match remote with
-    | `Http_remote base_url -> Fmt.str "%s/%s/%s.json" base_url c.os_key hash
+    | `Http_remote base_url ->
+        Fmt.str "%s/%s/layers/%s.json" base_url c.os_key hash
   in
   let os_layer_dir = Eio.Path.(c.root / "layers" / c.os_key) in
   let dst = Eio.Path.(os_layer_dir / (hash ^ ".json")) in
@@ -311,7 +314,7 @@ let pull_remote (c : Config.t) ~session ~remote ~hash ?on_progress ?on_phase
     let url =
       match remote with
       | `Http_remote base_url ->
-          Fmt.str "%s/%s/%s.tar.zst" base_url c.os_key hash
+          Fmt.str "%s/%s/layers/%s.tar.zst" base_url c.os_key hash
     in
     let os_layer_dir = Eio.Path.(c.root / "layers" / c.os_key) in
     let layer_dir = dir c ~hash in
@@ -359,29 +362,13 @@ let do_export (c : Config.t) ~hash ~os_dir ~dst_file =
     true
   end
 
+(* Single-hash export only. The bulk [export_all] (every succeeded
+   layer across every os_key) went away with [oi build --export]; the
+   streaming uploader stages one layer at a time via [export] and PUTs
+   it straight to S3. *)
 let export (c : Config.t) ~hash ~dst =
   if not (exists c ~hash) then false
   else
     let os_dir = Eio.Path.(dst / c.os_key) in
     let dst_file = Eio.Path.(os_dir / (hash ^ ".tar.zst")) in
     do_export c ~hash ~os_dir ~dst_file
-
-let export_one_if_succeeded (c : Config.t) ~os_key ~dst count hash =
-  if String.contains hash '.' then count
-  else
-    let c = { c with os_key } in
-    if not (succeeded c ~hash) then count
-    else if export c ~hash ~dst then count + 1
-    else count
-
-let export_for_os_key (c : Config.t) ~layers_dir ~dst count os_key =
-  let os_layer_dir = Eio.Path.(layers_dir / os_key) in
-  let hashes = try Eio.Path.read_dir os_layer_dir with Eio.Exn.Io _ -> [] in
-  List.fold_left (export_one_if_succeeded c ~os_key ~dst) count hashes
-
-let export_all (c : Config.t) ~dst =
-  let layers_dir = Eio.Path.(c.root / "layers") in
-  if not (Sysops.file_exists layers_dir) then 0
-  else
-    let os_keys = Eio.Path.read_dir layers_dir in
-    List.fold_left (export_for_os_key c ~layers_dir ~dst) 0 os_keys

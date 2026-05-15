@@ -86,6 +86,11 @@ type t = {
   exit_status : int option;
   provenance : Provenance.t option;
   recipe : recipe option;
+  (* Build-log tail, folded in so the only per-layer artefact the
+     registry carries is this JSON sidecar (the separate <hash>.log
+     upload is gone). Success path populates it; failure path keeps
+     using [failure.log]. *)
+  log : log_tail option;
   (* Failure-only *)
   failure : failure_info option;
   invocation_id : string option;
@@ -223,6 +228,7 @@ let codec : t Jsont.t =
       exit_status
       provenance
       recipe
+      log
       failure
       invocation_id
       source_archive
@@ -250,6 +256,7 @@ let codec : t Jsont.t =
         exit_status;
         provenance;
         recipe;
+        log;
         failure;
         invocation_id;
         source_archive;
@@ -282,6 +289,7 @@ let codec : t Jsont.t =
   |> Object.opt_mem "exit_status" int ~enc:(fun r -> r.exit_status)
   |> Object.opt_mem "provenance" Provenance.codec ~enc:(fun r -> r.provenance)
   |> Object.opt_mem "recipe" recipe_codec ~enc:(fun r -> r.recipe)
+  |> Object.opt_mem "log" log_tail_codec ~enc:(fun r -> r.log)
   |> Object.opt_mem "failure" failure_codec ~enc:(fun r -> r.failure)
   |> Object.opt_mem "invocation_id" string ~enc:(fun r -> r.invocation_id)
   |> Object.opt_mem "source_archive" source_archive_codec ~enc:(fun r ->
@@ -352,8 +360,8 @@ let files_of_fs_dir fs_dir =
 
 let success ~hash ~os_key ~package ~package_name ~package_ver ~method_
     ?overlay_handle ?overlay_version ~tarball ~files ~binaries ~findlib
-    ~exit_status ?provenance ?recipe ?source_archive ~deps ~depexts_declared
-    ?build_env_ocaml_version () =
+    ~exit_status ?provenance ?recipe ?log ?source_archive ~deps
+    ~depexts_declared ?build_env_ocaml_version () =
   {
     schema = 1;
     kind = "oi.layer.v1";
@@ -374,6 +382,7 @@ let success ~hash ~os_key ~package ~package_name ~package_ver ~method_
     exit_status = Some exit_status;
     provenance;
     recipe;
+    log;
     failure = None;
     invocation_id = None;
     source_archive;

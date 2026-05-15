@@ -802,26 +802,21 @@ let detect_project_mode ~fs ~skip_local ~targets ~all =
   (in_project, cwd_s)
 
 (* Flag validation. Mode-specific dispatch happens after this; here we
-   only reject combinations that can't possibly proceed: [--export] +
-   [--depext] together, and any flag whose result depends on solving
-   when there's nothing to solve. *)
-let validate_build_flags ~targets ~all ~project_mode ~export ~depext_only
-    ~archives_only ~every_version =
+   only reject combinations that can't possibly proceed: any flag whose
+   result depends on solving when there's nothing to solve. *)
+let validate_build_flags ~targets ~all ~project_mode ~depext_only ~archives_only
+    ~every_version =
   let needs_spec what =
     Oi.Error.fail_config_error
       "oi build %s: no spec and no project (cwd has no *.opam). Pass a PKG, \
        @HANDLE, or --all."
       what
   in
-  if export <> None && depext_only then
+  if archives_only && depext_only then
     Oi.Error.fail_config_error
-      "oi build: --export and --depext are mutually exclusive";
-  if archives_only && (export <> None || depext_only) then
-    Oi.Error.fail_config_error
-      "oi build --archives-only: cannot combine with --export or --depext (no \
-       build runs, so there's nothing to publish or depext)";
+      "oi build --archives-only: cannot combine with --depext (no build runs, \
+       so there's nothing to depext)";
   let no_spec = targets = [] && (not all) && not project_mode in
-  if no_spec && export <> None then needs_spec "--export";
   if no_spec && depext_only then needs_spec "--depext";
   if no_spec && archives_only then needs_spec "--archives-only";
   if every_version && not archives_only then
@@ -1618,14 +1613,6 @@ let prepare_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~registry
   in
   (bi, buckets)
 
-let do_export_if_set ~fs ~clock ~sys ~os_key ~cache ~registry ~export ~ok =
-  match export with
-  | Some output when ok ->
-      Registry_export.run ~fs
-        ~clock:(clock :> D10.Config.clk)
-        ~sys ~os_key ~cache ~registry ~output
-  | _ -> ()
-
 let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
     ~depext_only ~archives_only ~save_d10ir ~dist ~jobs ~upload_archive
     ~gi_offset_ref (override, bucket_groups) =
@@ -1686,7 +1673,6 @@ type args = {
   jobs : int option;
   toolchain_override : string option;
   depext_only : bool;
-  export : string option;
   envrc_mode : Sync.envrc_mode;
   archives_only : bool;
   every_version : bool;
@@ -1733,7 +1719,7 @@ let run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
    none apply, fall through and return [`Continue] so [run] runs
    the full multi-bucket flow. *)
 let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
-    ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s ~args =
+    ~clock ~os_key ~http_session ~project_mode ~cwd_s ~args =
   if args.every_version then
     exit
       (mirror_archives ~fs ~cache ~label:"every-version"
@@ -1754,12 +1740,11 @@ let dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh ~platform ~proc_mgr
         ~depext_only:args.depext_only ~envrc_mode:args.envrc_mode
         ~dist:args.dist ~cwd_s
     in
-    do_export ~ok:(ec = 0) ();
     exit ec
   end
 
 let mk_args refresh locked skip_local all only skip registry use_registry
-    with_repos with_deps jobs toolchain_override depext_only export envrc_mode
+    with_repos with_deps jobs toolchain_override depext_only envrc_mode
     archives_only every_version save_d10ir dist upload_archive archive_sources
     snapshot_reporepo targets =
   {
@@ -1775,7 +1760,6 @@ let mk_args refresh locked skip_local all only skip registry use_registry
     jobs;
     toolchain_override;
     depext_only;
-    export;
     envrc_mode;
     archives_only;
     every_version;
@@ -1787,17 +1771,15 @@ let mk_args refresh locked skip_local all only skip registry use_registry
     targets;
   }
 
-let finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~(acc : acc)
-    ~run_start_time ~registry ~export =
+let finalise_run ~cache_root ~(acc : acc) ~run_start_time =
   print_build_summary ~targets:acc.targets ~target_handle:acc.target_handle
     ~solve_failures:acc.solve_failures ~target_group:acc.target_group
     ~group_results:acc.group_results;
   print_fetch_logs ~cache_root ~run_start_time;
-  do_export_if_set ~fs ~clock ~sys ~os_key ~cache ~registry ~export ~ok:true;
   print_dist_artifacts acc.dist_mapping
 
 let run (c : Terms.common) refresh locked skip_local all only skip registry
-    use_registry with_repos with_deps jobs toolchain_override depext_only export
+    use_registry with_repos with_deps jobs toolchain_override depext_only
     envrc_mode archives_only every_version save_d10ir dist upload_archive
     archive_sources snapshot_reporepo targets =
   Harness.run @@ fun ~sw env ->
@@ -1817,7 +1799,7 @@ let run (c : Terms.common) refresh locked skip_local all only skip registry
   let data_dir = c.data_dir in
   let args =
     mk_args refresh locked skip_local all only skip registry use_registry
-      with_repos with_deps jobs toolchain_override depext_only export envrc_mode
+      with_repos with_deps jobs toolchain_override depext_only envrc_mode
       archives_only every_version save_d10ir dist upload_archive archive_sources
       snapshot_reporepo targets
   in
@@ -1826,21 +1808,16 @@ let run (c : Terms.common) refresh locked skip_local all only skip registry
       ~all:args.all
   in
   validate_build_flags ~targets:args.targets ~all:args.all ~project_mode
-    ~export:args.export ~depext_only:args.depext_only
-    ~archives_only:args.archives_only ~every_version:args.every_version;
-  let do_export ~ok () =
-    do_export_if_set ~fs ~clock ~sys ~os_key ~cache ~registry:args.registry
-      ~export:args.export ~ok
-  in
+    ~depext_only:args.depext_only ~archives_only:args.archives_only
+    ~every_version:args.every_version;
   dispatch_shortcuts ~fs ~sys ~cache ~data_dir ~refresh:args.refresh ~platform
-    ~proc_mgr ~clock ~os_key ~http_session ~do_export ~project_mode ~cwd_s ~args;
+    ~proc_mgr ~clock ~os_key ~http_session ~project_mode ~cwd_s ~args;
   let run_start_time = Unix.time () in
   let cache_root = Oi.Cache.root_s cache in
   let acc = new_acc () in
   run_progress_buckets ~fs ~sys ~cache ~data_dir ~refresh:args.refresh ~platform
     ~proc_mgr ~clock ~os_key ~http_session ~cache_root ~acc ~args;
-  finalise_run ~fs ~clock ~sys ~os_key ~cache ~cache_root ~acc ~run_start_time
-    ~registry:args.registry ~export:args.export
+  finalise_run ~cache_root ~acc ~run_start_time
 
 let targets_arg =
   Arg.(
@@ -1875,24 +1852,13 @@ let depext_only_arg =
     & info ~doc:"Solve only; print required system packages, one per line."
         [ "depext" ])
 
-let export_arg =
-  Arg.(
-    value
-    & opt (some string) None
-    & info ~docv:"DIR"
-        ~doc:
-          "Publish a registry into $(i,DIR) after the build: layers, source \
-           archives, and $(b,index.db). Requires a build spec or project. \
-           Mutually exclusive with $(b,--depext)."
-        [ "export" ])
-
 let archives_only_arg =
   Arg.(
     value & flag
     & info
         ~doc:
           "Fetch source archives into the local mirror; skip build and \
-           install. Mutually exclusive with $(b,--export) and $(b,--depext)."
+           install. Mutually exclusive with $(b,--depext)."
         [ "archives-only" ])
 
 let every_version_arg =
@@ -1937,9 +1903,9 @@ let upload_archive_arg =
           "After the build, mirror every freshly built layer to \
            $(i,URL)/$(b,<os_key>/layers/<hash>.tar.zst) plus its companion \
            $(b,.json) manifest, every d10ir source-manifest sidecar to \
-           $(i,URL)/$(b,d10ir/<sha>.json), and the per-invocation build \
-           manifest to $(i,URL)/$(b,<os_key>/builds/...) via $(b,s3cmd put). \
-           Assumes a working $(b,~/.s3cfg). Typical use: \
+           $(i,URL)/$(b,d10ir-archives/<sha>.json), and the per-invocation \
+           build manifest to $(i,URL)/$(b,<os_key>/builds/...) via $(b,s3cmd \
+           put). Assumes a working $(b,~/.s3cfg). Typical use: \
            $(b,--upload-archive=s3://oiu/)."
         [ "upload-archive" ])
 
@@ -1949,7 +1915,7 @@ let archive_sources_arg =
     & info
         ~doc:
           "Also upload the consolidated source $(b,.tar.zst) tarballs to \
-           $(i,URL)/$(b,d10ir/<sha>.tar.zst) (in addition to the JSON \
+           $(i,URL)/$(b,d10ir-archives/<sha>.tar.zst) (in addition to the JSON \
            sidecars). Default off: the sidecar's resolved $(b,commit_sha) + \
            upstream URLs are enough for reproducibility while upstream git \
            remotes remain alive. Flip on for self-contained, \
@@ -1998,7 +1964,7 @@ let cmd_info =
           \  oi build dune\n\
           \  oi build @avsm/owntracks\n\
           \  oi build @avsm\n\
-          \  oi build --all --export ./registry\n\
+          \  oi build --all --upload-archive=s3://oiu/\n\
           \  oi build --all --depext | sudo apt install -y -";
       ]
 
@@ -2008,7 +1974,7 @@ let cmd =
       const run $ Terms.common $ Terms.refresh $ Terms.locked $ Terms.skip_local
       $ all_arg $ only_arg $ skip_arg $ Terms.registry $ Terms.use_registry
       $ Terms.with_repos $ Terms.with_deps $ Terms.jobs $ Terms.toolchain
-      $ depext_only_arg $ export_arg $ Sync.envrc_mode_arg $ archives_only_arg
+      $ depext_only_arg $ Sync.envrc_mode_arg $ archives_only_arg
       $ every_version_arg $ save_d10ir_arg $ dist_arg $ upload_archive_arg
       $ archive_sources_arg $ snapshot_reporepo_arg $ targets_arg)
 

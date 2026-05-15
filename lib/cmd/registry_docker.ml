@@ -130,6 +130,17 @@ let oi_builder_stage ~src_context =
 
 (* -- Per-distro build stage --------------------------------------------- *)
 
+(* Per-invocation cache-buster: a fresh random integer baked into both
+   the Dockerfile [RUN] and the obuilder [(run …)] that curls down the
+   prebuilt [oi]/[oix] binaries. Without it, Docker / obuilder would
+   reuse the cached layer indefinitely — even after a new release lands
+   on GitHub — because the [RUN] string is byte-identical across runs.
+   Seeding with [Random.self_init] (i.e. /dev/urandom) means each
+   [oi docker --all] invocation regenerates Dockerfiles that force a
+   fresh fetch on the next build. *)
+let () = Random.self_init ()
+let oi_fetch_cache_bust = Random.bits ()
+
 (* GitHub repo whose releases page hosts the static [oi] binaries.
    Change this if you maintain a fork; every per-distro image pulls
    [oi-linux-<arch>] from [<release_repo>/releases/latest/download/]. *)
@@ -156,12 +167,13 @@ let distro_stage ?(overlay_depexts = []) d =
   let human = Distro.human_readable_string_of_distro (resolved :> Distro.t) in
   let fetch_oi =
     Fmt.str
-      "arch=$(uname -m) && curl -fsSL -o /usr/local/bin/oi \
+      "echo 'oi-fetch-cache-bust=%d' && arch=$(uname -m) && curl -fsSL -o \
+       /usr/local/bin/oi \
        https://github.com/%s/releases/latest/download/oi-linux-$arch && curl \
        -fsSL -o /usr/local/bin/oix \
        https://github.com/%s/releases/latest/download/oix-linux-$arch && chmod \
        0755 /usr/local/bin/oi /usr/local/bin/oix"
-      release_repo release_repo
+      oi_fetch_cache_bust release_repo release_repo
   in
   let base = build_depexts mgr in
   (* Dedup overlay depexts against the bootstrap toolchain so the
@@ -463,12 +475,13 @@ let combine_depexts ~base overlay_depexts =
 
 let fetch_oi_obuilder =
   Fmt.str
-    "arch=$(uname -m) && curl -fsSL -o /usr/local/bin/oi \
+    "echo 'oi-fetch-cache-bust=%d' && arch=$(uname -m) && curl -fsSL -o \
+     /usr/local/bin/oi \
      https://github.com/%s/releases/latest/download/oi-linux-$arch && curl \
      -fsSL -o /usr/local/bin/oix \
      https://github.com/%s/releases/latest/download/oix-linux-$arch && chmod \
      0755 /usr/local/bin/oi /usr/local/bin/oix"
-    release_repo release_repo
+    oi_fetch_cache_bust release_repo release_repo
 
 let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
     =

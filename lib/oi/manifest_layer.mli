@@ -68,6 +68,11 @@ type t = {
   exit_status : int option;
   provenance : Provenance.t option;
   recipe : recipe option;
+  log : log_tail option;
+      (** Tail of the per-layer build log, folded in so the registry's only
+          per-layer artefact is the [<hash>.json] sidecar (no sibling
+          [<hash>.log]). Populated on success by the streaming uploader;
+          {!failure_info.log} still carries the failure-path tail. *)
   failure : failure_info option;
   invocation_id : string option;
   source_archive : source_archive option;
@@ -103,6 +108,7 @@ val success :
   exit_status:int ->
   ?provenance:Provenance.t ->
   ?recipe:recipe ->
+  ?log:log_tail ->
   ?source_archive:source_archive ->
   deps:dep list ->
   depexts_declared:string list ->

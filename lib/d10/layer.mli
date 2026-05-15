@@ -180,11 +180,9 @@ val pull_remote :
 val export : Config.t -> hash:string -> dst:_ Eio.Path.t -> bool
 (** [export c ~hash ~dst] creates [<dst>/<os_key>/<hash>.tar.zst] from local
     layer [hash]. Returns [true] if a new archive was created. Returns [false]
-    if the layer doesn't exist locally or the archive already exists. *)
+    if the layer doesn't exist locally or the archive already exists.
 
-val export_all : Config.t -> dst:_ Eio.Path.t -> int
-(** [export_all c ~dst] exports all succeeded layers for all os_keys to [dst].
-    The per-os_key [index.db] (built via {!Index.rebuild} +
-    {!Index.record_tarball}) is the source of truth for "what's published"; this
-    function only writes the [.tar.zst] files. Returns the number of newly
-    exported layers. *)
+    Used by the streaming uploader to stage one layer's tarball before it is PUT
+    to [<base>/<os_key>/layers/<hash>.tar.zst]. There is no bulk [export_all] /
+    [oi build --export] anymore — the registry is written exclusively by the
+    per-layer streaming upload. *)
