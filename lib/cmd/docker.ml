@@ -104,8 +104,7 @@ let print_emit_all_summary ~oi_path ~per_distro_paths ~compose_path =
 
 (* Multi-distro registry build project: one [Dockerfile.<distro>] per
    target distribution, plus [Dockerfile.oi] (static oi builder) and
-   [docker-compose.yml]. Each service runs [oi build --all --export
-   /out]. *)
+   [docker-compose.yml]. *)
 let emit_all ~fs ~sys ~platform ~cache ~data_dir ~refresh ~src_context ~s3
     ~output () =
   (try Unix.mkdir output 0o755 with Unix.Unix_error (EEXIST, _, _) -> ());
