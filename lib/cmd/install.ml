@@ -255,6 +255,7 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs ~clock
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   (solved, result)

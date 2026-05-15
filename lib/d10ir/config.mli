@@ -21,6 +21,12 @@ type t = {
           library is opam-agnostic — defaults are empty. Consumers like [oi] add
           their own (e.g. [OCAMLFIND_LDCONF=ignore] for opam build hardening).
       *)
+  doc_tools_dir : string option;
+      (** Tool prefix holding [bin/odoc_driver_voodoo], [bin/odoc], [bin/odoc-md]
+          and [bin/sherlodoc] (typically [_oi/tools/]). When [Some _],
+          [build_one] runs voodoo after [Apply_install_file] for every node and
+          captures the resulting [odoc/{html,odoc}/...] tree into the same
+          layer. [None] disables the doc step. *)
 }
 
 val default : t

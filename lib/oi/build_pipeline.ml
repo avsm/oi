@@ -841,7 +841,25 @@ type build_inputs = {
   upload_archive_url : string option;
   archive_sources : bool;
   snapshot_reporepo : bool;
+  doc_tools_dir : string option;
+      (** Absolute path to the tool prefix (typically [<cwd>/_oi/tools/])
+          holding [bin/odoc_driver_voodoo], [bin/odoc], [bin/odoc-md] and
+          [bin/sherlodoc]. When this is [None], the doc step no-ops; when
+          [Some _] and [oi-docs] appears anywhere in [solved.groups], every
+          package's [build_one] runs voodoo as a post-install step. *)
 }
+
+(* True iff the [oi-docs] conf-package is in any group's solve. Sync
+   injects it ({!Sync.build_root_names}) so docs are on by default; gating
+   the doc step here lets every [build] caller share the decision instead
+   of plumbing a [with_docs] bool through. *)
+let oi_docs_in_solved (s : solved) =
+  List.exists
+    (fun (g : group_result) ->
+      List.exists
+        (fun p -> OpamPackage.Name.to_string (OpamPackage.name p) = "oi-docs")
+        g.pkgs)
+    s.groups
 
 (* -- Upload primitives ------------------------------------------------ *)
 
@@ -1257,6 +1275,10 @@ let direct_cfg_with_jobs ~jobs =
     build_parallelism =
       (match jobs with Some j -> j | None -> base.build_parallelism);
   }
+
+let direct_cfg_with_docs ~jobs ~doc_tools_dir =
+  let base = direct_cfg_with_jobs ~jobs in
+  { base with doc_tools_dir }
 
 (* Forward d10ir's [Direct] events to the outer [Build_progress.reporter],
    and (when [stream] is set) PUT each freshly built layer to S3 as soon
@@ -1752,7 +1774,16 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
       in
       emit_total_estimate ~reporter ~merged needed_fetches needed_fetch_bytes;
       let d10_cfg = d10_cfg_of_env ~env ~cache_root in
-      let direct_cfg = direct_cfg_with_jobs ~jobs:inp.jobs in
+      let direct_cfg =
+        (* The doc step runs iff [oi-docs] is in the solve AND the caller
+           supplied a tool prefix to find voodoo binaries in. Encode both
+           preconditions as a single [doc_tools_dir = Some _] / [None]
+           signal passed to the executor. *)
+        let doc_tools_dir =
+          if oi_docs_in_solved inp.solved then inp.doc_tools_dir else None
+        in
+        direct_cfg_with_docs ~jobs:inp.jobs ~doc_tools_dir
+      in
       let plan_dir = Eio.Path.native_exn d10_cfg.root in
       let stream = mk_stream_ctx ~env ~cache_root ~d10_cfg ~started_at inp in
       let direct_reporter = direct_reporter_tracking ~reporter ?stream () in

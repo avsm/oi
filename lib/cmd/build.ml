@@ -584,6 +584,7 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -1684,6 +1685,7 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
         upload_archive_url = upload_archive;
         archive_sources = bi.archive_sources;
         snapshot_reporepo = bi.snapshot_reporepo;
+        doc_tools_dir = None;
       }
   in
   record_build_results ~acc ~gi_offset solved result_opt;

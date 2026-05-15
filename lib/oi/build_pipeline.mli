@@ -210,6 +210,13 @@ type build_inputs = {
           downstream consumer is expected to clone the reporepo from its own
           URL. Flip on when the reporepo is private and the bucket needs to be
           the canonical archival source. *)
+  doc_tools_dir : string option;
+      (** Tool prefix holding voodoo + odoc + odoc-md + sherlodoc binaries
+          (typically [<cwd>/_oi/tools/]). Passed through to [Direct.run] as
+          [D10ir.Config.doc_tools_dir]: when [Some _] and [oi-docs] appears in
+          [solved.groups], every package's [build_one] runs voodoo
+          post-install. Callers that haven't run {!Sync.install_tools} (i.e.
+          everything except [oi sync]) pass [None]. *)
 }
 
 val build :

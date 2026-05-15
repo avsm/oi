@@ -547,6 +547,7 @@ let drive_solve_and_build ~ctx ~target ~req =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   interpret_build_result ~sys:ctx.sys ~fs:ctx.fs ~clock:ctx.clock
@@ -693,6 +694,7 @@ let script_solve ~ctx ~req ~target =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved

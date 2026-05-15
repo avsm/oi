@@ -3,6 +3,7 @@ type t = {
   keep_staging : bool;
   log_dir : string option;
   inject_env : (string * string) list;
+  doc_tools_dir : string option;
 }
 
 let domain_count_default () =
@@ -16,6 +17,7 @@ let default =
     keep_staging = false;
     log_dir = None;
     inject_env = [];
+    doc_tools_dir = None;
   }
 
 let with_env_overrides t =

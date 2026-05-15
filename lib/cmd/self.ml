@@ -327,6 +327,7 @@ let run_solve_build (b : build_inputs) =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
