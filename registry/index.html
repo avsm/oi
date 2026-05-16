@@ -817,7 +817,7 @@ main { padding: 0.75rem 1rem 2rem; max-width: 1400px; }
         <div class="loading-bar-fill" id="loading-fill"></div>
       </div>
       <div class="loading-status" id="loading-status">
-        <span class="spinner"></span>Loading manifests…
+        <span class="spinner"></span>Loading registry index…
       </div>
       <div class="loading-detail" id="loading-detail"></div>
     </div>
@@ -827,11 +827,20 @@ main { padding: 0.75rem 1rem 2rem; max-width: 1400px; }
 <script>
 "use strict";
 
-// Probe these os_keys at <root>/<os_key>/logs/manifest.json. Ones that
-// 404 are silently skipped. Matches the default_distros list emitted by
+// Probe these os_keys at <root>/<os_key>/index-full.json — the
+// per-os_key aggregate the server-side ClickHouse query (foo.sql in the
+// repo root) publishes by scanning the bucket's per-layer
+// <os_key>/layers/<hash>.json manifest sidecars. Ones that 404 are
+// silently skipped. Matches the default_distros list emitted by
 // `oi docker --all` (see lib/cmd/docker.ml). Keep this in sync when that
 // list changes; arm64 variants appear here too once ocluster submits
 // them to the linux-arm64 pool.
+//
+// index-full.json (foo.sql schema 2) carries every attempted layer,
+// success and failure, each with an explicit outcome + failure summary.
+// The build-log tail lives in that layer's <os_key>/layers/<hash>.json
+// sidecar and the source provenance in d10ir-archives/<sha>.json; both
+// are fetched lazily on expand.
 const PROBE_OS_KEYS = [
   "alpine~3.23~x86_64",
   "alpine~3.23~aarch64",
@@ -857,6 +866,7 @@ const OUTCOME_GROUPS = {
   install_failed: "fail",
   fetch_failed: "fail",
   solve_failed: "fail",
+  timeout: "fail",
   dep_failed: "warn",
   depext_missing: "warn",
   skipped: "warn",
@@ -872,8 +882,9 @@ const STATUS_GROUPS = [
 ];
 
 const state = {
-  manifests: new Map(),    // os_key -> manifest object
-  audits: new Map(),       // os_key -> Map<layer_hash, event[]>
+  manifests: new Map(),    // os_key -> adapted index-full doc (see adaptIndex)
+  sidecars: new Map(),     // os_key -> Map<hash, sidecar | null | "loading">
+  archives: new Map(),     // source sha -> oi.source.v1 | null | "loading"
   active: null,            // currently selected os_key
   filter: "",
   overlayFilter: new Set(),// empty = all overlays
@@ -883,56 +894,169 @@ const state = {
   highlightUpstream: null, // layer_hash to also highlight (for dep_failed)
 };
 
-async function fetchManifest(osKey) {
+// ClickHouse writes index-full.json in JSONEachRow: with foo.sql's
+// `GROUP BY os_key` + `PARTITION BY os_key` each file is exactly one
+// JSON object, but tolerate newline-delimited multi-row output too
+// (parse every non-empty line, concatenate the per-row `layers`).
+function parseJsonEachRow(text) {
+  const t = text.trim();
+  if (!t) return null;
   try {
-    const r = await fetch(`${osKey}/logs/manifest.json`, { cache: "no-cache" });
+    return JSON.parse(t);
+  } catch {
+    let head = null;
+    const layers = [];
+    for (const line of t.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      let row;
+      try { row = JSON.parse(s); } catch { continue; }
+      if (!head) head = row;
+      if (Array.isArray(row.layers)) layers.push(...row.layers);
+    }
+    if (!head) return null;
+    head.layers = layers;
+    return head;
+  }
+}
+
+// Map one index-full layer row into the internal `r` shape the
+// renderers expect. foo.sql (schema 2) emits every attempted layer with
+// an explicit `outcome` (ok|fail|timeout) and a failure summary, so the
+// headline is taken from `outcome`, refined by the failure phase so the
+// status bar can tell a fetch failure from a build failure at a glance.
+function headlineOf(l) {
+  if (!l.outcome || l.outcome === "ok") return "ok";
+  if (l.outcome === "timeout") return "timeout";
+  const ph = (l.failure_phase || "").toLowerCase();
+  if (ph.includes("fetch")) return "fetch_failed";
+  if (ph.includes("install")) return "install_failed";
+  return "build_failed";
+}
+
+function adaptLayer(l) {
+  const overlay = l.overlay_handle
+    ? { handle: l.overlay_handle, version: l.overlay_version || "" }
+    : null;
+  const failed = l.outcome && l.outcome !== "ok";
+  return {
+    pkg: { name: l.package_name || "", version: l.package_ver || "" },
+    layer_hash: l.hash,
+    outcome: l.outcome || "ok",
+    method: l.method || "",
+    exit_status: failed ? (l.failure_exit_status ?? null) : (l.exit_status ?? null),
+    headline_outcome: headlineOf(l),
+    failure: failed
+      ? { phase: l.failure_phase || null,
+          exit_status: l.failure_exit_status ?? null,
+          duration_s: l.failure_duration_s ?? null }
+      : null,
+    built_at: typeof l.created === "number" && l.created > 0 ? l.created : null,
+    overlay,
+    deps: Array.isArray(l.deps) ? l.deps : [],
+    binaries: Array.isArray(l.binaries) ? l.binaries : [],
+    findlib: Array.isArray(l.findlib) ? l.findlib : [],
+    tarball: l.tarball_sha256
+      ? { sha256: l.tarball_sha256, size: l.tarball_size ?? null }
+      : null,
+    source_archive_sha256: l.source_archive_sha256 || null,
+  };
+}
+
+// Adapt the published index-full doc into the manifest shape the rest
+// of the UI (status bar, filters, sort, distro chips) consumes. Every
+// attempted layer is present (successes and failures). The per-event
+// drill-down (callers histogram, audit events) the old manifest+audit
+// scheme carried has no equivalent here; the per-layer build log is
+// fetched lazily from the <hash>.json sidecar, and source provenance
+// from the d10ir-archives/<sha>.json sidecar, on expand.
+function adaptIndex(doc) {
+  const layers = Array.isArray(doc.layers) ? doc.layers : [];
+  const results = layers.map(adaptLayer);
+  const summary = {};
+  for (const k of OUTCOME_KINDS) summary[k] = 0;
+  for (const r of results) summary[r.headline_outcome] = (summary[r.headline_outcome] || 0) + 1;
+  const ts = Date.parse(doc.generated_at || "");
+  return {
+    schema: doc.schema ?? 1,
+    os_key: doc.os_key || "",
+    distro: doc.distro || "",
+    os_version: doc.os_version || "",
+    arch: doc.arch || "",
+    os: doc.os || "",
+    exported_at: Number.isFinite(ts) ? ts / 1000 : 0,
+    n_packages: results.length,
+    summary,
+    results,
+  };
+}
+
+async function fetchIndex(osKey) {
+  try {
+    const r = await fetch(`${osKey}/index-full.json`, { cache: "no-cache" });
+    if (!r.ok) return null;
+    const doc = parseJsonEachRow(await r.text());
+    return doc ? adaptIndex(doc) : null;
+  } catch { return null; }
+}
+
+// The per-layer manifest sidecar (lib/oi/manifest_layer.ml shape) — the
+// build-log tail (`log.{lines,truncated,text}`), failure block, recipe,
+// provenance and file list for one layer. Fetched on demand when a row
+// is expanded and memoised (incl. negative results) in state.sidecars.
+async function fetchSidecar(osKey, hash) {
+  try {
+    const r = await fetch(`${osKey}/layers/${hash}.json`, { cache: "no-cache" });
     if (!r.ok) return null;
     return await r.json();
   } catch { return null; }
 }
 
-// audit.jsonl — one JSON object per line, indexed by layer hash so the
-// detail panel can render per-event provenance (failure command, fetch
-// kind, log tail, …) on demand. Each event carries a tagged target:
-// {kind:"layer", hash} for terminal package events, or
-// {kind:"solve_key", hash} for solve failures (which have no real layer).
-// We only index the [layer] flavour here — solve failures are surfaced
-// through the manifest's failure-only entries rather than the per-layer
-// drill-down. Failures and successes share the index since one layer
-// hash may carry both flavours of event across callers.
-async function fetchAudit(osKey) {
-  try {
-    const r = await fetch(`${osKey}/audit.jsonl`, { cache: "no-cache" });
-    if (!r.ok) return new Map();
-    const text = await r.text();
-    const byLayer = new Map();
-    for (const line of text.split("\n")) {
-      if (!line) continue;
-      let ev;
-      try { ev = JSON.parse(line); } catch { continue; }
-      const tgt = ev.target;
-      if (!tgt || tgt.kind !== "layer" || !tgt.hash) continue;
-      let arr = byLayer.get(tgt.hash);
-      if (!arr) { arr = []; byLayer.set(tgt.hash, arr); }
-      arr.push(ev);
-    }
-    // Sort each layer's events by ts so renders read top-to-bottom.
-    for (const arr of byLayer.values()) {
-      arr.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    }
-    return byLayer;
-  } catch { return new Map(); }
+// Kick off (once) the sidecar fetch for an expanded layer, then
+// re-render so the detail panel swaps its spinner for the real log.
+function ensureSidecar(osKey, hash) {
+  let m = state.sidecars.get(osKey);
+  if (!m) { m = new Map(); state.sidecars.set(osKey, m); }
+  if (m.has(hash)) return;          // loading, loaded, or known-absent
+  m.set(hash, "loading");
+  fetchSidecar(osKey, hash).then(s => {
+    m.set(hash, s);                 // sidecar object, or null if absent
+    if (state.active === osKey && state.expanded === hash) render();
+  });
 }
 
-// Distinct overlay handles claimed by an entry's callers, in stable
-// alphabetical order. "(none)" appears for a caller with no overlay
-// (project-mode or plain `oi build PKG` invocations).
+// The d10ir source-archive sidecar (lib/oi/source_manifest.ml,
+// `oi.source.v1`) records where a layer's source came from: primary
+// URL + resolved git commit, extra sources, copy-in extra files,
+// patches, substs. Content-addressed by sha at the bucket root
+// (<bucket>/d10ir-archives/<sha>.json), so it is shared across every
+// layer whose bake inputs collapse to the same bytes — hence cached by
+// sha, not per (os_key,hash).
+async function fetchArchive(sha) {
+  try {
+    const r = await fetch(`d10ir-archives/${sha}.json`, { cache: "no-cache" });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+function ensureArchive(sha) {
+  if (!sha || state.archives.has(sha)) return;
+  state.archives.set(sha, "loading");
+  fetchArchive(sha).then(a => {
+    state.archives.set(sha, a);
+    if (state.expanded) render();   // refresh the open detail panel
+  });
+}
+
+// The overlay handle that produced this layer, or "(none)" for a
+// layer built without overlay attribution (plain `oi build PKG`).
+// index-full carries a single overlay_handle per layer (no caller
+// histogram), so this is at most one handle — returned as a list to
+// keep the colour/group/filter machinery (handleColors, applySort
+// "overlay", renderFilters) unchanged.
 function handlesOf(r) {
-  const set = new Set();
-  for (const c of r.callers || []) {
-    set.add(c.overlay ? c.overlay.handle : "(none)");
-  }
-  return [...set].sort();
+  return [r.overlay && r.overlay.handle ? r.overlay.handle : "(none)"];
 }
 
 // Palette of (hue, saturation, lightness) triples. The hue ladder is
@@ -977,9 +1101,7 @@ function buildHandleColors() {
   const set = new Set();
   for (const m of state.manifests.values()) {
     for (const r of m.results || []) {
-      for (const c of r.callers || []) {
-        if (c.overlay && c.overlay.handle) set.add(c.overlay.handle);
-      }
+      if (r.overlay && r.overlay.handle) set.add(r.overlay.handle);
     }
   }
   const handles = [...set].sort();
@@ -1510,222 +1632,161 @@ function applySort(results) {
   }
 }
 
-// Compact "ok:1 cached:2 fail:0" string for a caller's outcomes histogram.
-function fmtOutcomes(outcomes) {
-  if (!outcomes || outcomes.length === 0) return "—";
-  return outcomes.map(o => `${o.kind}:${o.count}`).join(" ");
+function fmtBytes(n) {
+  if (n == null) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function renderCallers(callers) {
-  if (!callers || callers.length === 0) return "";
-  const rows = callers.map(c => {
-    const lbl = c.overlay
-      ? `<span class="overlay-tag" style="${handleStyle(c.overlay.handle)}">@${escapeHtml(c.overlay.handle)}${c.overlay.version ? " " + escapeHtml(c.overlay.version) : ""}</span>`
-      : `<span class="overlay-tag none">(no overlay)</span>`;
-    const tc = c.toolchain ? ` · ${escapeHtml(c.toolchain)}` : "";
-    return `<tr>
-      <td>${lbl}${tc}</td>
-      <td><code>${escapeHtml(c.trigger || "")}</code></td>
-      <td style="text-align:right">${c.count}</td>
-      <td>${escapeHtml(fmtOutcomes(c.outcomes))}</td>
-      <td style="text-align:right">${escapeHtml(fmtTimeShort(c.last_seen))}</td>
-    </tr>`;
-  }).join("");
-  return `<h3>Callers (${callers.length})</h3>
-    <table class="callers">
-      <thead><tr>
-        <th>overlay / toolchain</th><th>trigger</th>
-        <th style="text-align:right">events</th><th>outcomes</th>
-        <th style="text-align:right">last seen</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+// A `{lines,truncated,text}` log_tail (lib/oi/manifest_layer.ml) →
+// a titled <pre>. Empty/absent renders nothing.
+function renderLogBlock(title, log) {
+  if (!log || !log.text) return "";
+  const meta = [
+    log.lines != null ? `${log.lines} lines` : null,
+    log.truncated ? "truncated — tail only" : null,
+  ].filter(Boolean).join(" · ");
+  return `<h3>${escapeHtml(title)}${meta ? ` <span style="font-weight:400;color:var(--fg-dim);font-size:0.78rem">(${escapeHtml(meta)})</span>` : ""}</h3>
+    <pre class="log-tail">${escapeHtml(log.text)}</pre>`;
 }
 
-// Pretty-print the kind-specific outcome detail attached to an audit
-// event. Mirrors the OCaml outcome variant in lib/oi/audit.ml — anything
-// new there should grow a case here.
-function renderOutcomeDetail(o) {
-  if (!o) return "";
-  switch (o.kind) {
-    case "build_failed":
-    case "install_failed":
-      return `<div class="ev-detail"><span class="lbl">cmd</span> <code>${escapeHtml(o.command || "")}</code>${
-        o.exit_code != null ? ` <span class="dim">(exit ${o.exit_code})</span>` : ""
-      }</div>`;
-    case "fetch_failed": {
-      const fk = o.fetch_kind || {};
-      let kindStr = fk.type || "";
-      if (fk.code) kindStr += ` ${fk.code}`;
-      if (fk.message) kindStr += ` — ${fk.message}`;
-      return `<div class="ev-detail">
-        <div><span class="lbl">url</span> <a href="${escapeHtml(o.url)}" target="_blank" rel="noopener">${escapeHtml(o.url)}</a></div>
-        <div><span class="lbl">kind</span> ${escapeHtml(kindStr)}</div>
-      </div>`;
-    }
-    case "dep_failed": {
-      const u = o.upstream || {};
-      return `<div class="ev-detail"><span class="lbl">upstream</span> <a href="#" data-jump="${escapeHtml(u.hash || "")}">${escapeHtml(u.name || "")}.${escapeHtml(u.version || "")}</a> <span class="dim">${escapeHtml((u.hash || "").slice(0, 12))}</span></div>`;
-    }
-    case "solve_failed":
-    case "skipped":
-      return `<div class="ev-detail"><span class="lbl">reason</span> ${escapeHtml(o.reason || "")}</div>`;
-    case "depext_missing":
-      return `<div class="ev-detail">
-        <div><span class="lbl">missing</span> ${(o.missing || []).map(escapeHtml).join(", ")}</div>
-        <div><span class="lbl">not found</span> ${(o.not_found || []).map(escapeHtml).join(", ")}</div>
-      </div>`;
-    default: return "";
-  }
-}
-
-function eventOverlayLabel(ev) {
-  const c = ev.context || {};
-  const o = c.overlay;
-  return o
-    ? `<span class="overlay-tag" style="${handleStyle(o.handle)}">@${escapeHtml(o.handle)}${o.version ? " " + escapeHtml(o.version) : ""}</span>`
-    : `<span class="overlay-tag none">(no overlay)</span>`;
-}
-
-// Equivalence key for grouping identical events. Two events collapse
-// into one row iff they share their outcome (kind + payload) AND
-// their caller context (overlay, toolchain, trigger, project, host).
-// Volatile fields — [event_id], [invocation_id], [ts], [duration_s],
-// [log] — are deliberately excluded so a CI run that hits the same
-// build failure 50 times collapses cleanly.
-function eventKey(ev) {
-  const o = ev.outcome || {};
-  const c = ev.context || {};
-  const ov = c.overlay || {};
-  const u = o.upstream || {};
-  const payload = JSON.stringify({
-    kind: o.kind,
-    command: o.command || "",
-    exit_code: o.exit_code ?? null,
-    url: o.url || "",
-    fetch_kind: o.fetch_kind || null,
-    upstream: o.kind === "dep_failed"
-      ? { n: u.name || "", v: u.version || "", h: u.hash || "" }
-      : null,
-    reason: o.reason || "",
-    missing: (o.missing || []).join(","),
-    not_found: (o.not_found || []).join(","),
-  });
-  return [
-    payload,
-    ov.handle || "",
-    ov.version || "",
-    c.toolchain || "",
-    c.trigger || "",
-    c.host || "",
-    c.project || "",
-  ].join("");
-}
-
-// Group identical events. Returns one record per unique key with the
-// underlying events sorted oldest→newest (matching [fetchAudit]'s
-// per-layer ordering). Group order is most-recent-last-seen first
-// — failures the user just hit float to the top.
-function groupEvents(events) {
-  const map = new Map();
-  for (const ev of events) {
-    const k = eventKey(ev);
-    let g = map.get(k);
-    if (!g) {
-      g = { key: k, events: [] };
-      map.set(k, g);
-    }
-    g.events.push(ev);
-  }
-  const groups = [...map.values()].map(g => ({
-    ...g,
-    first: g.events[0],
-    last: g.events[g.events.length - 1],
-  }));
-  groups.sort((a, b) => (b.last.ts || 0) - (a.last.ts || 0));
-  return groups;
-}
-
-// Per-event detail surfaced under the aggregated callers table. The
-// manifest's [callers] is a histogram across (overlay, toolchain,
-// trigger) tuples; the audit log preserves individual invocations.
-// We collapse runs that are pairwise identical so a build that
-// fails repeatedly shows once with a count, not N times in a row.
-function renderEvents(events) {
-  if (!events || events.length === 0) return "";
-  const groups = groupEvents(events);
-  const rows = groups.map(g => {
-    // Use the most recent event as the representative — its log tail
-    // is the most likely to still be on disk, and its detail reflects
-    // the latest failure mode in the rare case the payload's
-    // equivalence-key fields drift mid-grouping (shouldn't happen
-    // because they're the key, but belt-and-braces).
-    const ev = g.last;
-    const grp = OUTCOME_GROUPS[ev.outcome.kind] || "ok";
-    const ctx = ev.context || {};
-    const tc = ctx.toolchain ? `<span class="dim"> · ${escapeHtml(ctx.toolchain)}</span>` : "";
-    const host = ctx.host ? `<span class="dim"> · ${escapeHtml(ctx.host)}</span>` : "";
-    // Time display: a single tick if the group has one event OR all
-    // events share an instant; otherwise [first → last] so the user
-    // sees how long the same outcome has been recurring.
-    const sameInstant = g.first.ts === g.last.ts;
-    const tsLabel = g.events.length === 1 || sameInstant
-      ? fmtTimeShort(g.last.ts)
-      : `${fmtTimeShort(g.first.ts)} → ${fmtTimeShort(g.last.ts)}`;
-    const countChip = g.events.length > 1
-      ? `<span class="event-count" title="${g.events.length} identical occurrences">×${g.events.length}</span>`
-      : "";
-    const detail = renderOutcomeDetail(ev.outcome);
-    const log = ev.log && ev.log.tail
-      ? `<details class="ev-log"><summary>log tail (${ev.log.text_path ? escapeHtml(ev.log.text_path) : "inline"})</summary><pre class="log-tail">${escapeHtml(ev.log.tail)}</pre></details>`
-      : "";
-    return `<div class="event-row">
-      <div class="event-head">
-        <span class="outcome-badge outcome-${grp}">${ev.outcome.kind.replace(/_/g, " ")}</span>
-        ${countChip}
-        ${eventOverlayLabel(ev)}${tc}${host}
-        <span class="dim event-ts">${escapeHtml(tsLabel)}</span>
-      </div>
-      <div class="event-trigger"><code>${escapeHtml(ctx.trigger || "")}</code></div>
-      ${detail}
-      ${log}
-    </div>`;
-  }).join("");
-  const heading = groups.length === events.length
-    ? `Events (${events.length})`
-    : `Events (${events.length} total, ${groups.length} unique)`;
-  return `<h3>${heading}</h3>
-    <div class="event-list">${rows}</div>`;
-}
-
-function renderProvenance(r) {
-  if (!r.opam) return "";
-  const o = r.opam;
-  const origin = o.origin || {};
-  const src = r.source || null;
-  const env = r.build_env || null;
-  return `<h3>Provenance</h3>
+// Failure block from the sidecar's `failure` sub-object (failed builds
+// only): phase, exit status, duration, plus its own log tail.
+function renderFailure(f) {
+  if (!f) return "";
+  return `<h3>Failure</h3>
     <dl>
-      <dt>opam sha256</dt><dd>${escapeHtml(o.sha256 || "")}</dd>
-      <dt>origin</dt><dd>${escapeHtml(origin.kind || "?")}${origin.overlay && origin.overlay.handle ? ` @${escapeHtml(origin.overlay.handle)}${origin.overlay.version ? `<span style="color:var(--fg-dim)">/${escapeHtml(origin.overlay.version)}</span>` : ""}` : ""} <span style="color:var(--fg-dim)">${escapeHtml(origin.path_in_repo || "")}</span></dd>
-      ${src ? `<dt>source url</dt><dd><a href="${escapeHtml(src.url)}" target="_blank" rel="noopener">${escapeHtml(src.url)}</a> ${src.kind ? `<span style="color:var(--fg-dim)">(${escapeHtml(src.kind)})</span>` : ""}</dd>` : ""}
-      ${src && (src.checksums || []).length > 0 ? `<dt>source checksum</dt><dd>${escapeHtml(src.checksums[0])}</dd>` : ""}
-      ${env ? `<dt>ocaml</dt><dd>${escapeHtml(env.ocaml_version || "")}</dd>` : ""}
-    </dl>`;
+      <dt>phase</dt><dd>${escapeHtml(f.phase || "?")}</dd>
+      ${f.exit_status != null ? `<dt>exit status</dt><dd>${f.exit_status}</dd>` : ""}
+      ${f.duration_s != null ? `<dt>duration</dt><dd>${fmtDuration(f.duration_s)}</dd>` : ""}
+    </dl>
+    ${renderLogBlock("Failure log", f.log)}`;
 }
 
+
+// (audit.jsonl event grouping/rendering removed: the new foo.sql
+// scheme has no per-event audit stream — the per-layer build-log
+// tail comes from each <os_key>/layers/<hash>.json sidecar instead.)
+
+// Provenance / replay metadata from the per-layer sidecar. The
+// `provenance` sub-object is the OCaml Provenance.t (schema not
+// mirrored here) so it is offered as collapsible raw JSON rather than
+// risk misrendering fields; the stable scalars are surfaced directly.
+function renderProvenance(s) {
+  if (!s) return "";
+  const rows = [
+    s.method ? `<dt>method</dt><dd>${escapeHtml(s.method)}</dd>` : "",
+    s.date ? `<dt>built</dt><dd>${escapeHtml(s.date)}</dd>` : "",
+    s.build_env_ocaml_version ? `<dt>ocaml</dt><dd>${escapeHtml(s.build_env_ocaml_version)}</dd>` : "",
+    s.source_archive && s.source_archive.sha256
+      ? `<dt>source sha256</dt><dd>${escapeHtml(s.source_archive.sha256)}</dd>` : "",
+  ].filter(Boolean).join("");
+  const recipe = s.recipe && s.recipe.script
+    ? `<details class="ev-log"><summary>recipe</summary><pre class="log-tail">${escapeHtml(s.recipe.script)}</pre></details>` : "";
+  const prov = s.provenance
+    ? `<details class="ev-log"><summary>provenance (raw)</summary><pre class="log-tail">${escapeHtml(JSON.stringify(s.provenance, null, 2))}</pre></details>` : "";
+  if (!rows && !recipe && !prov) return "";
+  return `<h3>Provenance</h3>${rows ? `<dl>${rows}</dl>` : ""}${recipe}${prov}`;
+}
+
+// Source provenance from the d10ir source-archive sidecar
+// (oi.source.v1). [sha] is the content-addressed archive id; the
+// section fetches d10ir-archives/<sha>.json lazily and shows where the
+// layer's source came from (primary URL + resolved commit, extra
+// sources, copy-in files, patches, substs) plus a link to the baked
+// source tarball.
+function renderSourceProvenance(sha) {
+  if (!sha) return "";
+  ensureArchive(sha);
+  const a = state.archives.get(sha);
+  const tarUrl = `d10ir-archives/${sha}.tar.zst`;
+  if (a === "loading" || a === undefined) {
+    return `<h3>Source provenance</h3><div class="empty" style="padding:1rem">
+      <span class="spinner"></span>Loading d10ir-archives/${escapeHtml(sha)}.json…</div>`;
+  }
+  if (a === null) {
+    return `<h3>Source provenance</h3><div style="font-size:0.8rem;color:var(--fg-dim)">
+      No source archive manifest at <code>d10ir-archives/${escapeHtml(sha)}.json</code>.</div>`;
+  }
+  const s = a.source || {};
+  const rows = [
+    s.kind ? `<dt>kind</dt><dd>${escapeHtml(s.kind)}</dd>` : "",
+    s.url ? `<dt>url</dt><dd><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.url)}</a></dd>` : "",
+    s.ref ? `<dt>ref</dt><dd>${escapeHtml(s.ref)}</dd>` : "",
+    s.commit_sha ? `<dt>commit</dt><dd><code>${escapeHtml(s.commit_sha)}</code></dd>` : "",
+    (s.checksums && s.checksums.length)
+      ? `<dt>checksum</dt><dd><code>${escapeHtml(s.checksums[0])}</code></dd>` : "",
+    a.strip_components ? `<dt>strip</dt><dd>${a.strip_components}</dd>` : "",
+    a.size != null ? `<dt>archive size</dt><dd>${fmtBytes(a.size)}</dd>` : "",
+  ].filter(Boolean).join("");
+  const extraSrc = (a.extra_sources || []).length
+    ? `<h3>Extra sources (${a.extra_sources.length})</h3>
+       <ul class="deps">${a.extra_sources.map(e =>
+         `<li>${escapeHtml(e.name)} — <a href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a></li>`
+       ).join("")}</ul>` : "";
+  const extraFiles = (a.extra_files || []).length
+    ? `<h3>Copy-in files (${a.extra_files.length})</h3>
+       <ul class="deps">${a.extra_files.map(f =>
+         `<li><code>${escapeHtml(f.path)}</code> <span class="dep-hash">${escapeHtml((f.sha256 || "").slice(0,12))} · ${fmtBytes(f.size)}</span></li>`
+       ).join("")}</ul>` : "";
+  const patches = (a.patches || []).length
+    ? `<h3>Patches (${a.patches.length})</h3>
+       <div>${a.patches.map(p =>
+         `<span class="chip">${escapeHtml(p.file)}${p.filter ? ` <span style="color:var(--fg-dim)">[${escapeHtml(p.filter)}]</span>` : ""}</span>`
+       ).join("")}</div>` : "";
+  const substs = (a.substs || []).length
+    ? `<h3>Substs</h3><div>${a.substs.map(x => `<span class="chip">${escapeHtml(x)}</span>`).join("")}</div>` : "";
+  return `<h3>Source provenance</h3>
+    ${rows ? `<dl>${rows}</dl>` : ""}
+    <a class="download" href="${escapeHtml(tarUrl)}" download>Download source (.tar.zst)</a>
+    ${extraSrc}${extraFiles}${patches}${substs}`;
+}
+
+// Detail panel for an expanded layer. The index-full row [r] supplies
+// package/overlay/deps; the build-log tail, failure and per-layer
+// provenance come from the lazily-fetched <os_key>/layers/<hash>.json
+// sidecar; the source provenance from d10ir-archives/<sha>.json.
 function renderDetail(r, osKey) {
   const grp = OUTCOME_GROUPS[r.headline_outcome] || "ok";
-  const phases = r.phases || {};
-  const hasPhases = phases.fetch || phases.build || phases.install || phases.restore;
-  const depexts = r.depexts_declared || [];
-  const layerUrl = `${osKey}/${r.layer_hash}.tar.zst`;
-  const downloadable = r.headline_outcome === "ok" || r.headline_outcome === "cached" || r.headline_outcome === "restored";
-  // Pull raw events for this layer from the audit index. Falls back to a
-  // synthetic single-event list if audit.jsonl wasn't shipped, so the
-  // entry's own [r.log] tail still renders.
-  const auditMap = state.audits.get(osKey);
-  const events = auditMap ? auditMap.get(r.layer_hash) : null;
+  const layerUrl = `${osKey}/layers/${r.layer_hash}.tar.zst`;
+  const sidecarUrl = `${osKey}/layers/${r.layer_hash}.json`;
+  const downloadable = !!(r.tarball && r.tarball.sha256);
+  const binaries = r.binaries || [];
+  const findlib = r.findlib || [];
+
+  // Pull (and, on first view, kick off the fetch of) the per-layer
+  // sidecar that carries the build-log tail.
+  ensureSidecar(osKey, r.layer_hash);
+  const sc = (state.sidecars.get(osKey) || new Map()).get(r.layer_hash);
+  let logSection;
+  if (sc === "loading" || sc === undefined) {
+    logSection = `<h3>Build log</h3><div class="empty" style="padding:1rem">
+      <span class="spinner"></span>Loading ${escapeHtml(sidecarUrl)}…</div>`;
+  } else if (sc === null) {
+    logSection = `<h3>Build log</h3><div style="font-size:0.8rem;color:var(--fg-dim)">
+      No per-layer manifest published at <code>${escapeHtml(sidecarUrl)}</code>.</div>`;
+  } else {
+    const depexts = sc.depexts_declared || [];
+    logSection =
+      renderFailure(sc.failure) +
+      renderLogBlock("Build log", sc.log) +
+      (!sc.log && !sc.failure
+        ? `<div style="font-size:0.8rem;color:var(--fg-dim)">No build-log tail was recorded for this layer.</div>`
+        : "") +
+      (depexts.length > 0 ? `<h3>System packages (declared)</h3>
+        <div>${depexts.map(x => `<span class="chip">${escapeHtml(x)}</span>`).join("")}</div>` : "") +
+      renderProvenance(sc);
+  }
+
+  // Prefer the index row's source pointer (available immediately, so
+  // the source archive fetch runs in parallel with the per-layer
+  // sidecar); fall back to the sidecar's own source_archive.sha256.
+  const srcSha = r.source_archive_sha256
+    || (sc && typeof sc === "object" && sc.source_archive && sc.source_archive.sha256)
+    || null;
+  const fail = r.failure;
+
   return `<div class="pkg-detail">
     <div class="detail-head">
       <span class="title">${escapeHtml(r.pkg.name)} <span class="ver">${escapeHtml(r.pkg.version)}</span></span>
@@ -1734,30 +1795,27 @@ function renderDetail(r, osKey) {
     </div>
     <dl>
       <dt>layer</dt><dd>${escapeHtml(r.layer_hash)}</dd>
-      <dt>method</dt><dd>${escapeHtml(r.method)}</dd>
-      ${r.duration_s != null ? `<dt>duration</dt><dd>${fmtDuration(r.duration_s)}</dd>` : ""}
+      <dt>outcome</dt><dd>${escapeHtml(r.outcome)}</dd>
+      ${r.method ? `<dt>method</dt><dd>${escapeHtml(r.method)}</dd>` : ""}
+      ${r.exit_status != null ? `<dt>exit status</dt><dd>${r.exit_status}</dd>` : ""}
+      ${fail && fail.phase ? `<dt>failed in</dt><dd>${escapeHtml(fail.phase)}${fail.duration_s != null ? ` <span style="color:var(--fg-dim)">after ${fmtDuration(fail.duration_s)}</span>` : ""}</dd>` : ""}
       ${r.built_at != null ? `<dt>built at</dt><dd>${fmtTime(r.built_at)}</dd>` : ""}
+      ${r.overlay ? `<dt>overlay</dt><dd>@${escapeHtml(r.overlay.handle)}${r.overlay.version ? ` <span style="color:var(--fg-dim)">${escapeHtml(r.overlay.version)}</span>` : ""}</dd>` : ""}
+      ${r.tarball ? `<dt>tarball</dt><dd>${escapeHtml((r.tarball.sha256 || "").slice(0,16))}… <span style="color:var(--fg-dim)">(${fmtBytes(r.tarball.size)})</span></dd>` : ""}
     </dl>
     ${downloadable ? `<a class="download" href="${escapeHtml(layerUrl)}" download>Download layer (.tar.zst)</a>` : ""}
-    ${renderProvenance(r)}
-    ${hasPhases ? `<h3>Phases</h3>
-      <dl>
-        ${phases.fetch ? `<dt>fetch</dt><dd>${fmtDuration(phases.fetch)}</dd>` : ""}
-        ${phases.build ? `<dt>build</dt><dd>${fmtDuration(phases.build)}</dd>` : ""}
-        ${phases.install ? `<dt>install</dt><dd>${fmtDuration(phases.install)}</dd>` : ""}
-        ${phases.restore ? `<dt>restore</dt><dd>${fmtDuration(phases.restore)}</dd>` : ""}
-      </dl>` : ""}
-    ${depexts.length > 0 ? `<h3>System packages (declared)</h3>
-      <div>${depexts.map(p => `<span class="chip">${escapeHtml(p)}</span>`).join("")}</div>` : ""}
+    ${logSection}
+    ${renderSourceProvenance(srcSha)}
     ${(r.deps || []).length > 0 ? `<h3>Dependencies (${r.deps.length})</h3>
       <ul class="deps">${r.deps.map(dp =>
-        `<li><a href="#" data-jump="${escapeHtml(dp.hash)}">${escapeHtml(dp.name)}.${escapeHtml(dp.version)}</a> <span class="dep-hash">${escapeHtml(dp.hash.slice(0,12))}</span></li>`
+        `<li><a href="#" data-jump="${escapeHtml(dp.hash)}">${escapeHtml(dp.name)}.${escapeHtml(dp.version)}</a> <span class="dep-hash">${escapeHtml((dp.hash || "").slice(0,12))}</span></li>`
       ).join("")}</ul>` : ""}
-    ${renderCallers(r.callers)}
-    ${renderEvents(events)}
-    ${!events && r.log && r.log.tail ? `<h3>Log tail (last ~150 lines)</h3>
-      <pre class="log-tail">${escapeHtml(r.log.tail)}</pre>` : ""}
-    ${!events && r.log && r.log.text_path ? `<div style="font-size:0.7rem;color:var(--fg-dim);margin-top:0.4rem">log path: <code>${escapeHtml(r.log.text_path)}</code></div>` : ""}
+    ${binaries.length > 0 ? `<h3>Binaries (${binaries.length})</h3>
+      <div>${binaries.map(b => `<span class="chip">${escapeHtml(b)}</span>`).join("")}</div>` : ""}
+    ${findlib.length > 0 ? `<h3>findlib (${findlib.length})</h3>
+      <ul class="deps">${findlib.map(f =>
+        `<li>${escapeHtml(f.findlib_pkg)}${f.archive ? ` <span class="dep-hash">${escapeHtml(f.archive)}</span>` : ""}</li>`
+      ).join("")}</ul>` : ""}
   </div>`;
 }
 
@@ -1800,8 +1858,8 @@ function renderPackages(m, osKey) {
     <span>distros</span>
     <span class="col-overlay">overlay</span>
     <span style="text-align:right">layer</span>
-    <span class="col-method" style="text-align:right">method</span>
-    <span style="text-align:right">duration</span>
+    <span class="col-method" style="text-align:right">built</span>
+    <span style="text-align:right">size</span>
   </div>`;
   return `<div class="pkg-list">${headerRow}${rows.map(r => {
     if (r.__header) {
@@ -1842,8 +1900,8 @@ function renderPackages(m, osKey) {
       ${renderDistroChips(r.pkg)}
       ${chips}
       <span class="pkg-meta" style="text-align:right">${escapeHtml(r.layer_hash.slice(0,12))}</span>
-      <span class="pkg-meta" style="text-align:right">${escapeHtml(r.method)}</span>
-      <span class="pkg-meta" style="text-align:right">${r.duration_s != null ? fmtDuration(r.duration_s) : "—"}</span>
+      <span class="pkg-meta col-method" style="text-align:right">${r.built_at != null ? escapeHtml(new Date(r.built_at * 1000).toISOString().slice(0, 10)) : "—"}</span>
+      <span class="pkg-meta" style="text-align:right">${r.tarball ? escapeHtml(fmtBytes(r.tarball.size)) : "—"}</span>
     </div>`;
     return rowHtml + (state.expanded === r.layer_hash ? renderDetail(r, osKey) : "");
   }).join("")}</div>`;
@@ -2078,10 +2136,10 @@ function applyHash() {
 }
 
 (async function init() {
-  // Fetch manifest + audit slice for every probed os_key in parallel,
-  // updating a per-distro loading bar as each completes. Audit is
-  // best-effort: a registry that ships only manifest.json still works,
-  // it just loses the per-event drill-down in the detail panel.
+  // Fetch each probed os_key's index-full.json in parallel, updating a
+  // per-distro loading bar as each completes. Per-layer build logs are
+  // fetched lazily (one <hash>.json sidecar at a time) when a row is
+  // expanded, so startup only pays for the aggregates.
   const fill = document.getElementById("loading-fill");
   const statusEl = document.getElementById("loading-status");
   const detailEl = document.getElementById("loading-detail");
@@ -2100,7 +2158,7 @@ function applyHash() {
   const tick = (k, label, cls) => {
     done++;
     fill.style.width = `${Math.round((done / total) * 100)}%`;
-    statusEl.textContent = `Loaded ${done}/${total} manifests…`;
+    statusEl.textContent = `Loaded ${done}/${total} indexes…`;
     const row = detailEl.querySelector(`[data-osk="${CSS.escape(k)}"]`);
     if (row) {
       const [icon, _name, status] = row.children;
@@ -2112,22 +2170,19 @@ function applyHash() {
   };
   const results = await Promise.all(
     PROBE_OS_KEYS.map(async k => {
-      const [m, a] = await Promise.all([fetchManifest(k), fetchAudit(k)]);
-      if (m) tick(k, `${m.n_packages} entries`, "ok");
+      const m = await fetchIndex(k);
+      if (m) tick(k, `${m.n_packages} layers`, "ok");
       else tick(k, "missing", "fail");
-      return [k, m, a];
+      return [k, m];
     }));
-  for (const [k, m, a] of results) {
-    if (m) {
-      state.manifests.set(k, m);
-      state.audits.set(k, a);
-    }
+  for (const [k, m] of results) {
+    if (m) state.manifests.set(k, m);
   }
   invalidateHandleColors();
   if (state.manifests.size === 0) {
     document.getElementById("content").innerHTML =
-      `<div class="empty">No manifests found at any of:<br><br>` +
-      PROBE_OS_KEYS.map(k => `<code>${escapeHtml(k)}/logs/manifest.json</code>`).join("<br>") +
+      `<div class="empty">No registry index found at any of:<br><br>` +
+      PROBE_OS_KEYS.map(k => `<code>${escapeHtml(k)}/index-full.json</code>`).join("<br>") +
       `</div>`;
     return;
   }

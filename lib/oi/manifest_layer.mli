@@ -117,6 +117,35 @@ val success :
   t
 (** Build a success manifest. *)
 
+val failure :
+  hash:string ->
+  os_key:string ->
+  package:string ->
+  package_name:string ->
+  package_ver:string ->
+  method_:string ->
+  ?overlay_handle:string ->
+  ?overlay_version:string ->
+  phase:string ->
+  ?exit_status:int ->
+  duration_s:float ->
+  ?log:log_tail ->
+  ?provenance:Provenance.t ->
+  ?recipe:recipe ->
+  ?source_archive:source_archive ->
+  deps:dep list ->
+  depexts_declared:string list ->
+  ?build_env_ocaml_version:string ->
+  unit ->
+  t
+(** Build a failure manifest: [outcome = Fail], no tarball, empty
+    files/binaries/findlib, and a {!failure_info} carrying [phase], the optional
+    process [exit_status], the [duration_s] up to the failing phase, and the
+    build-log [log] tail. The package/overlay/deps/recipe/
+    provenance/source-archive metadata mirrors {!success} so a failed layer's
+    sidecar is as queryable as a successful one (the registry UI surfaces it;
+    there is no [.tar.zst] to upload alongside it). *)
+
 val path_for : cache_root:string -> os_key:string -> hash:string -> string
 (** [path_for ~cache_root ~os_key ~hash] is the on-disk path of the JSON
     manifest for [hash] under [cache_root]'s [os_key/] directory. *)

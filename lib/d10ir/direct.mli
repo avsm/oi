@@ -69,6 +69,7 @@ type event =
       phase : phase;
       log_path : string;
       error : string;
+      duration_s : float;
     }
   | Node_skipped of { node : Plan.node; reason : string }
 

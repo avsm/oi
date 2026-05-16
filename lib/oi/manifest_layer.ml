@@ -391,6 +391,42 @@ let success ~hash ~os_key ~package ~package_name ~package_ver ~method_
     build_env_ocaml_version;
   }
 
+let failure ~hash ~os_key ~package ~package_name ~package_ver ~method_
+    ?overlay_handle ?overlay_version ~phase ?exit_status ~duration_s ?log
+    ?provenance ?recipe ?source_archive ~deps ~depexts_declared
+    ?build_env_ocaml_version () =
+  {
+    schema = 1;
+    kind = "oi.layer.v1";
+    outcome = Fail;
+    hash;
+    os_key;
+    date = rfc3339_of_unix (Unix.gettimeofday ());
+    package;
+    package_name;
+    package_ver;
+    method_;
+    overlay_handle;
+    overlay_version;
+    tarball = None;
+    files = [];
+    binaries = [];
+    findlib = [];
+    exit_status = None;
+    provenance;
+    recipe;
+    (* Failure path keeps the build-log tail in [failure.log]; the
+       top-level [log] stays empty (mirrors the success/failure split
+       documented on the [t.log] field). *)
+    log = None;
+    failure = Some { phase; exit_status; duration_s; log };
+    invocation_id = None;
+    source_archive;
+    deps;
+    depexts_declared;
+    build_env_ocaml_version;
+  }
+
 (* -- Storage ------------------------------------------------------------ *)
 
 (* Layer manifest sidecar lives alongside the layer-hash directory it

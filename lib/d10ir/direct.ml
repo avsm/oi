@@ -36,6 +36,7 @@ type event =
       phase : phase;
       log_path : string;
       error : string;
+      duration_s : float;
     }
   | Node_skipped of { node : Plan.node; reason : string }
 
@@ -449,7 +450,8 @@ let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
          progress UI. *)
       let log_path = log_path_for ~config ~d10 n in
       cleanup_staging ~fs ~config staging build_dir;
-      `Failed (phase, log_path, tidy_error_string (Printexc.to_string exn))
+      let dt = now_s ~clock -. t0 in
+      `Failed (phase, log_path, tidy_error_string (Printexc.to_string exn), dt)
   end
 
 (* ---- Scheduler -------------------------------------------------------- *)
@@ -561,10 +563,11 @@ let handle_build_outcome ~counts ~reporter ~bump ~resolve outcome n =
       bump (fun () -> counts#built ());
       reporter.event (Node_built { node = n; duration_s = dt; log_path });
       resolve n `Ok
-  | `Failed (phase, log_path, error) ->
+  | `Failed (phase, log_path, error, dt) ->
       let f = { package = n.package; phase; log_path; error } in
       bump (fun () -> counts#failed f);
-      reporter.event (Node_failed { node = n; phase; log_path; error });
+      reporter.event
+        (Node_failed { node = n; phase; log_path; error; duration_s = dt });
       resolve n `Failed
 
 let try_build_node ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables

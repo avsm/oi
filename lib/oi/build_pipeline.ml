@@ -933,6 +933,17 @@ let upload_one_layer ~fs ~sys ~(d10 : D10.Config.t) ~staging ~cache_root
     s3_put_quiet ~sys ~src:manifest_src
       ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash)
 
+(* PUT only the [<hash>.json] sidecar (no [.tar.zst]). Used for every
+   non-success outcome — build failure, dep-skip, solve/cycle/elaborate/
+   emit failure — none of which produced a layer or tarball. Keeping
+   this distinct from [upload_one_layer] avoids that function's pointless
+   [D10.Layer.export] + tarball-sha probe for layers that never existed. *)
+let put_layer_json ~sys ~url_base ~cache_root ~os_key ~hash =
+  let src = Manifest_layer.path_for ~cache_root ~os_key ~hash in
+  if Sys.file_exists src then
+    s3_put_quiet ~sys ~src
+      ~dst:(Fmt.str "%s%s/layers/%s.json" url_base os_key hash)
+
 (* Provenance is written here rather than inside [D10ir.Direct] because the
    richer [Plan.package_plan] (opam_path, pkgs_dir, source, depexts, dep_layers
    with Identity.dep shape) only exists at the oi level — the d10ir runtime
@@ -1141,6 +1152,38 @@ let write_layer_manifest_for_package ~fs ~cache_root ~os_key ~ocaml_version
     in
     Manifest_layer.write ~fs ~cache_root m
 
+(* Failure counterpart of [layer_manifest_of_package]. A failed build
+   stored no layer (no [fs/], no [.tar.zst]), so files/binaries/findlib
+   are empty and the build-log tail rides in [failure.log]; everything
+   else (package, overlay, deps, recipe, provenance, source-archive
+   pointer) mirrors the success manifest so the registry UI can show a
+   failed layer with the same depth as a successful one. *)
+let layer_failure_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
+    ~phase ~duration_s ~log (_ : D10.Config.t) (pp : Plan.package_plan) :
+    Manifest_layer.t =
+  let provenance =
+    provenance_of_package_plan ~os_key ~ocaml_version ~built_at pp
+  in
+  let name, version = split_pkg pp.pkg in
+  Manifest_layer.failure ~hash:pp.layer_hash ~os_key ~package:pp.pkg
+    ~package_name:name ~package_ver:version
+    ~method_:(string_of_method pp.method_)
+    ?overlay_handle:(overlay_handle_of pp)
+    ?overlay_version:(overlay_version_of pp) ~phase ~duration_s ?log ~provenance
+    ?recipe ?source_archive:(source_archive_of pp)
+    ~deps:(List.map dep_of_identity pp.dep_layers)
+    ~depexts_declared:pp.depexts ~build_env_ocaml_version:ocaml_version ()
+
+let write_layer_failure_manifest_for_package ~fs ~cache_root ~os_key
+    ~ocaml_version ~built_at ~nodes_by_hash ~phase ~duration_s ~log
+    (d10 : D10.Config.t) (pp : Plan.package_plan) =
+  let recipe = recipe_for_hash nodes_by_hash pp.layer_hash in
+  let m =
+    layer_failure_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
+      ~phase ~duration_s ~log d10 pp
+  in
+  Manifest_layer.write ~fs ~cache_root m
+
 (* Write a layer manifest sidecar for every successfully built layer.
    The sidecar at [<cache>/layers/<os_key>/<hash>.json] now
    carries everything that used to live in the per-layer-dir
@@ -1238,6 +1281,43 @@ let stream_upload_built_layer (ctx : stream_ctx) ~hash ~log_path =
   upload_one_layer ~fs:ctx.env.fs ~sys:ctx.env.sys ~d10:ctx.d10_cfg
     ~staging:ctx.staging ~cache_root:ctx.cache_root ~url_base:ctx.url_base hash
 
+(* Failure counterpart: write the failure sidecar (no [.tar.zst] —
+   the build never produced a layer) with the build-log tail folded
+   into [failure.log], then PUT just the [<hash>.json].
+   [upload_one_layer] already tolerates the missing tarball (it skips
+   the [.tar.zst] PUT when the staged file is absent), so the registry
+   ends up with a queryable record of the failure for the UI. *)
+let stream_upload_failed_layer (ctx : stream_ctx) ~hash ~phase ~log_path
+    ~duration_s =
+  match Hashtbl.find_opt ctx.pp_by_hash hash with
+  | None -> ()
+  | Some (pp, ocaml_version) ->
+      let log = log_tail_of_file ~path:log_path in
+      write_layer_failure_manifest_for_package ~fs:ctx.env.fs
+        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~ocaml_version
+        ~built_at:ctx.built_at ~nodes_by_hash:ctx.nodes_by_hash ~phase
+        ~duration_s ~log ctx.d10_cfg pp;
+      put_layer_json ~sys:ctx.env.sys ~url_base:ctx.url_base
+        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~hash
+
+(* A node the scheduler never ran because an upstream dependency failed.
+   It still has a real layer hash + package, so publish a sidecar so the
+   UI shows it as dep-failed (with the scheduler's reason as the "log")
+   rather than silently missing. *)
+let stream_upload_skipped_layer (ctx : stream_ctx) ~hash ~reason =
+  match Hashtbl.find_opt ctx.pp_by_hash hash with
+  | None -> ()
+  | Some (pp, ocaml_version) ->
+      let log : Manifest_layer.log_tail option =
+        Some { lines = 1; truncated = false; text = "skipped: " ^ reason }
+      in
+      write_layer_failure_manifest_for_package ~fs:ctx.env.fs
+        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~ocaml_version
+        ~built_at:ctx.built_at ~nodes_by_hash:ctx.nodes_by_hash
+        ~phase:"dep_failed" ~duration_s:0. ~log ctx.d10_cfg pp;
+      put_layer_json ~sys:ctx.env.sys ~url_base:ctx.url_base
+        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~hash
+
 let direct_reporter_tracking ~reporter ?stream () : D10ir.Direct.reporter =
   {
     event =
@@ -1246,6 +1326,15 @@ let direct_reporter_tracking ~reporter ?stream () : D10ir.Direct.reporter =
         | D10ir.Direct.Node_built { node; log_path; _ }, Some ctx ->
             let hash = D10ir.Layer_hash.to_string node.layer_hash in
             stream_upload_built_layer ctx ~hash ~log_path:(Some log_path)
+        | ( D10ir.Direct.Node_failed { node; phase; log_path; duration_s; _ },
+            Some ctx ) ->
+            let hash = D10ir.Layer_hash.to_string node.layer_hash in
+            stream_upload_failed_layer ctx ~hash
+              ~phase:(D10ir.Direct.string_of_phase phase)
+              ~log_path ~duration_s
+        | D10ir.Direct.Node_skipped { node; reason }, Some ctx ->
+            let hash = D10ir.Layer_hash.to_string node.layer_hash in
+            stream_upload_skipped_layer ctx ~hash ~reason
         | _ -> ());
         reporter.Build_progress.event (Build e));
   }
@@ -1576,13 +1665,73 @@ let upload_build_manifest_and_pointer ~env ~cache_root ~started_at
       upload_build_manifest ~env ~cache_root ~url_base ~os_key:env.os_key
         ~invocation_id:(Audit.invocation_id ()) ~started_at
 
+(* Solve-time group failures (Solve_failed / Cycle / Elaborate_failed /
+   Emit_failed) never reach the d10ir scheduler, so they have no layer
+   hash and no Node_* event. Synthesize a stable hash from the group's
+   request (so re-runs overwrite the same object) and publish a failure
+   sidecar so the UI renders these too. [Empty_after_strip] is a benign
+   "nothing to build once toolchain-provided roots are dropped" (e.g.
+   `oi run ocaml`), not a failure — deliberately not published. *)
+let group_failure_phase_log e : string * Manifest_layer.log_tail option =
+  let tail text =
+    let n = List.length (String.split_on_char '\n' text) in
+    Some { Manifest_layer.lines = n; truncated = false; text }
+  in
+  match e with
+  | Solve_failed { msg; log_path } ->
+      let log =
+        match log_tail_of_file ~path:log_path with
+        | Some _ as l -> l
+        | None -> tail msg
+      in
+      ("solve", log)
+  | Cycle cycles ->
+      let one c = String.concat " -> " (List.map OpamPackage.to_string c) in
+      ("cycle", tail (String.concat "\n" (List.map one cycles)))
+  | Elaborate_failed { msg } -> ("elaborate", tail msg)
+  | Emit_failed { msg } -> ("emit", tail msg)
+  | Empty_after_strip -> ("empty", None)
+
+let upload_group_failures ~env ~cache_root ~url_base (s : solved) =
+  List.iter
+    (fun (gr : group_result) ->
+      match gr.error with
+      | Ok () | Error Empty_after_strip -> ()
+      | Error e ->
+          let g = gr.group in
+          let pkg = match g.tokens with t :: _ -> t | [] -> g.label in
+          let hash =
+            Digest.to_hex
+              (Digest.string
+                 (env.os_key ^ "\000" ^ g.label ^ "\000"
+                 ^ String.concat "," (List.sort compare g.tokens)))
+          in
+          let phase, log = group_failure_phase_log e in
+          let m =
+            Manifest_layer.failure ~hash ~os_key:env.os_key ~package:pkg
+              ~package_name:pkg ~package_ver:"" ~method_:"" ~phase
+              ~duration_s:0. ?log ~deps:[] ~depexts_declared:[] ()
+          in
+          Manifest_layer.write ~fs:env.fs ~cache_root m;
+          put_layer_json ~sys:env.sys ~url_base ~cache_root ~os_key:env.os_key
+            ~hash)
+    s.groups
+
 let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
     D10ir.Direct.result option =
   let started_at = Unix.gettimeofday () in
+  let cache_root = Cache.root_s env.cache in
+  (match inp.upload_archive_url with
+  | None -> ()
+  | Some raw_url ->
+      (* Publish solve/cycle/elaborate/emit failures even when the whole
+         solve produced no plan ([merged = None] → early return below),
+         so a fully-failed run still lands in the registry UI. *)
+      upload_group_failures ~env ~cache_root ~url_base:(url_base_of raw_url)
+        inp.solved);
   match inp.solved.merged with
   | None -> None
   | Some (merged : D10ir.Plan.t) ->
-      let cache_root = Cache.root_s env.cache in
       let d10 =
         Pipeline.d10 ~sys:env.sys ~fs:env.fs
           ~clock:(env.clock :> D10.Config.clk)
