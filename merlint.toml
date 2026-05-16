@@ -84,3 +84,21 @@ exclude = ["E415"]
 [[rules]]
 files = "lib/oi/source_manifest.mli"
 exclude = ["E415"]
+
+# ---------------------------------------------------------------------------
+# E005 / E205 — lib/cmd/makefile_export.ml.
+#
+# E005 (long function): the two long top-level bindings flagged are
+# [build_node_sh] and [install_sh] — verbatim POSIX shell helper scripts
+# embedded as string literals (data, not control flow). The actual
+# rendering logic was decomposed into small helpers; only these two data
+# blobs remain over the threshold and splitting a shell script across
+# OCaml string fragments would hurt, not help, readability.
+#
+# E205 (prefer Fmt over Printf): this module emits Makefile text in which
+# `@`, `$@` and `@echo` are pervasive. Fmt is Format-based and interprets
+# `@` as pretty-printing directives, which would corrupt every recipe
+# line. Printf is the deliberate, correct choice here.
+[[rules]]
+files = "lib/cmd/makefile_export.ml"
+exclude = ["E005", "E205"]
