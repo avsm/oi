@@ -80,11 +80,12 @@ let man_quick_start =
       "  oi build --all --export ./registry\n\
       \  rsync -a ./registry/ user@server:/srv/oi-registry/\n\
       \  oi run --registry=https://server/oi-registry @avsm/owntracks";
-    `P "$(b,7.) Generate Dockerfiles:";
+    `P "$(b,7.) Emit portable build artefacts:";
     `Pre
-      "  oi docker                                    # project build\n\
-      \  oi docker --test --distro=alpine-3.23        # project tests\n\
-      \  oi docker --all -o ./registry-build          # multi-distro";
+      "  oi dist docker                               # project Dockerfile\n\
+      \  oi dist docker --all -o ./registry-build     # multi-distro + compose\n\
+      \  oi dist obuilder utop                        # obuilder spec\n\
+      \  oi dist makefile utop -o ./mk                # oi-free Makefile";
   ]
 
 let man_script_format =
@@ -196,7 +197,7 @@ let () =
         Oi_cmd.Build.test_cmd;
         Oi_cmd.Install.cmd;
         Oi_cmd.Ir.cmd;
-        Oi_cmd.Docker.cmd;
+        Oi_cmd.Dist_cmd.cmd;
         Oi_cmd.Add.cmd;
         Oi_cmd.Exec.cmd;
         Oi_cmd.Search.cmd;

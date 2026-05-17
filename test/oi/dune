@@ -1,0 +1,13 @@
+(test
+ (name oi_unit_tests)
+ (libraries
+  oi
+  oi_cmd
+  d10
+  d10ir
+  alcotest
+  eio
+  eio_main
+  opam-format
+  jsont
+  jsont.bytesrw))

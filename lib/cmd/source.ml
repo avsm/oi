@@ -613,109 +613,6 @@ let run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
   finalize_workspace ~sys ~output ~vendor_dir ~targets ~solved ~install;
   if install.failures <> [] then exit 1
 
-(* -- --makefile mode ---------------------------------------------------- *)
-
-(* Binaries the just-finished [oi build] produced for the requested
-   roots, read from their per-layer manifests in the oi cache. Used for
-   the Makefile header / [make dest] summary. Best-effort: a missing or
-   unreadable manifest just contributes nothing. *)
-let built_binaries ~harness ~solved =
-  let { Harness.cache; os_key; _ } = harness in
-  let cache_root = Oi.Cache.root_s cache in
-  Oi.Build_pipeline.root_layer_hashes solved
-  |> List.concat_map (fun hash ->
-         let path = Oi.Manifest_layer.path_for ~cache_root ~os_key ~hash in
-         match Oi.Manifest_layer.try_read ~path with
-         | Some m -> m.Oi.Manifest_layer.binaries
-         | None -> [])
-  |> List.sort_uniq compare
-
-(* Drive a real [oi build] (registry-restore where possible) so the plan
-   is validated and the cache warmed, then report the produced binaries.
-   Best-effort: build failures warn but still let the Makefile be
-   emitted (it reproduces from source regardless). *)
-let oi_build_and_binaries ~harness ~pipeline_env ~req ~layer_remote
-    ~source_remote ~targets ~clock =
-  let solved, build_result =
-    Progress_ui.with_ui
-      ~target:(String.concat ", " targets)
-      ~clock:(clock :> _ Eio.Resource.t)
-      ~enabled:(Tty.is_tty ())
-    @@ fun reporter ->
-    let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
-    let result =
-      Oi.Build_pipeline.build pipeline_env ~reporter
-        {
-          solved;
-          layer_remote;
-          source_remote;
-          jobs = None;
-          upload_archive_url = None;
-          archive_sources = false;
-          snapshot_reporepo = false;
-        }
-    in
-    (solved, result)
-  in
-  (match build_result with
-  | Some (r : D10ir.Direct.result) when r.failed = 0 && r.skipped = 0 -> ()
-  | Some (r : D10ir.Direct.result) ->
-      Oi.Say.warn
-        "oi build reported %d failed, %d skipped node(s); the Makefile is \
-         still emitted but may not build those."
-        r.failed r.skipped
-  | None ->
-      Oi.Say.warn
-        "oi build produced no result; emitting the Makefile from the plan \
-         only.");
-  built_binaries ~harness ~solved
-
-(* Emit a portable Makefile instead of a vendored dune workspace. Two
-   solves of the same closure (the persistent solve cache makes the
-   second ~free, and layer hashes are content-addressed so they agree):
-   the normal one drives the validating [oi build] above; the
-   [force_source = true] one yields the unified [D10ir.Plan.t] the
-   Makefile is a pure projection of. *)
-let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
-    ~with_deps ~toolchain_override ~targets ~output =
-  if output = "" then
-    Oi.Error.fail_config_error "oi source --makefile: -o DIR is required";
-  if targets = [] then
-    Oi.Error.fail_config_error
-      "oi source --makefile: at least one TARGET is required";
-  let output = absolutize_output output in
-  let { Harness.clock; _ } = harness in
-  let {
-    Pipeline_setup.env = pipeline_env;
-    request = req;
-    layer_remote;
-    source_remote;
-    _;
-  } =
-    Pipeline_setup.prepare ~harness ~refresh ~locked:false ~skip_local:true
-      ~registry ~use_registry ~with_repos ~with_deps ~toolchain_override
-      ~targets:(List.map Oi.Build_pipeline.parse targets)
-      ()
-  in
-  let binaries =
-    oi_build_and_binaries ~harness ~pipeline_env ~req ~layer_remote
-      ~source_remote ~targets ~clock
-  in
-  let recipe_solved =
-    Oi.Build_pipeline.solve pipeline_env
-      { req with Oi.Build_pipeline.force_source = true }
-  in
-  match recipe_solved.Oi.Build_pipeline.merged with
-  | None ->
-      Oi.Error.fail_config_error
-        "oi source --makefile: every solve group failed; nothing to emit."
-  | Some plan ->
-      let bin_roots = Oi.Build_pipeline.root_layer_hashes recipe_solved in
-      Makefile_export.emit plan ~output ~registry ~binaries ~bin_roots ();
-      if binaries <> [] then
-        Oi.Say.field "binaries" "%s" (String.concat " " binaries);
-      Oi.Say.ok "wrote portable Makefile to %s (run: make)" output
-
 let man_block =
   [
     `S Manpage.s_description;
@@ -744,56 +641,26 @@ let man_block =
     `S "NOTES";
     `P "$(b,extra-sources:) blocks are skipped.";
     `P "Toolchain packages are pinned via $(b,--toolchain), not $(b,depends:).";
-    `S "MAKEFILE EXPORT";
     `P
-      "$(b,--makefile) emits a portable Makefile instead of a dune \
-       workspace. It is a pure projection of the d10ir plan $(b,oi build) \
-       would run: $(b,make fetch) downloads each pre-baked source archive \
-       from $(b,<registry>/d10ir-archives/<sha256>.tar.zst) into \
-       $(b,dist/<sha256>.tar.zst); $(b,make) then reproduces the per-node \
-       d10ir build (stage deps, unpack, subst, run script, apply \
-       $(b,.install), diff) into $(b,dist/layers/<hash>/). Only \
-       $(b,make), $(b,curl), $(b,tar)+$(b,zstd), POSIX $(b,sh) and a host \
-       OCaml toolchain on $(b,PATH) are required — no $(b,oi)/$(b,opam) \
-       at build time.";
-    `P
-      "Compiler/toolchain layers are host-provided (not fetched or built); \
-       $(b,make check-toolchain) asserts $(b,ocaml) is on $(b,PATH). \
-       Packages with no pre-baked archive are a generate-time error. The \
-       additive layer diff does not capture a package mutating a \
-       dependency's file (rare).";
+      "For a portable, $(b,oi)-free build from registry archives see $(b,oi \
+       dist makefile).";
     `S Manpage.s_examples;
     `Pre
       "  oi source @avsm/owntracks-cli -o ./bundle\n\
       \  oi source dune fmt -o /tmp/dune-fmt-src\n\
-      \  oi source @avsm/oi --toolchain ocaml-5.4 -o ./oi-src\n\
-      \  oi source --makefile utop -o ./utop-mk && cd utop-mk && make fetch && make";
+      \  oi source @avsm/oi --toolchain ocaml-5.4 -o ./oi-src";
   ]
 
 let cmd =
-  let run (c : Terms.common) refresh registry use_registry with_repos with_deps
-      _jobs toolchain_override makefile targets output =
+  let run (c : Terms.common) refresh _registry _use_registry with_repos
+      with_deps _jobs toolchain_override targets output =
     Harness.run @@ fun ~sw env ->
     let harness =
       Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
         c.cache_dir
     in
-    if makefile then
-      run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
-        ~with_deps ~toolchain_override ~targets ~output
-    else
-      run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
-        ~targets ~output ~data_dir:c.data_dir
-  in
-  let makefile =
-    Arg.(
-      value & flag
-      & info
-          ~doc:
-            "Emit a portable Makefile (fetch pre-baked source archives from \
-             the registry, then reproduce the d10ir build) instead of a \
-             vendored dune workspace."
-          [ "makefile" ])
+    run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
+      ~targets ~output ~data_dir:c.data_dir
   in
   let output =
     Arg.(
@@ -819,4 +686,4 @@ let cmd =
     Term.(
       const run $ Terms.common $ Terms.refresh $ Terms.registry
       $ Terms.use_registry $ Terms.with_repos $ Terms.with_deps $ Terms.jobs
-      $ Terms.toolchain $ makefile $ targets $ output)
+      $ Terms.toolchain $ targets $ output)
