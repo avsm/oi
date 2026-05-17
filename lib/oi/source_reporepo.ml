@@ -166,6 +166,47 @@ let last_refresh_age_s ~now path =
   in
   Option.map (fun m -> now -. m) mtime
 
+(* A failed [git pull --ff-only] usually means the local reporepo
+   diverged (local commits, a dirty tracked tree, or a force-pushed
+   upstream). Rather than limp on with a broken/stale clone, preserve
+   the exact current state on a timestamped [backup-YYMMDD-HHMMSS]
+   branch and hard-reset the working copy to the remote head so the
+   next solve sees a clean, up-to-date reporepo. Best-effort: if the
+   recovery itself fails we fall back to "continue with existing
+   state". *)
+let recover_diverged_clone ~sys ~path =
+  let run args = D10.Sysops.Cmd.run sys ("git" :: "-C" :: path :: args) in
+  let out args =
+    String.trim (D10.Sysops.Cmd.run_out sys ("git" :: "-C" :: path :: args))
+  in
+  try
+    let tm = Unix.gmtime (Unix.gettimeofday ()) in
+    let backup =
+      Fmt.str "backup-%02d%02d%02d-%02d%02d%02d" (tm.Unix.tm_year mod 100)
+        (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec
+    in
+    (* Upstream of the current branch (e.g. [origin/main]); fall back to
+       the remote's default branch when HEAD is detached / untracked. *)
+    let upstream =
+      try out [ "rev-parse"; "--abbrev-ref"; "--symbolic-full-name"; "@{u}" ]
+      with Eio.Exn.Io _ | Failure _ -> "origin/HEAD"
+    in
+    run [ "branch"; "--force"; backup ];
+    run [ "fetch"; "origin" ];
+    run [ "reset"; "--hard"; upstream ];
+    Log.warn (fun m ->
+        m
+          "reporepo at %s: pull failed (diverged); saved local state to branch \
+           %s and hard-reset to %s."
+          path backup upstream)
+  with Eio.Exn.Io _ | Failure _ ->
+    Log.warn (fun m ->
+        m
+          "reporepo at %s: pull failed and recovery (backup + reset) also \
+           failed — continuing with existing state. Resolve manually if this \
+           matters."
+          path)
+
 let refresh_existing_clone ~reporter ~sys path =
   Log.info (fun m -> m "Refreshing reporepo at %s" path);
   reporter.Build_progress.event (Status "Refreshing reporepo");
@@ -173,12 +214,7 @@ let refresh_existing_clone ~reporter ~sys path =
     Retry.with_attempts ~label:(Fmt.str "git pull reporepo at %s" path)
       (fun () ->
         D10.Sysops.Cmd.run sys [ "git"; "-C"; path; "pull"; "--ff-only" ])
-  with Eio.Exn.Io _ | Failure _ ->
-    Log.warn (fun m ->
-        m
-          "Failed to refresh reporepo at %s — continuing with existing state. \
-           Resolve local changes and retry if this matters."
-          path)
+  with Eio.Exn.Io _ | Failure _ -> recover_diverged_clone ~sys ~path
 
 let fresh_clone ~reporter ~fs ~sys ~url ~path =
   mkdir_p ~fs (Filename.dirname path);

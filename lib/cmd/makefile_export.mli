@@ -16,15 +16,15 @@
 type local = {
   name : string;
   sha256 : string;
-      (** Basename of the pre-shipped local source, which the caller
-          writes (no [fetch] rule). [oi-build-node.sh] resolves it as,
-          in order: an archive [<output>/src/<sha256>.tar.zst], the
-          persistent unpacked tree [<output>/<sha256>/] (the local
-          snapshot uses [sha256 = "source"], i.e. [<output>/source/] —
-          outside the build-scratch [src/] so it survives [make clean]),
-          or [<output>/src/<sha256>/]. *)
-  strip : int;  (** [tar --strip-components] for the archive form; unused
-                    for the directory form. *)
+      (** Basename of the pre-shipped local source, which the caller writes (no
+          [fetch] rule). [oi-build-node.sh] resolves it as, in order: an archive
+          [<output>/src/<sha256>.tar.zst], the persistent unpacked tree
+          [<output>/<sha256>/] (the local snapshot uses [sha256 = "source"],
+          i.e. [<output>/source/] — outside the build-scratch [src/] so it
+          survives [make clean]), or [<output>/src/<sha256>/]. *)
+  strip : int;
+      (** [tar --strip-components] for the archive form; unused for the
+          directory form. *)
   script : string;
   env : string list;
   prefix : string;  (** Sentinel; rebased to the build prefix at make time. *)

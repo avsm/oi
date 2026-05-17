@@ -99,7 +99,13 @@ let gitignore_clean_files ~sys ~cwd =
   if Sys.file_exists (cwd / ".git") then
     D10.Sysops.Cmd.run_out sys
       [
-        "git"; "-C"; cwd; "ls-files"; "-z"; "--cached"; "--others";
+        "git";
+        "-C";
+        cwd;
+        "ls-files";
+        "-z";
+        "--cached";
+        "--others";
         "--exclude-standard";
       ]
     |> String.split_on_char '\000'
@@ -113,20 +119,20 @@ let copy_one ~fs ~cwd ~dst_root rel =
   let src = cwd / rel and dst = dst_root / rel in
   match kind_opt src with
   | None | Some Unix.S_DIR -> ()
-  | Some Unix.S_LNK ->
+  | Some Unix.S_LNK -> (
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
         Eio.Path.(fs / Filename.dirname dst);
-      (try Unix.symlink (Unix.readlink src) dst
-       with Unix.Unix_error _ -> ())
-  | Some Unix.S_REG ->
+      try Unix.symlink (Unix.readlink src) dst with Unix.Unix_error _ -> ())
+  | Some Unix.S_REG -> (
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
         Eio.Path.(fs / Filename.dirname dst);
       let perm = (Unix.stat src).Unix.st_perm in
-      Eio.Path.with_open_in Eio.Path.(fs / src) (fun i ->
-          Eio.Path.with_open_out ~create:(`Or_truncate perm)
-            Eio.Path.(fs / dst)
+      Eio.Path.with_open_in
+        Eio.Path.(fs / src)
+        (fun i ->
+          Eio.Path.with_open_out ~create:(`Or_truncate perm) Eio.Path.(fs / dst)
           @@ fun o -> Eio.Flow.copy i o);
-      (try Unix.chmod dst perm with Unix.Unix_error _ -> ())
+      try Unix.chmod dst perm with Unix.Unix_error _ -> ())
   | Some _ -> ()
 
 (* Snapshot the gitignore-clean [cwd] tree to [<output>/source/] — a
@@ -144,9 +150,7 @@ let snapshot_local ~sys ~fs ~cwd ~output =
   (* Unique staging dir alongside [final], same filesystem so the
      [Sys.rename] swap is atomic. [Filename.temp_dir] creates it. *)
   let tmp = Filename.temp_dir ~temp_dir:output ~perms:0o755 "source." ".tmp" in
-  List.iter
-    (copy_one ~fs ~cwd ~dst_root:tmp)
-    (gitignore_clean_files ~sys ~cwd);
+  List.iter (copy_one ~fs ~cwd ~dst_root:tmp) (gitignore_clean_files ~sys ~cwd);
   if Sys.file_exists final then begin
     (* Move the prior tree onto a fresh empty temp dir, swap the new
        one in, then drop the old — never an [rm -rf] of [final]. *)
