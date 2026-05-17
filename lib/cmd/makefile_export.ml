@@ -31,6 +31,7 @@ set -eu
 # reject relative directories, and d10ir itself always stages into an
 # absolute path.
 DIST="${DIST:-src}"
+ROOT="$(pwd)"            # output dir: holds the persistent shipped source/
 case "$DIST" in /*) ;; *) DIST="$(pwd)/$DIST" ;; esac
 RECIPES="$(pwd)/recipes"
 
@@ -81,8 +82,22 @@ for d in "$@"; do
   [ -d "$DIST/layers/$d" ] && cp -a "$DIST/layers/$d/." "$PREFIX/" || true
 done
 
-# 2. Unpack_archive
-zstd -dc "$DIST/$SHA.tar.zst" | tar -x --strip-components="$STRIP" -C "$BD"
+# 2. Unpack source: a registry archive ($DIST/$SHA.tar.zst), or an
+#    unpacked directory ($DIST/$SHA/) for the local snapshot — kept
+#    unpacked so the bundled output carries a plain, browsable source
+#    tree rather than a nested compressed tarball.
+if [ -f "$DIST/$SHA.tar.zst" ]; then
+  zstd -dc "$DIST/$SHA.tar.zst" | tar -x --strip-components="$STRIP" -C "$BD"
+elif [ -d "$ROOT/$SHA" ]; then
+  # The shipped local snapshot ($ROOT/source/): a persistent input,
+  # outside the build-scratch $DIST so `make clean` keeps it.
+  cp -a "$ROOT/$SHA/." "$BD/"
+elif [ -d "$DIST/$SHA" ]; then
+  cp -a "$DIST/$SHA/." "$BD/"
+else
+  echo "oi: no source for $SHA ($DIST/$SHA.tar.zst, $ROOT/$SHA/ or $DIST/$SHA/)" >&2
+  exit 1
+fi
 
 # 3. Apply_substs: <base>.in -> <base>, %{var}% from substvars (rebased)
 if [ -s "$RECIPES/$H.substs" ]; then
@@ -341,7 +356,8 @@ let render_header b ~(plan : D10ir.Plan.t) ~registry ~binaries ~ctx ~tc_name
   p "#   make            build all layers, then assemble ./dest (default)\n";
   p "#   make V=1         stream full build output to the terminal\n";
   p "#   make install     copy selected binaries to $(DESTDIR)$(PREFIX)\n";
-  p "#   make all         build the layers only (per-node logs in src/log/)\n\n";
+  p "#   make all         build the layers only (per-node logs in src/log/)\n";
+  p "#   make clean       wipe src/ and dest/ (keeps the shipped source/)\n\n";
   p "REGISTRY ?= %s\n" registry;
   p "PREFIX   ?= /usr/local\n";
   p "DESTDIR  ?=\n";
@@ -443,6 +459,8 @@ let render_local_rule b ctx (l : local) =
    (+ share for install) — never the dependency closure. *)
 let render_dest_install b =
   let p fmt = Printf.ksprintf (Buffer.add_string b) fmt in
+  (* Keep [source/] (the shipped project snapshot — a persistent input,
+     not a re-fetchable artefact) and the generated Makefile/recipes. *)
   p "clean:\n\t@rm -rf $(SRC) dest\n\n";
   p "dest: all\n";
   p "\t@rm -rf dest\n";
