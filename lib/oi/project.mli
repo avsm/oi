@@ -96,17 +96,16 @@ module Script : sig
   *)
 
   val scaffold_for_script :
-    script:string ->
-    deps:dep list ->
-    dir:string ->
-    [ `Created | `Exists of string ]
-  (** [scaffold_for_script ~script ~deps ~dir] writes a [dune-project] and a
-      [dune] (executable named after [script]'s basename, so dune compiles the
-      script in place) into [dir] so an editor / LSP sees a real dune project.
-      Unlike {!generate_project} it does {e not} copy the script to [main.ml]
-      and {e never} overwrites: returns [`Exists which] (the offending file
-      name) and writes nothing if [dir] already has a [dune] or [dune-project],
-      else [`Created]. Used by [oi build <script>.ml]. *)
+    script:string -> deps:dep list -> dir:string -> string list * string list
+  (** [scaffold_for_script ~script ~deps ~dir] writes [dune-project], [dune]
+      (executable named after [script]'s basename, so dune compiles the script
+      in place), and [<base>.opam] (deps = the parsed script deps, so
+      [oi build]'s project mode has something to solve) into [dir] so an editor
+      / LSP and [oi build] both work. Unlike {!generate_project} it does {e not}
+      copy the script to [main.ml]. Each file is written only when absent —
+      existing files are {e never} overwritten. Returns [(created, kept)]: the
+      basenames written vs. the ones left untouched. Used by
+      [oi build <script>.ml]. *)
 end
 
 (** {1 URL-supplied projects}
