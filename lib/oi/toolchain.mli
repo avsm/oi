@@ -17,12 +17,12 @@
 
     On resolve the toolchain entry's [depends:] are walked transitively, the
     URL-bearing overlays in scope are materialised, and the
-    [x-oi-toolchain-roots] are solved. A non-relocatable toolchain (oxcaml)
-    is a preinstalled system package: oi probes for its fixed external prefix
-    (from [x-oi-external-prefix] / [brew --prefix] / [OI_<HANDLE>_PREFIX]) and
+    [x-oi-toolchain-roots] are solved. A non-relocatable toolchain (oxcaml) is a
+    preinstalled system package: oi probes for its fixed external prefix (from
+    [x-oi-external-prefix] / [brew --prefix] / [OI_<HANDLE>_PREFIX]) and
     hard-errors with an install hint if absent — it is never built by oi.
-    Relocatable toolchains have their compiler built into the consumer prefix
-    by the normal solve. *)
+    Relocatable toolchains have their compiler built into the consumer prefix by
+    the normal solve. *)
 
 [@@@ai_disclosure "ai-assisted"]
 [@@@ai_model "claude-opus-4-7"]
@@ -43,15 +43,15 @@ type info = {
           consumer prefix — {!ensure_installed} is then a no-op and downstream
           env / [mark_installed] paths skip the fixed-prefix treatment. The
           toolchain still pins the compiler version via {!opam_ctx_of_info}.
-          [false] means the compiler comes from a preinstalled system package
-          at {!external_prefix}; oi never builds it. *)
+          [false] means the compiler comes from a preinstalled system package at
+          {!external_prefix}; oi never builds it. *)
   external_prefix : string option;
       (** [Some p] for a non-relocatable toolchain whose compiler is
           preinstalled at the fixed system path [p] (resolved per-OS at
           {!resolve}: the [x-oi-external-prefix] pin on Linux, [brew --prefix]
           of [x-oi-external-brew] on macOS, or the [OI_<HANDLE>_PREFIX]
-          override). [install_prefix] equals [p]; {!ensure_installed} probes
-          for it and hard-errors with an install hint if absent. [None] for
+          override). [install_prefix] equals [p]; {!ensure_installed} probes for
+          it and hard-errors with an install hint if absent. [None] for
           relocatable toolchains. *)
   external_brew : string option;
       (** [x-oi-external-brew] verbatim, so {!ensure_installed}'s "not found"

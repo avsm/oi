@@ -19,8 +19,8 @@ type info = {
           it does in the no-toolchain flow. The version pin in
           {!opam_ctx_of_info} still drives compiler selection. [false] (e.g.
           oxcaml) means the compiler is provided by a preinstalled system
-          package at {!external_prefix}, layered via PATH like a relocatable
-          one but never built. *)
+          package at {!external_prefix}, layered via PATH like a relocatable one
+          but never built. *)
   external_prefix : string option;
       (** [Some p] for a non-relocatable toolchain whose compiler is
           preinstalled at [p] (a system package: [/opt/oxcaml/<ver>] on Linux,
@@ -29,8 +29,8 @@ type info = {
           oi never builds the compiler — it probes for [p] and PATH-layers it.
       *)
   external_brew : string option;
-      (** [x-oi-external-brew] verbatim — the Homebrew cask/formula ref, kept
-          so {!ensure_installed}'s "not found" hint can print the exact
+      (** [x-oi-external-brew] verbatim — the Homebrew cask/formula ref, kept so
+          {!ensure_installed}'s "not found" hint can print the exact
           [brew install <ref>] line. [None] for relocatable toolchains. *)
   packages : OpamPackage.Set.t;
   compiler_name : OpamPackage.Name.t;
@@ -218,7 +218,8 @@ let parse_spec s =
    alone. [external_prefix] is folded in so that bumping the system
    package (e.g. /opt/oxcaml/5.2.0minus31 → minus32) invalidates every
    consumer layer even if the solved opam set were somehow unchanged. *)
-let compute_hash ?external_prefix ~packages_dirs ~(conf : Solver.Ctx.conf) pkgs =
+let compute_hash ?external_prefix ~packages_dirs ~(conf : Solver.Ctx.conf) pkgs
+    =
   let layer_hash = D10.Layer.hash ~packages_dirs pkgs in
   let material =
     String.concat "\n"
@@ -361,8 +362,7 @@ let resolve_external_prefix ~sys ~(conf : Solver.Ctx.conf) ~handle
       | "macos", Some brew_ref ->
           let p =
             try
-              D10.Sysops.Cmd.run_out_quiet sys
-                [ "brew"; "--prefix"; brew_ref ]
+              D10.Sysops.Cmd.run_out_quiet sys [ "brew"; "--prefix"; brew_ref ]
             with Eio.Io _ as e ->
               Error.fail_config_error
                 "toolchain %s: 'brew --prefix %s' failed (%s) — install it \
@@ -454,11 +454,10 @@ let not_found_hint (info : info) prefix =
   let add fmt = Fmt.kstr (Buffer.add_string buf) fmt in
   add "toolchain %s: preinstalled compiler not found at %s@.@." info.handle
     prefix;
+  add "  oi no longer builds this toolchain — install it as a system package:@.";
   add
-    "  oi no longer builds this toolchain — install it as a system package:@.";
-  add
-    "    Linux : curl -fsSL https://oi.thicket.dev/install.sh | sh@.\
-    \             (or your distro's 'oxcaml-compiler' package)@.";
+    "    Linux : curl -fsSL https://oi.thicket.dev/install.sh | \
+     sh@.             (or your distro's 'oxcaml-compiler' package)@.";
   (match info.external_brew with
   | Some ref_ -> add "    macOS : brew install %s@." ref_
   | None -> ());

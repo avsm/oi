@@ -215,12 +215,12 @@ let distro_stage ?(overlay_depexts = []) d =
   @@ DF.env [ ("CI", "true") ]
   @@ DF.run "%s" (install_cmd mgr combined)
   @@ (match oxcaml_install_for mgr with
-     | None -> DF.empty
-     | Some c ->
-         DF.comment
-           "OxCaml: preinstalled system package (oi probes for it; \
-            temporary until oxcaml is relocatable)"
-         @@ DF.run "%s" c)
+    | None -> DF.empty
+    | Some c ->
+        DF.comment
+          "OxCaml: preinstalled system package (oi probes for it; temporary \
+           until oxcaml is relocatable)"
+        @@ DF.run "%s" c)
   @@ DF.run "%s" fetch_oi @@ DF.workdir "/work"
 
 (* -- Top-level Dockerfiles ---------------------------------------------- *)
@@ -558,8 +558,7 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
       (shell "%s")))
 |}
     distro_label s3_access_key_secret s3_secret_key_secret distro_label
-    s3.bucket img tag shell_op (sexp_escape install)
-    (oxcaml_obuilder_run mgr)
+    s3.bucket img tag shell_op (sexp_escape install) (oxcaml_obuilder_run mgr)
     (sexp_escape fetch_oi_obuilder)
     s3_access_key_secret s3_access_key_secret s3_secret_key_secret
     s3_secret_key_secret

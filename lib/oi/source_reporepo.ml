@@ -471,7 +471,7 @@ let validate_toolchain_fields ~path ~url_bare ~toolchain_name
     Error.fail_config_error
       "%s: %s is only meaningful on toolchain definitions (entries with %s set)"
       path Keys.default_toolchain Keys.toolchain_name
-  (* NB: a non-relocatable toolchain definition without [x-oi-external-prefix]
+(* NB: a non-relocatable toolchain definition without [x-oi-external-prefix]
      is NOT rejected here. [load] parses every historical version on disk, so
      a parse-time hard-fail would brick [oi] for any reporepo still carrying
      pre-migration entries. The real enforcement is in
@@ -491,9 +491,7 @@ let build_entry ~path opam : entry =
     read_string_extension extensions Keys.toolchain_compiler
   in
   let relocatable = read_bool_extension ~path extensions Keys.relocatable in
-  let external_prefix =
-    read_string_extension extensions Keys.external_prefix
-  in
+  let external_prefix = read_string_extension extensions Keys.external_prefix in
   let external_brew = read_string_extension extensions Keys.external_brew in
   let toolchain_roots =
     read_root_packages_extension ~path extensions Keys.toolchain_roots
@@ -938,8 +936,7 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~toolchain ?toolchain_def ~depends
         (fun b -> Fmt.pf pp "%s: %b\n" Keys.relocatable b)
         td.td_relocatable;
       Stdlib.Option.iter
-        (fun s ->
-          Fmt.pf pp "%s: %s\n" Keys.external_prefix (escape_string s))
+        (fun s -> Fmt.pf pp "%s: %s\n" Keys.external_prefix (escape_string s))
         td.td_external_prefix;
       Stdlib.Option.iter
         (fun s -> Fmt.pf pp "%s: %s\n" Keys.external_brew (escape_string s))

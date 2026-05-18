@@ -361,10 +361,11 @@ module Script = struct
 
   let is_ppx name = String.length name >= 4 && String.sub name 0 4 = "ppx_"
 
-  let generate_project ~script ~deps ~dir =
-    let content = In_channel.with_open_bin script In_channel.input_all in
-    Out_channel.with_open_bin (dir / "main.ml") (fun oc ->
-        output_string oc content);
+  (* Render the [(executable …)] dune stanza for a script's deps. [name] is
+     the executable / main-module name (so dune compiles [<name>.ml]).
+     ppx_* deps go under [(preprocess (pps …))], everything else under
+     [(libraries …)]; [ocaml] is dropped (it's the compiler, not a lib). *)
+  let dune_stanza_of_deps ~name deps =
     let rev_libs, rev_pps =
       List.fold_left
         (fun (libs, pps) d ->
@@ -376,23 +377,50 @@ module Script = struct
     in
     let libraries = List.rev rev_libs in
     let pps = List.rev rev_pps in
+    let buf = Buffer.create 256 in
+    Buffer.add_string buf (Printf.sprintf "(executable\n (name %s)\n" name);
+    if libraries <> [] then
+      Buffer.add_string buf
+        (Printf.sprintf " (libraries %s)\n" (String.concat " " libraries));
+    if pps <> [] then
+      Buffer.add_string buf
+        (Printf.sprintf " (preprocess (pps %s))\n" (String.concat " " pps));
+    Buffer.add_string buf ")\n";
+    Buffer.contents buf
+
+  let generate_project ~script ~deps ~dir =
+    let content = In_channel.with_open_bin script In_channel.input_all in
+    Out_channel.with_open_bin (dir / "main.ml") (fun oc ->
+        output_string oc content);
     Out_channel.with_open_text (dir / "dune-project") (fun oc ->
         output_string oc "(lang dune 3.0)\n");
-    let dune_content =
-      let buf = Buffer.create 256 in
-      let pp = Fmt.with_buffer buf in
-      Fmt.pf pp "(executable\n (name main)\n";
-      if libraries <> [] then
-        Fmt.pf pp " (libraries %s)\n" (String.concat " " libraries);
-      if pps <> [] then
-        Fmt.pf pp " (preprocess (pps %s))\n" (String.concat " " pps);
-      Fmt.pf pp ")\n";
-      Buffer.contents buf
-    in
+    let dune_content = dune_stanza_of_deps ~name:"main" deps in
     Log.debug (fun m ->
         m "generated dune for %s (in %s):@.%s" script dir dune_content);
     Out_channel.with_open_text (dir / "dune") (fun oc ->
         output_string oc dune_content)
+
+  (* Scaffold a [dune-project] + [dune] for an in-place [.ml] script so an
+     editor / LSP sees a real dune project, WITHOUT copying the script to
+     [main.ml] (the file stays as-is, so LSP resolves the user's own file)
+     and WITHOUT ever overwriting existing project files. The executable's
+     [(name …)] is the script's basename, so dune compiles the script
+     itself. Returns [`Created] when both files were written, or
+     [`Exists which] (["dune"] / ["dune-project"]) when one was already
+     present and nothing was touched. *)
+  let scaffold_for_script ~script ~deps ~dir =
+    let dune_project = dir / "dune-project" in
+    let dune_file = dir / "dune" in
+    if Sys.file_exists dune_project then `Exists "dune-project"
+    else if Sys.file_exists dune_file then `Exists "dune"
+    else begin
+      let base = Filename.remove_extension (Filename.basename script) in
+      Out_channel.with_open_text dune_project (fun oc ->
+          output_string oc "(lang dune 3.0)\n");
+      Out_channel.with_open_text dune_file (fun oc ->
+          output_string oc (dune_stanza_of_deps ~name:base deps));
+      `Created
+    end
 end
 
 (* -- URL-supplied projects ---------------------------------------------- *)

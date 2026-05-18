@@ -94,6 +94,19 @@ module Script : sig
   (** Write a synthetic [dune-project] + [main.ml] into [dir] that links the
       script's deps and compiles its body. Used by [oi run] for [.ml] targets.
   *)
+
+  val scaffold_for_script :
+    script:string ->
+    deps:dep list ->
+    dir:string ->
+    [ `Created | `Exists of string ]
+  (** [scaffold_for_script ~script ~deps ~dir] writes a [dune-project] and a
+      [dune] (executable named after [script]'s basename, so dune compiles the
+      script in place) into [dir] so an editor / LSP sees a real dune project.
+      Unlike {!generate_project} it does {e not} copy the script to [main.ml]
+      and {e never} overwrites: returns [`Exists which] (the offending file
+      name) and writes nothing if [dir] already has a [dune] or [dune-project],
+      else [`Created]. Used by [oi build <script>.ml]. *)
 end
 
 (** {1 URL-supplied projects}

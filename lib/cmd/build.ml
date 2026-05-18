@@ -801,6 +801,37 @@ let detect_project_mode ~fs ~skip_local ~targets ~all =
   in
   (in_project, cwd_s)
 
+(* [oi build script.ml]: make the directory a real dune project so the
+   user's editor / LSP works on the script in place. Same dep-parsing
+   logic as [oi run] (the first-line [[@@@opam …]] annotation), but the
+   script is left as-is (not copied to [main.ml]) and existing project
+   files are never overwritten — we just say so. No-op unless there is
+   exactly one target and it is a local [.ml] file. *)
+let maybe_scaffold_script ~fs ~cwd_s ~targets =
+  match targets with
+  | [ t ] when Filename.check_suffix t ".ml" ->
+      let path =
+        if Filename.is_relative t then Filename.concat cwd_s t else t
+      in
+      if Sys.file_exists path && not (Sys.is_directory path) then begin
+        let deps = Oi.Project.Script.parse_deps_from_file ~fs path in
+        match
+          Oi.Project.Script.scaffold_for_script ~script:path ~deps ~dir:cwd_s
+        with
+        | `Created ->
+            Fmt.pr
+              "%a wrote %a + %a for %s — your editor / LSP can now use this \
+               directory.@."
+              Oi.Style.pp_ok_string "▸" Oi.Style.pp_header_string "dune-project"
+              Oi.Style.pp_header_string "dune" (Filename.basename t)
+        | `Exists which ->
+            Fmt.pr
+              "%a %s already exists in %s — leaving it untouched (oi won't \
+               overwrite project files).@."
+              Oi.Style.pp_accent_string "▸" which cwd_s
+      end
+  | _ -> ()
+
 (* Flag validation. Mode-specific dispatch happens after this; here we
    only reject combinations that can't possibly proceed: any flag whose
    result depends on solving when there's nothing to solve. *)
@@ -1807,6 +1838,7 @@ let run (c : Terms.common) refresh locked skip_local all only skip registry
     detect_project_mode ~fs ~skip_local:args.skip_local ~targets:args.targets
       ~all:args.all
   in
+  maybe_scaffold_script ~fs ~cwd_s ~targets:args.targets;
   validate_build_flags ~targets:args.targets ~all:args.all ~project_mode
     ~depext_only:args.depext_only ~archives_only:args.archives_only
     ~every_version:args.every_version;

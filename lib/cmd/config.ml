@@ -103,9 +103,18 @@ let toolchain_entry_codec =
   let open Jsont in
   let enc f (t : toolchain_entry) = f t in
   Object.map ~kind:"toolchain"
-    (fun handle url ref_ relocatable is_default depends roots tools :
-         toolchain_entry ->
-      { handle; url; ref_; relocatable; is_default; depends; roots; tools })
+    (fun
+      handle
+      url
+      ref_
+      relocatable
+      is_default
+      depends
+      roots
+      tools
+      :
+      toolchain_entry
+    -> { handle; url; ref_; relocatable; is_default; depends; roots; tools })
   |> Object.mem "handle" string ~enc:(enc (fun t -> t.handle))
   |> Object.mem "url" string ~enc:(enc (fun t -> t.url))
   |> Object.opt_mem "ref" string ~enc:(enc (fun t -> t.ref_))
