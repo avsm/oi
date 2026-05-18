@@ -44,5 +44,5 @@ let exec ~env cmd =
       let prog = resolve_in_env ~env exe in
       try Unix.execve prog (Array.of_list (prog :: List.tl cmd)) env
       with Unix.Unix_error (e, _, _) ->
-        Printf.eprintf "oi: cannot exec %s: %s\n%!" prog (Unix.error_message e);
+        Fmt.epr "oi: cannot exec %s: %s@." prog (Unix.error_message e);
         exit 126)

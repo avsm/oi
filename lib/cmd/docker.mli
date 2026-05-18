@@ -4,4 +4,5 @@
     obuilder spec omits the docker-compose orchestration. *)
 
 val subcommands : unit Cmdliner.Cmd.t list
-(** The [docker] then [obuilder] subcommands, for the [oi dist] group. *)
+(** [subcommands] are the [docker] and [obuilder] subcommands for the [oi dist]
+    group. *)

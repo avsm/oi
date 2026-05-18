@@ -145,10 +145,19 @@ let layer_full_codec : layer_full Jsont.t =
   |> Object.mem "package_ver" string ~enc:(fun l -> l.package_ver)
   |> Object.mem "exit_status" int ~enc:(fun l -> l.exit_status)
   |> Object.mem "created" number ~enc:(fun l -> l.created)
-  |> Object.opt_mem "overlay_handle" string ~enc:(fun l -> l.overlay_handle)
-  |> Object.opt_mem "overlay_version" string ~enc:(fun l -> l.overlay_version)
-  |> Object.opt_mem "tarball_sha256" string ~enc:(fun l -> l.tarball_sha256)
-  |> Object.opt_mem "tarball_size" int64 ~enc:(fun l -> l.tarball_size)
+  (* These come from a server-side Clickhouse query that emits SQL [NULL] as
+     JSON [null] (not an absent member), so decode must tolerate an explicit
+     [null] as well as absence — [opt_mem] only handles absence and would fail
+     the whole index decode on [null]. [enc_omit] keeps the wire form
+     unchanged (member omitted when [None]). *)
+  |> Object.mem "overlay_handle" (option string) ~dec_absent:None
+       ~enc_omit:Option.is_none ~enc:(fun l -> l.overlay_handle)
+  |> Object.mem "overlay_version" (option string) ~dec_absent:None
+       ~enc_omit:Option.is_none ~enc:(fun l -> l.overlay_version)
+  |> Object.mem "tarball_sha256" (option string) ~dec_absent:None
+       ~enc_omit:Option.is_none ~enc:(fun l -> l.tarball_sha256)
+  |> Object.mem "tarball_size" (option int64) ~dec_absent:None
+       ~enc_omit:Option.is_none ~enc:(fun l -> l.tarball_size)
   |> Object.mem "deps" (list dep_codec) ~dec_absent:[] ~enc:(fun l -> l.deps)
   |> Object.mem "binaries" (list string) ~dec_absent:[] ~enc:(fun l ->
       l.binaries)

@@ -1183,9 +1183,9 @@ let layer_failure_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
     ~deps:(List.map dep_of_identity pp.dep_layers)
     ~depexts_declared:pp.depexts ~build_env_ocaml_version:ocaml_version ()
 
-let write_layer_failure_manifest_for_package ~fs ~cache_root ~os_key
-    ~ocaml_version ~built_at ~nodes_by_hash ~phase ~duration_s ~log
-    (d10 : D10.Config.t) (pp : Plan.package_plan) =
+let write_layer_failure_manifest ~fs ~cache_root ~os_key ~ocaml_version
+    ~built_at ~nodes_by_hash ~phase ~duration_s ~log (d10 : D10.Config.t)
+    (pp : Plan.package_plan) =
   let recipe = recipe_for_hash nodes_by_hash pp.layer_hash in
   let m =
     layer_failure_manifest_of_package ~os_key ~ocaml_version ~built_at ~recipe
@@ -1302,10 +1302,9 @@ let stream_upload_failed_layer (ctx : stream_ctx) ~hash ~phase ~log_path
   | None -> ()
   | Some (pp, ocaml_version) ->
       let log = log_tail_of_file ~path:log_path in
-      write_layer_failure_manifest_for_package ~fs:ctx.env.fs
-        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~ocaml_version
-        ~built_at:ctx.built_at ~nodes_by_hash:ctx.nodes_by_hash ~phase
-        ~duration_s ~log ctx.d10_cfg pp;
+      write_layer_failure_manifest ~fs:ctx.env.fs ~cache_root:ctx.cache_root
+        ~os_key:ctx.env.os_key ~ocaml_version ~built_at:ctx.built_at
+        ~nodes_by_hash:ctx.nodes_by_hash ~phase ~duration_s ~log ctx.d10_cfg pp;
       put_layer_json ~sys:ctx.env.sys ~url_base:ctx.url_base
         ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~hash
 
@@ -1320,10 +1319,10 @@ let stream_upload_skipped_layer (ctx : stream_ctx) ~hash ~reason =
       let log : Manifest_layer.log_tail option =
         Some { lines = 1; truncated = false; text = "skipped: " ^ reason }
       in
-      write_layer_failure_manifest_for_package ~fs:ctx.env.fs
-        ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~ocaml_version
-        ~built_at:ctx.built_at ~nodes_by_hash:ctx.nodes_by_hash
-        ~phase:"dep_failed" ~duration_s:0. ~log ctx.d10_cfg pp;
+      write_layer_failure_manifest ~fs:ctx.env.fs ~cache_root:ctx.cache_root
+        ~os_key:ctx.env.os_key ~ocaml_version ~built_at:ctx.built_at
+        ~nodes_by_hash:ctx.nodes_by_hash ~phase:"dep_failed" ~duration_s:0. ~log
+        ctx.d10_cfg pp;
       put_layer_json ~sys:ctx.env.sys ~url_base:ctx.url_base
         ~cache_root:ctx.cache_root ~os_key:ctx.env.os_key ~hash
 

@@ -138,7 +138,7 @@ val failure :
   ?build_env_ocaml_version:string ->
   unit ->
   t
-(** Build a failure manifest: [outcome = Fail], no tarball, empty
+(** [failure] builds a failure manifest: [outcome = Fail], no tarball, empty
     files/binaries/findlib, and a {!failure_info} carrying [phase], the optional
     process [exit_status], the [duration_s] up to the failing phase, and the
     build-log [log] tail. The package/overlay/deps/recipe/
