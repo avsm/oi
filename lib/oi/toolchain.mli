@@ -16,11 +16,13 @@
     separate namespaces; the latter is what [--toolchain=NAME] resolves against.
 
     On resolve the toolchain entry's [depends:] are walked transitively, the
-    URL-bearing overlays in scope are materialised, the [x-oi-toolchain-roots]
-    are solved, and the install prefix is derived as
-    [$XDG_CACHE_HOME/oi/toolchains/<name>-<version>-<hash8>/]. On first use a
-    non-relocatable toolchain is built there; subsequent runs skip the install.
-    Relocatable toolchains skip the fixed-prefix install entirely. *)
+    URL-bearing overlays in scope are materialised, and the
+    [x-oi-toolchain-roots] are solved. A non-relocatable toolchain (oxcaml)
+    is a preinstalled system package: oi probes for its fixed external prefix
+    (from [x-oi-external-prefix] / [brew --prefix] / [OI_<HANDLE>_PREFIX]) and
+    hard-errors with an install hint if absent — it is never built by oi.
+    Relocatable toolchains have their compiler built into the consumer prefix
+    by the normal solve. *)
 
 [@@@ai_disclosure "ai-assisted"]
 [@@@ai_model "claude-opus-4-7"]
@@ -40,7 +42,21 @@ type info = {
       (** [true] when the toolchain's compiler can be installed into a per-solve
           consumer prefix — {!ensure_installed} is then a no-op and downstream
           env / [mark_installed] paths skip the fixed-prefix treatment. The
-          toolchain still pins the compiler version via {!opam_ctx_of_info}. *)
+          toolchain still pins the compiler version via {!opam_ctx_of_info}.
+          [false] means the compiler comes from a preinstalled system package
+          at {!external_prefix}; oi never builds it. *)
+  external_prefix : string option;
+      (** [Some p] for a non-relocatable toolchain whose compiler is
+          preinstalled at the fixed system path [p] (resolved per-OS at
+          {!resolve}: the [x-oi-external-prefix] pin on Linux, [brew --prefix]
+          of [x-oi-external-brew] on macOS, or the [OI_<HANDLE>_PREFIX]
+          override). [install_prefix] equals [p]; {!ensure_installed} probes
+          for it and hard-errors with an install hint if absent. [None] for
+          relocatable toolchains. *)
+  external_brew : string option;
+      (** [x-oi-external-brew] verbatim, so {!ensure_installed}'s "not found"
+          hint can print the exact [brew install <ref>] line. [None] for
+          relocatable toolchains. *)
   packages : OpamPackage.Set.t;  (** Packages installed in the toolchain. *)
   compiler_name : OpamPackage.Name.t;
       (** The single compiler-package name this toolchain installs (parsed from
@@ -119,7 +135,8 @@ type summary = {
   url : string;
   ref_ : string option;  (** Git ref tracked, e.g. [Some "relocatable"]. *)
   relocatable : bool;
-      (** [true] when the toolchain skips the fixed-prefix install. *)
+      (** [true] when the toolchain's compiler is built into the consumer
+          prefix; [false] when it is an external preinstalled system package. *)
   is_default : bool;
       (** [true] when this toolchain's latest entry carries
           [x-oi-default-toolchain: true]. *)
@@ -128,18 +145,11 @@ type summary = {
   tools : string list;
       (** Always-on dev tools the toolchain installs into [_oi/tools/] on each
           [oi build] (from [x-oi-toolchain-tools]). *)
-  installs : (string * bool) list;
-      (** Existing install prefixes on disk for this handle, paired with whether
-          each one has its [.oi-toolchain-ready] sentinel. The list reflects
-          whatever solves have been cached so far — without a solve we can't
-          know the canonical prefix for this machine, so callers display all of
-          them. *)
 }
 
 val available : unit -> summary list
 (** [available] Snapshot of every toolchain definition the reporepo currently
-    advertises (entries carrying [x-oi-toolchain-name]) plus any of their
-    install prefixes already present under {!default_root}. Cheap (no solve, no
+    advertises (entries carrying [x-oi-toolchain-name]). Cheap (no solve, no
     network), so safe for [oi config]. Empty when the reporepo has no toolchain
     entries — fresh machines need to clone or create them. *)
 
@@ -148,19 +158,20 @@ val ensure_installed :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
   info ->
   unit
-(** [ensure_installed] Build the toolchain into its fixed prefix if absent.
-    No-op for relocatable toolchains and for already-prepared non-relocatable
-    ones. On failure for a non-relocatable toolchain the install prefix is left
-    partial and the next call retries from scratch.
+(** [ensure_installed] Ensure the toolchain is usable. No-op for relocatable
+    toolchains (the compiler is built into the consumer prefix by the normal
+    solve). For a non-relocatable toolchain it {e probes} for the preinstalled
+    external prefix (oi no longer builds it) and hard-errors with an install
+    hint if absent.
 
-    [?reporter] receives a [Status "Installing toolchain <handle>"] event when
-    the install actually runs. *)
+    [?reporter] receives a [Status "Using preinstalled toolchain <handle>"]
+    event when the external probe succeeds. *)
 
 val is_ready : info -> bool
-(** [is_ready info] is the general predicate for "this toolchain is usable as a
-    fixed prefix on disk". Returns [true] for relocatable toolchains (no fixed
-    prefix to check) and for non-relocatable ones whose install completed (the
-    [.oi-toolchain-ready] marker exists under [install_prefix]). Callers that
-    stage [info.install_prefix] into a build env should gate on this to fail
-    fast with a clear error instead of letting downstream [+ox] builds crash
-    trying to find a compiler that isn't there. *)
+(** [is_ready info] is the general predicate for "this toolchain is usable".
+    Returns [true] for relocatable toolchains (compiler built into the consumer
+    prefix, nothing to probe) and for non-relocatable ones whose preinstalled
+    external prefix was found ([<external_prefix>/bin/ocamlc] exists). Callers
+    that stage [info.install_prefix] into a build env should gate on this to
+    fail fast with a clear error instead of letting downstream [+ox] builds
+    crash trying to find a compiler that isn't there. *)

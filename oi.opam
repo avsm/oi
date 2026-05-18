@@ -15,7 +15,6 @@ depends: [
   "osrel" {= version}
   "opam-format" {>= "2.2.0"}
   "opam-state" {>= "2.2.0"}
-  "opam-client" {>= "2.2.0"}
   "opam-repository" {>= "2.2.0"}
   "opam-0install" {>= "0.4"}
   "nox-tty"

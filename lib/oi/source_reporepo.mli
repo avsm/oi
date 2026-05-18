@@ -41,6 +41,14 @@ type entry = {
   relocatable : bool option;
       (** [x-oi-relocatable]: build mode for the toolchain this entry defines.
       *)
+  external_prefix : string option;
+      (** [x-oi-external-prefix]: when set, the toolchain's compiler is
+          preinstalled at this fixed path rather than built by oi. Required when
+          [relocatable] is [Some false]. *)
+  external_brew : string option;
+      (** [x-oi-external-brew]: Homebrew cask/formula ref; on macOS the external
+          prefix is [brew --prefix <this>]. Only meaningful with
+          {!external_prefix}. *)
   toolchain_roots : string list list;
       (** [x-oi-toolchain-roots]: solver root specs for the toolchain. *)
   toolchain_tools : string list;

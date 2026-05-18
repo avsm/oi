@@ -15,7 +15,6 @@ type platform = { os_key : string; ocaml_version : string }
 type directories = { data : string; cache : string }
 type registry = { url : string; index_ttl_s : float }
 type source_mirror = { dir : string; blobs : int; total_bytes : int64 }
-type toolchain_install = { path : string; ready : bool }
 
 type toolchain_entry = {
   handle : string;
@@ -26,7 +25,6 @@ type toolchain_entry = {
   depends : string list;
   roots : string list;
   tools : string list;
-  installs : toolchain_install list;
 }
 
 type toolchains = { install_root : string; entries : toolchain_entry list }
@@ -101,41 +99,13 @@ let source_mirror_codec =
        ~enc:(fun m -> m.total_bytes)
   |> Object.finish
 
-let toolchain_install_codec =
-  let open Jsont in
-  Object.map ~kind:"install" (fun path ready -> { path; ready })
-  |> Object.mem "path" string ~enc:(fun i -> i.path)
-  |> Object.mem "ready" bool ~enc:(fun i -> i.ready)
-  |> Object.finish
-
 let toolchain_entry_codec =
   let open Jsont in
   let enc f (t : toolchain_entry) = f t in
   Object.map ~kind:"toolchain"
-    (fun
-      handle
-      url
-      ref_
-      relocatable
-      is_default
-      depends
-      roots
-      tools
-      installs
-      :
-      toolchain_entry
-    ->
-      {
-        handle;
-        url;
-        ref_;
-        relocatable;
-        is_default;
-        depends;
-        roots;
-        tools;
-        installs;
-      })
+    (fun handle url ref_ relocatable is_default depends roots tools :
+         toolchain_entry ->
+      { handle; url; ref_; relocatable; is_default; depends; roots; tools })
   |> Object.mem "handle" string ~enc:(enc (fun t -> t.handle))
   |> Object.mem "url" string ~enc:(enc (fun t -> t.url))
   |> Object.opt_mem "ref" string ~enc:(enc (fun t -> t.ref_))
@@ -149,11 +119,6 @@ let toolchain_entry_codec =
        ~enc_omit:(( = ) [])
   |> Object.mem "tools" (list string) ~dec_absent:[]
        ~enc:(enc (fun t -> t.tools))
-       ~enc_omit:(( = ) [])
-  |> Object.mem "installs"
-       (list toolchain_install_codec)
-       ~dec_absent:[]
-       ~enc:(enc (fun t -> t.installs))
        ~enc_omit:(( = ) [])
   |> Object.finish
 
@@ -277,7 +242,6 @@ let gather_toolchain_entries () =
         depends = s.depends;
         roots = s.roots;
         tools = s.tools;
-        installs = List.map (fun (path, ready) -> { path; ready }) s.installs;
       })
     (Oi.Toolchain.available ())
 
@@ -391,28 +355,13 @@ let render_source_mirror (m : source_mirror) =
   Fmt.pr "  blobs:      %d@," m.blobs;
   Fmt.pr "  total size: %s@," (human_bytes m.total_bytes)
 
-(* Per-toolchain install status: list each install path with a colored
-   ready/partial badge, or print a dim "not installed" if none. *)
-let render_toolchain_installs xs =
-  match xs with
-  | [] -> Fmt.pr "    status:     %a@," Oi.Style.pp_dim_string "not installed"
-  | xs ->
-      List.iter
-        (fun { path; ready } ->
-          let status =
-            if ready then Fmt.str "%a" Oi.Style.pp_ok_string "ready"
-            else Fmt.str "%a" Oi.Style.pp_warn_string "partial"
-          in
-          Fmt.pr "    install:    %s  %s@," status path)
-        xs
-
 let render_toolchain_entry (t : toolchain_entry) =
   let url_with_ref =
     match t.ref_ with Some r -> Fmt.str "%s#%s" t.url r | None -> t.url
   in
   let mode_tag =
     if t.relocatable then Fmt.str "[%a]" Oi.Style.pp_ok_string "relocatable"
-    else Fmt.str "[%a]" Oi.Style.pp_warn_string "fixed-prefix"
+    else Fmt.str "[%a]" Oi.Style.pp_warn_string "external"
   in
   let default_tag =
     if t.is_default then Fmt.str "  [%a]" Oi.Style.pp_accent_string "default"
@@ -425,7 +374,9 @@ let render_toolchain_entry (t : toolchain_entry) =
   Fmt.pr "    roots:      %s@," (String.concat ", " t.roots);
   if t.tools <> [] then
     Fmt.pr "    tools:      %s@," (String.concat ", " t.tools);
-  if not t.relocatable then render_toolchain_installs t.installs
+  if not t.relocatable then
+    Fmt.pr "    source:     %a@," Oi.Style.pp_dim_string
+      "preinstalled system package (probed at build time)"
 
 let render_toolchains (t : toolchains) =
   Fmt.pr "@,%a@," Oi.Style.pp_header_string "Toolchains";

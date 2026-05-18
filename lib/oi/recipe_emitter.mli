@@ -15,6 +15,7 @@
 val emit :
   d10:D10.Config.t ->
   ?cli_invocation:string list ->
+  ?extra_owned_paths:string list ->
   toolchain_name:string ->
   toolchain_layer:string ->
   Plan.t ->
@@ -22,4 +23,10 @@ val emit :
 (** [emit] Uses [d10.root] to resolve the recipe's [archive_root] (i.e.
     [<d10.root>/d10ir/archives/]). The archives themselves are NOT materialised
     here — that's [oi repo bake] / [oi repo bump]'s job; the emitter reads each
-    package's [x-d10-archive] sha and references the archive by content hash. *)
+    package's [x-d10-archive] sha and references the archive by content hash.
+
+    [extra_owned_paths] are additional path prefixes treated as oi-owned when
+    scrubbing each node's [PATH] (on top of [cache_root] and the toolchains
+    root). Pass an external non-relocatable toolchain's install prefix here so
+    its [bin/] survives the scrub; otherwise consumer [+ox] builds fall back to
+    the host system compiler. *)

@@ -126,8 +126,15 @@ let scrub_path ~owned_prefixes entry =
     let oi_owned = List.filter (path_entry_oi_owned ~owned_prefixes) parts in
     "PATH=" ^ String.concat ":" (oi_owned @ [ standard_system_path ])
 
-let env_of_array ~cache_root env_array =
-  let owned_prefixes = [ cache_root; Cache.toolchains_root () ] in
+let env_of_array ~cache_root ~extra_owned_paths env_array =
+  (* [extra_owned_paths] carries an external (non-relocatable) toolchain's
+     install prefix, e.g. [/opt/oxcaml/5.2.0minus31]. It lives outside both
+     [cache_root] and [toolchains_root], so without it here [scrub_path]
+     strips the toolchain's [bin/] and consumer [+ox] builds fall back to
+     the host's system compiler — which can't parse oxcaml jkind syntax. *)
+  let owned_prefixes =
+    [ cache_root; Cache.toolchains_root () ] @ extra_owned_paths
+  in
   let kept =
     Array.to_list env_array
     |> List.filter (fun s -> String.contains s '=')
@@ -165,7 +172,8 @@ let opam_file_sha256_of (p : Plan.package_plan) =
    before [D10ir.Direct.run] takes over. The Direct executor itself
    does no network I/O; if an archive is still missing post-prefetch,
    it errors at unpack time. *)
-let node_of_package_plan ~cache_root (p : Plan.package_plan) : D10ir.Plan.node =
+let node_of_package_plan ~cache_root ~extra_owned_paths (p : Plan.package_plan)
+    : D10ir.Plan.node =
   let archive : D10ir.Archive.t =
     let handle_str =
       match p.overlay with Some o -> o.handle | None -> "<handle>"
@@ -186,7 +194,7 @@ let node_of_package_plan ~cache_root (p : Plan.package_plan) : D10ir.Plan.node =
     | Some sha ->
         { path = Fmt.str "%s.tar.zst" sha; sha256 = sha; strip_components = 0 }
   in
-  let env = env_of_array ~cache_root p.env in
+  let env = env_of_array ~cache_root ~extra_owned_paths p.env in
   let pkg_name, pkg_version =
     match String.index_opt p.pkg '.' with
     | None -> (p.pkg, "")
@@ -266,12 +274,12 @@ let default_mounts () : D10ir.Plan.mount list =
     };
   ]
 
-let node_of_pkg_plan ~cache_root (p : Plan.package_plan) =
+let node_of_pkg_plan ~cache_root ~extra_owned_paths (p : Plan.package_plan) =
   match p.method_ with
   | Identity.Binary ->
       Log.debug (fun m -> m "skipping binary package %s" p.pkg);
       None
-  | Source -> Some (node_of_package_plan ~cache_root p)
+  | Source -> Some (node_of_package_plan ~cache_root ~extra_owned_paths p)
 
 let roots_of_nodes (nodes : D10ir.Plan.node list) =
   (* Roots: nodes that no other node depends on. Compute over the
@@ -289,10 +297,14 @@ let roots_of_nodes (nodes : D10ir.Plan.node list) =
       else Some n.layer_hash)
     nodes
 
-let emit ~d10 ?(cli_invocation = []) ~toolchain_name ~toolchain_layer
-    (plan : Plan.t) : D10ir.Plan.t =
+let emit ~d10 ?(cli_invocation = []) ?(extra_owned_paths = []) ~toolchain_name
+    ~toolchain_layer (plan : Plan.t) : D10ir.Plan.t =
   let cache_root = plan.cache_root in
-  let nodes = List.filter_map (node_of_pkg_plan ~cache_root) plan.packages in
+  let nodes =
+    List.filter_map
+      (node_of_pkg_plan ~cache_root ~extra_owned_paths)
+      plan.packages
+  in
   let roots = roots_of_nodes nodes in
   let toolchain : D10ir.Plan.toolchain =
     {

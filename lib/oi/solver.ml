@@ -236,8 +236,6 @@ module Ctx = struct
     OpamCoreConfig.init ~yes:(Some true) ~verbose_level:0 ~debug_level:0
       ~disp_status_line:`Never ();
     OpamFormatConfig.init ();
-    OpamSolverConfig.init ();
-    OpamClientConfig.init ();
     let root_dir = OpamFilename.Dir.of_string root in
     OpamStateConfig.update ~no_depexts:true ~root_dir ();
     OpamFilename.mkdir root_dir;
@@ -300,6 +298,7 @@ module Ctx = struct
                 prefix / "lib" / "ocaml" / "stublibs";
                 tc.install_prefix / "lib" / "stublibs";
               ] );
+          ("OCAMLFIND_CONF", prefix / "lib" / "findlib.conf");
           ("OCAMLFIND_DESTDIR", prefix / "lib");
           ("OCAMLFIND_LDCONF", "ignore");
           ( "OCAMLPATH",
@@ -436,6 +435,16 @@ module Ctx = struct
         overwrote_opams = OpamPackage.Map.empty;
       }
     in
+    (* [ocaml:preinstalled] = true when the compiler is provided by a fixed
+       external prefix rather than built into the consumer/switch prefix.
+       Non-relocatable toolchains (oxcaml: a read-only system package) are
+       exactly that case; opam packages like [ocamlfind] gate on this to
+       avoid writing [topfind] into the compiler's read-only [lib/ocaml].
+       Relocatable / no-toolchain builds get a fresh writable stdlib, so
+       [false] (matching upstream opam for a from-source switch). *)
+    let preinstalled =
+      match toolchain with Some tc -> not tc.relocatable | None -> false
+    in
     let ocaml_conf_config name =
       match OpamPackage.Name.to_string name with
       | "ocaml" ->
@@ -448,7 +457,7 @@ module Ctx = struct
                  (var "native", b true);
                  (var "native-tools", b true);
                  (var "native-dynlink", b true);
-                 (var "preinstalled", b false);
+                 (var "preinstalled", b preinstalled);
                  (var "compiler", s "");
                ])
       | _ -> None

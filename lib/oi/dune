@@ -8,7 +8,6 @@
   eio
   opam-format
   opam-state
-  opam-client
   opam-repository
   opam-0install
   nox-tty

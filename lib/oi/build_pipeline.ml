@@ -337,13 +337,13 @@ let elaborate_plan ~env ~cache_root ~gctx ~pkgs_dir ~group_conf build_plan =
 
 (* Bake archives + emit recipe under [Error.E] / [Failure] / [Invalid_argument]
    guards. Returns the (possibly mutated) exec_plan alongside the recipe. *)
-let emit_recipe ~env ~d10 ~cache_root ~toolchain_name ~toolchain_layer exec_plan
-    =
+let emit_recipe ~env ~d10 ~cache_root ~extra_owned_paths ~toolchain_name
+    ~toolchain_layer exec_plan =
   try
     let exec_plan = bake_inline_archives ~env ~d10 ~cache_root exec_plan in
     let recipe =
       Recipe_emitter.emit ~d10 ~cli_invocation:(Array.to_list Sys.argv)
-        ~toolchain_name ~toolchain_layer exec_plan
+        ~extra_owned_paths ~toolchain_name ~toolchain_layer exec_plan
     in
     Ok (exec_plan, recipe)
   with
@@ -357,6 +357,15 @@ let toolchain_handle_or_system (t : Toolchain.info option) =
    all-toolchain-pkgs short-circuit and the recipe emit + archive bake. *)
 let finish_after_elaborate ~env ~d10 ~cache_root ~toolchain exec_plan =
   let toolchain_name = toolchain_handle_or_system toolchain in
+  (* An external non-relocatable toolchain (oxcaml) lives at a fixed system
+     prefix outside the oi cache. Mark it oi-owned so [Recipe_emitter]'s PATH
+     scrub keeps its [bin/] and consumer [+ox] builds use the right compiler
+     instead of falling back to the host system OCaml. *)
+  let extra_owned_paths =
+    match (toolchain : Toolchain.info option) with
+    | Some i -> Option.to_list i.external_prefix
+    | None -> []
+  in
   let toolchain_layer = toolchain_layer_of exec_plan in
   if toolchain_layer = "" then
     (* Every selected package was filtered out by [elaborate] (target
@@ -372,8 +381,8 @@ let finish_after_elaborate ~env ~d10 ~cache_root ~toolchain exec_plan =
           } )
   else
     match
-      emit_recipe ~env ~d10 ~cache_root ~toolchain_name ~toolchain_layer
-        exec_plan
+      emit_recipe ~env ~d10 ~cache_root ~extra_owned_paths ~toolchain_name
+        ~toolchain_layer exec_plan
     with
     | Ok (exec_plan, recipe) -> Ok (exec_plan, recipe)
     | Error err -> Error (Some exec_plan, err)
