@@ -229,6 +229,38 @@ let coalesce_targets targets : Oi.Build_pipeline.target list =
      ])
   @ List.rev extra
 
+(* Alongside the portable Makefile, emit one standalone Dockerfile per
+   distro: each builds the bundle from scratch (no oi / opam — just
+   [make]) with that distro's depexts, then copies only the
+   binaries/share into a clean image. Best-effort: a failed depext probe
+   degrades to no-depexts ([Docker.compute_per_distro_depexts] warns). *)
+let emit_dockerfiles ~harness ~refresh ~output ~label ~(plan : D10ir.Plan.t) =
+  let { Harness.fs; sys; cache; data_dir; platform; _ } = harness in
+  let needs_host_ocaml = plan.D10ir.Plan.external_layers <> [] in
+  let per_distro =
+    Docker.compute_per_distro_depexts ~fs ~sys ~cache ~data_dir ~refresh
+      ~platform
+  in
+  (* Skip the regenerable build scratch when [docker build] tars up the
+     bundle dir; the persistent [source/] snapshot is deliberately kept. *)
+  Registry_docker.write_file (output / ".dockerignore") "src/\ndest/\n";
+  let paths =
+    List.map
+      (fun (d, overlay_depexts) ->
+        let path = output / Registry_docker.one_distro_filename d in
+        Registry_docker.write_dockerfile path
+          (Registry_docker.dockerfile_makefile ~label ~needs_host_ocaml
+             ~overlay_depexts d);
+        (path, List.length overlay_depexts))
+      per_distro
+  in
+  Oi.Say.step "Wrote %d standalone Dockerfile(s)" (List.length paths);
+  List.iter
+    (fun (path, n) ->
+      let suffix = if n = 0 then "" else Fmt.str "  (%d depexts)" n in
+      Oi.Say.info "%s%a" path Oi.Style.pp_dim_string suffix)
+    paths
+
 let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
     ~with_deps ~toolchain_override ~targets ~output =
   if output = "" then
@@ -277,7 +309,12 @@ let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
       Makefile_export.emit plan ~output ~registry ~binaries ~bin_roots ?local ();
       if binaries <> [] then
         Oi.Say.field "binaries" "%s" (String.concat " " binaries);
-      Oi.Say.ok "wrote portable Makefile to %s (run: make)" output
+      emit_dockerfiles ~harness ~refresh ~output
+        ~label:(String.concat ", " targets) ~plan;
+      Oi.Say.ok
+        "wrote portable Makefile + per-distro Dockerfiles to %s (run: make, or \
+         docker build -f Dockerfile.<distro> .)"
+        output
 
 let makefile_run (c : Terms.common) refresh registry use_registry with_repos
     with_deps _jobs toolchain_override targets output =
@@ -302,11 +339,19 @@ let makefile_man =
     `P
       "$(b,make) builds and assembles $(b,./dest); $(b,make V=1) is verbose; \
        $(b,make install) copies the binaries under $(b,DESTDIR)/$(b,PREFIX).";
+    `P
+      "A $(b,Dockerfile.<distro>) is also written for each target distro \
+       (Alpine, Debian, Ubuntu 24.04/26.04, Fedora). Each is a two-stage \
+       standalone build: a $(b,build) stage installs that distro's depexts \
+       and runs $(b,make), and a clean runtime stage carries only the \
+       resulting binaries/share. Build one with $(b,docker build -f \
+       Dockerfile.<distro> .).";
     `S Manpage.s_examples;
     `Pre
       "  oi dist makefile utop -o ./utop-mk\n\
       \  oi dist makefile -o ./release      # current project\n\
-      \  cd ./release && make && make install PREFIX=/opt/app";
+      \  cd ./release && make && make install PREFIX=/opt/app\n\
+      \  cd ./release && docker build -f Dockerfile.debian-stable -t app .";
   ]
 
 let makefile_cmd =
@@ -351,7 +396,11 @@ let cmd =
           `I ("$(b,oi dist obuilder)", "obuilder specs (s-expressions).");
           `I
             ( "$(b,oi dist makefile)",
-              "a portable Makefile that needs no $(b,oi) at build time." );
+              "a portable Makefile (plus per-distro Dockerfiles) that needs no \
+               $(b,oi) at build time." );
+          `I
+            ( "$(b,oi dist duniverse)",
+              "vendor a target's sources into a self-contained bundle." );
         ]
   in
-  Cmd.group info (Docker.subcommands @ [ makefile_cmd ])
+  Cmd.group info (Docker.subcommands @ [ makefile_cmd; Duniverse.cmd ])

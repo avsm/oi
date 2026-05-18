@@ -129,7 +129,7 @@ let man_automation =
       \  $(b,Quiet)      --color=never, -q, \
        --verbosity=quiet|error|warning|info|debug\n\
       \  $(b,Reproduce)  --toolchain, --with-repo, --registry, --use-registry; \
-       oi source TARGET -o DIR\n\
+       oi dist duniverse TARGET -o DIR\n\
       \  $(b,Sandbox)    --cache-dir, --data-dir, --use-registry=never, \
        --skip-local, --locked";
   ]
@@ -208,7 +208,6 @@ let () =
         Oi_cmd.Clean.cmd;
         Oi_cmd.Cache.cmd;
         Oi_cmd.Self.cmd;
-        Oi_cmd.Source.cmd;
       ]
   in
   let argv = force_plain_help_when_redirected Sys.argv in

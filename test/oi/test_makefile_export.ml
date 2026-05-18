@@ -1,4 +1,4 @@
-(* Tests for [oi source --makefile] codegen (Cmd.Makefile_export).
+(* Tests for [oi dist makefile] codegen (Cmd.Makefile_export).
 
    Builds tiny in-memory {!D10ir.Plan.t} values and asserts the emitted
    Makefile / sidecars: external (toolchain) layers are filtered, the
@@ -121,7 +121,7 @@ let test_missing_archive_is_fatal () =
   let out = Helpers.fresh_dir ~prefix:"mkbad" () in
   Alcotest.check_raises "missing archive raises"
     (Failure
-       "oi source --makefile: 1 package(s) have no pre-baked source archive \
+       "oi dist makefile: 1 package(s) have no pre-baked source archive \
         (need x-d10-archive): bad.1.0. Run `oi repo bump` to bake them, or \
         drop them from the target set.") (fun () ->
       Oi_cmd.Makefile_export.emit p ~output:out ~registry:"r" ())

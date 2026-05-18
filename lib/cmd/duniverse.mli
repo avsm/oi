@@ -1,6 +1,6 @@
-(** [oi source TARGET -o DIR] — fetch every source artefact needed to build
-    [TARGET] into [DIR], so a later [dune build] / [opam install] / [oi build] /
-    [oi sync] can run offline.
+(** [oi dist duniverse TARGET -o DIR] — fetch every source artefact needed to
+    build [TARGET] into [DIR], so a later [dune build] / [opam install] /
+    [oi build] / [oi sync] can run offline.
 
     Layout produced under [DIR]:
 

@@ -1,4 +1,4 @@
-(** [oi source --makefile] backend.
+(** [oi dist makefile] backend.
 
     Render a unified d10ir plan ({!D10ir.Plan.t}, the same artifact [oi build]
     executes) as a portable Makefile that:

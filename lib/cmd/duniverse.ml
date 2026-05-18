@@ -268,7 +268,7 @@ let render_root_opam ~target_label ~packages ~repos ~reporepo_hash =
   let buf = Buffer.create 1024 in
   let pf fmt = Fmt.kstr (Buffer.add_string buf) fmt in
   pf "opam-version: \"2.0\"\n";
-  pf "synopsis: \"oi source bundle for %s\"\n" target_label;
+  pf "synopsis: \"oi dist duniverse bundle for %s\"\n" target_label;
   pf "depends: [\n";
   List.iter
     (fun pkg ->
@@ -501,8 +501,8 @@ let resolve_initial_inputs ~fs ~cwd_s ~targets ~with_repos ~with_deps =
   let targets = if targets = [] then project.deps else targets in
   if targets = [] then
     Oi.Error.fail_config_error
-      "oi source: at least one TARGET is required (or run from a project dir \
-       with *.opam files)";
+      "oi dist duniverse: at least one TARGET is required (or run from a \
+       project dir with *.opam files)";
   let targets, with_repos, with_deps =
     split_handle_targets ~with_repos ~with_deps targets
   in
@@ -584,7 +584,8 @@ let finalize_workspace ~sys ~output ~vendor_dir ~targets ~(solved : solved)
 let run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
     ~targets ~output ~data_dir =
   let { Harness.fs; sys; cache; _ } = harness in
-  if output = "" then Oi.Error.fail_config_error "oi source: -o DIR is required";
+  if output = "" then
+    Oi.Error.fail_config_error "oi dist duniverse: -o DIR is required";
   let cwd_s, _ = Workspace.resolved_cwd fs in
   let project, targets, with_repos, with_deps =
     resolve_initial_inputs ~fs ~cwd_s ~targets ~with_repos ~with_deps
@@ -646,9 +647,9 @@ let man_block =
        dist makefile).";
     `S Manpage.s_examples;
     `Pre
-      "  oi source @avsm/owntracks-cli -o ./bundle\n\
-      \  oi source dune fmt -o /tmp/dune-fmt-src\n\
-      \  oi source @avsm/oi --toolchain ocaml-5.4 -o ./oi-src";
+      "  oi dist duniverse @avsm/owntracks-cli -o ./bundle\n\
+      \  oi dist duniverse dune fmt -o /tmp/dune-fmt-src\n\
+      \  oi dist duniverse @avsm/oi --toolchain ocaml-5.4 -o ./oi-src";
   ]
 
 let cmd =
@@ -678,7 +679,7 @@ let cmd =
           [])
   in
   let info =
-    Cmd.info "source"
+    Cmd.info "duniverse"
       ~doc:"Vendor a target's sources into a self-contained bundle"
       ~man:man_block
   in

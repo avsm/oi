@@ -48,7 +48,8 @@ val refresh : bool Cmdliner.Term.t
 val locked : bool Cmdliner.Term.t
 (** [locked] flag: best-effort offline mode. Implies [--use-registry=never] and
     clears [--refresh]. Intended for agents and CI jobs that pre-warmed the
-    cache (typically via a [oi source]-produced bundle) and want any cache miss
+    cache (typically via a [oi dist duniverse]-produced bundle) and want any
+    cache miss
     to fail fast rather than silently fetch. *)
 
 val skip_local : bool Cmdliner.Term.t
