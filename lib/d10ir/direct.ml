@@ -137,6 +137,188 @@ let str_replace ~from_str ~to_str s =
     done;
     Buffer.contents buf
 
+(* ---- Restaged dependency-path rebasing -------------------------------- *)
+
+(* A dependency's *installed* files can carry the ABSOLUTE staging path of
+   the layer they were built in — findlib's [topfind] and [findlib.conf],
+   the [ocaml-stub] wrapper that becomes [bin/ocaml], [ld.conf], … all bake
+   in [<root>/build/staging/<dephash>/…]. That dir is gone in every consumer
+   ([cleanup_staging]), so the path is dead (the [topkg]-on-oxcaml failure:
+   [ocaml pkg/pkg.ml] loads a [topfind] whose [#directory] points at it).
+   The per-node [str_replace ~from_str:n.prefix] only rebases the CURRENT
+   node's script/env/substs (the [n.prefix] sentinel); it cannot touch a
+   concrete staging path a dependency resolved into a restaged file.
+
+   [<root>] is the cache root of WHATEVER environment built the layer: the
+   local cache root for a locally-built dep, but a different one (e.g.
+   [/cache] in a CI container) for a layer pulled from the shared registry.
+   So the rewrite must be cache-root-AGNOSTIC: it anchors on the structural
+   [/build/staging/<32-hex>] segment, regardless of the leading prefix, and
+   replaces the whole absolute path token up to and including the hash with
+   THIS consumer's local staging dir. That is length-changing (foreign and
+   local roots differ in length), so it is a whole-file text rewrite (not an
+   in-place byte patch) — fine because the artifacts that matter ([topfind],
+   [findlib.conf], wrapper scripts) are text. Binaries are NUL-probed and
+   skipped: findlib's compiled-in config path is overridden at run time by
+   the [OCAMLFIND_CONF] / [OCAMLPATH] / [OCAML_TOPLEVEL_PATH] env the
+   executor already rebases, so only the text artifacts need fixing (proven
+   by a clean-room 115-package [patdiff] build). Restored files are
+   hardlinks into the shared layer store ([Layer.restore] =
+   [Sysops.link_tree]); a file that needs rewriting is detached first
+   (unlink + fresh write = copy-on-write) so the cached layer is never
+   mutated.
+
+   This is Phase 0 (see [design/relocation.md]) — the production scheme.
+   Phase 1b/2/3 (padded sentinel / staging + store-time canonicalisation)
+   were prototyped and reverted; the design note records why. *)
+
+let is_hex_char c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+
+(* Characters that bound an absolute-path token in the text we rewrite
+   (shell/OCaml string literals, findlib.conf, [#directory] lines). ['/'],
+   alphanumerics, ['.'], ['_'], ['-'], ['+'], ['~'] are path chars; anything
+   here ends the token. ([':'] in particular splits [PATH]-style lists.) *)
+let path_delim = function
+  | '"' | '\'' | ' ' | '\t' | '\n' | '\r' | '\000' | '=' | ':' | '(' | ')'
+  | ',' | ';' | '<' | '>' | '[' | ']' | '{' | '}' | '`' ->
+      true
+  | _ -> false
+
+let staging_anchor = "/build/staging/"
+
+(* [s.[i..]] begins [staging_anchor] then exactly 32 hex chars then ['/']. *)
+let staging_anchor_at s i n =
+  let alen = String.length staging_anchor in
+  i + alen + 33 <= n
+  && String.sub s i alen = staging_anchor
+  && (let ok = ref true in
+      for k = 0 to 31 do
+        if not (is_hex_char s.[i + alen + k]) then ok := false
+      done;
+      !ok)
+  && s.[i + alen + 32] = '/'
+
+(* Rewrite every absolute path of shape [<anyprefix>/build/staging/<32-hex>]
+   to [local_staging] (= this consumer's [<cache_root>/build/staging/<own
+   hash>]), preserving any suffix after the hash. [<anyprefix>] is whatever
+   cache root built the layer — local, or a foreign one (e.g. [/cache]) for
+   a registry-pulled layer — so the leading prefix and the hash are BOTH
+   replaced. Length-changing; whole-string. [Some s'] iff a path was
+   actually rewritten (so the caller can skip the copy-on-write). A
+   no-op when the token already equals [local_staging]. *)
+let rebase_staging_paths ~local_staging s =
+  let n = String.length s in
+  let span_len = String.length staging_anchor + 32 in
+  let buf = Buffer.create n in
+  let changed = ref false in
+  (* Start of the current absolute-path token: [tok] in [buf], [tok_s] in
+     [s]; [-1] when not inside one. *)
+  let tok = ref (-1) and tok_s = ref (-1) in
+  let i = ref 0 in
+  while !i < n do
+    let c = s.[!i] in
+    if c = '/' && !tok < 0 && (!i = 0 || path_delim s.[!i - 1]) then begin
+      tok := Buffer.length buf;
+      tok_s := !i
+    end
+    else if path_delim c then begin
+      tok := -1;
+      tok_s := -1
+    end;
+    if !tok >= 0 && c = '/' && staging_anchor_at s !i n then begin
+      let span_end = !i + span_len in
+      if String.sub s !tok_s (span_end - !tok_s) = local_staging then begin
+        Buffer.add_char buf c;
+        incr i
+      end
+      else begin
+        Buffer.truncate buf !tok;
+        Buffer.add_string buf local_staging;
+        changed := true;
+        i := span_end;
+        tok := -1;
+        tok_s := -1
+      end
+    end
+    else begin
+      Buffer.add_char buf c;
+      incr i
+    end
+  done;
+  if !changed then Some (Buffer.contents buf) else None
+
+let binary_probe_bytes = 8192
+
+(* Read [path], classifying it binary (skip) if a NUL byte appears in the
+   first [binary_probe_bytes] — the standard text/binary heuristic, so a
+   huge [.cma]/object is probed, not slurped. Returns the full contents only
+   for text files. *)
+let read_text_file path =
+  In_channel.with_open_bin path @@ fun ic ->
+  let probe = Bytes.create binary_probe_bytes in
+  let head = Bytes.sub_string probe 0 (In_channel.input ic probe 0 binary_probe_bytes) in
+  if String.contains head '\000' then None
+  else Some (head ^ In_channel.input_all ic)
+
+(* Detach the hardlink (unlink) before writing so the fresh inode is private
+   to this staging tree and the shared layer-store copy keeps its own link,
+   byte-identical. *)
+let cow_write path ~perm data =
+  Unix.unlink path;
+  Out_channel.with_open_bin path (fun oc -> Out_channel.output_string oc data);
+  try Unix.chmod path perm with Unix.Unix_error _ -> ()
+
+let rebase_symlink ~local_staging path =
+  match Unix.readlink path with
+  | exception Unix.Unix_error _ -> ()
+  | target -> (
+      match rebase_staging_paths ~local_staging target with
+      | None -> ()
+      | Some target' ->
+          Unix.unlink path;
+          Unix.symlink target' path)
+
+let rebase_regular ~local_staging ~perm path =
+  match read_text_file path with
+  | exception Sys_error _ -> ()
+  | None -> ()
+  | Some data -> (
+      match rebase_staging_paths ~local_staging data with
+      | None -> ()
+      | Some data' -> cow_write path ~perm data')
+
+let rebase_one_entry ~local_staging path =
+  match Unix.lstat path with
+  | exception Unix.Unix_error _ -> ()
+  | { Unix.st_kind = Unix.S_LNK; _ } -> rebase_symlink ~local_staging path
+  | { Unix.st_kind = Unix.S_REG; st_perm; _ } ->
+      rebase_regular ~local_staging ~perm:st_perm path
+  | _ -> ()
+
+let rebase_dir_entry ~local_staging ~recurse dir name =
+  let p = dir / name in
+  match Unix.lstat p with
+  | exception Unix.Unix_error _ -> ()
+  | { Unix.st_kind = Unix.S_DIR; _ } -> recurse p
+  | _ -> rebase_one_entry ~local_staging p
+
+(* Walk the restaged tree (native paths; [Unix.lstat] so symlinked dirs are
+   not followed) and rebase dead sibling-staging paths in place. A no-op
+   tree-walk when nothing baked a staging path (relocatable / from-source
+   builds): every file probes clean and is left hardlinked. *)
+(* [staging] is this node's [<cache_root>/build/staging/<own hash>] — the
+   single dir all deps were restaged into and the target every baked staging
+   path must point at. *)
+let rebase_restaged_staging_paths staging =
+  let local_staging = staging in
+  let rec walk dir =
+    match Sys.readdir dir with
+    | exception Sys_error _ -> ()
+    | names ->
+        Array.iter (rebase_dir_entry ~local_staging ~recurse:walk dir) names
+  in
+  walk staging
+
 (* ---- Per-node procedure ----------------------------------------------- *)
 
 let succeeded d10 hash =
@@ -180,7 +362,8 @@ let transitive_dep_layers ~producers d10 (n : Plan.node) =
   done;
   List.rev !result
 
-let stage_dependencies ~producers ~fs d10 (n : Plan.node) staging =
+let stage_dependencies ~rebase_restaged ~producers ~fs d10 (n : Plan.node)
+    staging =
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / staging);
   skeleton ~fs staging;
   let all = transitive_dep_layers ~producers d10 n in
@@ -191,7 +374,15 @@ let stage_dependencies ~producers ~fs d10 (n : Plan.node) staging =
     (fun h ->
       if succeeded d10 h then
         D10.Layer.restore d10 ~hash:(Layer_hash.to_string h) ~prefix:staging)
-    all
+    all;
+  (* Fix sibling-staging paths a dependency baked into restaged files
+     (findlib [topfind] / [findlib.conf], the [ocaml-stub] [bin/ocaml], …)
+     before the script runs against this node's staging dir. Only
+     non-relocatable toolchains bake such paths (a host-provided compiler
+     stack — see the [~rebase_restaged] gate at the call site); relocatable /
+     from-source builds resolve findlib relatively and need neither the
+     rewrite nor its tree-walk. *)
+  if rebase_restaged then rebase_restaged_staging_paths staging
 
 let resolve_archive_path ~plan_dir ~archive_root (a : Archive.t) =
   let with_root =
@@ -404,8 +595,8 @@ let with_phase ~reporter (n : Plan.node) phase body =
    per-hash [staging] / [build_dir] paths only need to be safe against
    in-process scheduling, which the d10ir scheduler handles by not
    dispatching the same node twice. *)
-let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
-    ~producers ~reporter ~mount_env (n : Plan.node) =
+let build_one ~rebase_restaged ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir
+    ~archive_root ~producers ~reporter ~mount_env (n : Plan.node) =
   if succeeded d10 n.layer_hash then `Cached
   else begin
     let staging = staging_dir_for d10 n in
@@ -414,7 +605,7 @@ let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
     try
       reporter.event (Node_started { node = n });
       with_phase ~reporter n Stage_deps (fun () ->
-          stage_dependencies ~producers ~fs d10 n staging);
+          stage_dependencies ~rebase_restaged ~producers ~fs d10 n staging);
       with_phase ~reporter n Unpack_archive (fun () ->
           unpack_archive ~proc_mgr ~fs ~plan_dir ~archive_root n ~build_dir);
       let rebase = str_replace ~from_str:n.prefix ~to_str:staging in
@@ -578,11 +769,17 @@ let try_build_node ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
     resolve n `Ok
   end
   else begin
+    (* A non-relocatable toolchain ships its compiler stack as host-provided
+       [external_layers] (plan.mli); those are exactly the builds whose deps
+       bake absolute per-node staging paths into installed files. Relocatable
+       / from-source / no-toolchain plans have no external layers, so the
+       restage rebase is skipped entirely (not just a no-op walk). *)
+    let rebase_restaged = plan.Plan.external_layers <> [] in
     let outcome =
       with_slot (fun () ->
-          build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir
-            ~archive_root:plan.Plan.archive_root ~producers:tables.producers
-            ~reporter ~mount_env n)
+          build_one ~rebase_restaged ~config ~d10 ~fs ~proc_mgr ~clock
+            ~plan_dir ~archive_root:plan.Plan.archive_root
+            ~producers:tables.producers ~reporter ~mount_env n)
     in
     handle_build_outcome ~counts ~reporter ~bump ~resolve outcome n
   end
