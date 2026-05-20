@@ -385,7 +385,7 @@ let render_toolchain_entry (t : toolchain_entry) =
     Fmt.pr "    tools:      %s@," (String.concat ", " t.tools);
   if not t.relocatable then
     Fmt.pr "    source:     %a@," Oi.Style.pp_dim_string
-      "preinstalled system package (probed at build time)"
+      "external compiler (auto-installed on first build)"
 
 let render_toolchains (t : toolchains) =
   Fmt.pr "@,%a@," Oi.Style.pp_header_string "Toolchains";

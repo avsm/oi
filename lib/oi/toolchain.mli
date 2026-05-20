@@ -43,20 +43,18 @@ type info = {
           consumer prefix — {!ensure_installed} is then a no-op and downstream
           env / [mark_installed] paths skip the fixed-prefix treatment. The
           toolchain still pins the compiler version via {!opam_ctx_of_info}.
-          [false] means the compiler comes from a preinstalled system package at
-          {!external_prefix}; oi never builds it. *)
-  external_prefix : string option;
-      (** [Some p] for a non-relocatable toolchain whose compiler is
-          preinstalled at the fixed system path [p] (resolved per-OS at
-          {!resolve}: the [x-oi-external-prefix] pin on Linux, [brew --prefix]
-          of [x-oi-external-brew] on macOS, or the [OI_<HANDLE>_PREFIX]
-          override). [install_prefix] equals [p]; {!ensure_installed} probes for
-          it and hard-errors with an install hint if absent. [None] for
-          relocatable toolchains. *)
-  external_brew : string option;
-      (** [x-oi-external-brew] verbatim, so {!ensure_installed}'s "not found"
-          hint can print the exact [brew install <ref>] line. [None] for
-          relocatable toolchains. *)
+          [false] (oxcaml) means [oi] from-source-builds {!root_names} as a unit
+          into {!install_prefix} (always a user-writable [$XDG_CACHE_HOME]
+          location), PATH-/[OCAMLPATH]-layers that prefix into every consumer
+          build, and treats those packages as virtually-installed for solver
+          purposes. *)
+  preinstalled_override : bool option;
+      (** When [Some b], the [ocaml:preinstalled] opam variable is forced to [b]
+          inside {!Solver.Ctx.create}. [None] for normal consumer builds
+          (preinstalled follows [relocatable]). {!Toolchain_install} sets
+          [Some false] for the one-off toolchain build so [ocamlfind+ox]'s
+          configure does not pass [-no-topfind] — the toolchain prefix is
+          user-writable, so [topfind] actually gets installed there. *)
   packages : OpamPackage.Set.t;  (** Packages installed in the toolchain. *)
   compiler_name : OpamPackage.Name.t;
       (** The single compiler-package name this toolchain installs (parsed from
@@ -136,7 +134,8 @@ type summary = {
   ref_ : string option;  (** Git ref tracked, e.g. [Some "relocatable"]. *)
   relocatable : bool;
       (** [true] when the toolchain's compiler is built into the consumer
-          prefix; [false] when it is an external preinstalled system package. *)
+          prefix; [false] when [oi] source-builds it into a user-writable
+          [$XDG_CACHE_HOME/oi/toolchains] prefix. *)
   is_default : bool;
       (** [true] when this toolchain's latest entry carries
           [x-oi-default-toolchain: true]. *)
@@ -153,25 +152,21 @@ val available : unit -> summary list
     network), so safe for [oi config]. Empty when the reporepo has no toolchain
     entries — fresh machines need to clone or create them. *)
 
-val ensure_installed :
-  ?reporter:Build_progress.reporter ->
-  fs:Eio.Fs.dir_ty Eio.Path.t ->
-  info ->
-  unit
+val ensure_installed : ?reporter:Build_progress.reporter -> info -> unit
 (** [ensure_installed] Ensure the toolchain is usable. No-op for relocatable
     toolchains (the compiler is built into the consumer prefix by the normal
-    solve). For a non-relocatable toolchain it {e probes} for the preinstalled
-    external prefix (oi no longer builds it) and hard-errors with an install
-    hint if absent.
+    solve). For a non-relocatable toolchain it probes
+    [<info.install_prefix>/bin/ocamlc]; the {e populating} of that prefix is
+    {!Oi.Aux_install.ensure}'s job and runs ahead of the per-consumer build via
+    the {!Build_pipeline.aux_installer} plumbing.
 
-    [?reporter] receives a [Status "Using preinstalled toolchain <handle>"]
-    event when the external probe succeeds. *)
+    [?reporter] receives [Status] events around the probe. *)
 
 val is_ready : info -> bool
 (** [is_ready info] is the general predicate for "this toolchain is usable".
-    Returns [true] for relocatable toolchains (compiler built into the consumer
-    prefix, nothing to probe) and for non-relocatable ones whose preinstalled
-    external prefix was found ([<external_prefix>/bin/ocamlc] exists). Callers
-    that stage [info.install_prefix] into a build env should gate on this to
-    fail fast with a clear error instead of letting downstream [+ox] builds
-    crash trying to find a compiler that isn't there. *)
+    [true] for relocatable toolchains (compiler built into the consumer prefix,
+    nothing to probe) and for non-relocatable ones whose
+    [info.install_prefix/bin/ocamlc] exists. Callers that stage
+    [info.install_prefix] into a build env should gate on this to fail fast with
+    a clear error instead of letting downstream [+ox] builds crash trying to
+    find a compiler that isn't there. *)

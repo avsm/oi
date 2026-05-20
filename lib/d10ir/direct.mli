@@ -107,10 +107,31 @@ val run :
   clock:D10.Config.clk ->
   ?reporter:reporter ->
   ?plan_dir:string ->
+  ?install_to:string ->
   Plan.t ->
   result
 (** [run] Execute every node in the plan. Returns aggregate counts.
 
     [plan_dir] is the directory containing the plan (and its [archive_root]);
     defaults to the current working directory. Used to resolve [archive.path].
-*)
+
+    [install_to] redirects the per-node install destination from the normal
+    per-layer-hash [build/staging/<hash>] dir to a single shared user-owned
+    prefix (e.g. the toolchain prefix in {!Oi.Aux_install}'s flow). When set:
+
+    - opam's [%{prefix}%] expansion ([n.prefix] sentinel rebase at run time)
+      targets [install_to] for every node, so packages install directly into the
+      location they'll be consumed from — no staging-then-restore, no
+      baked-staging-path-in-binary problem.
+    - The dep-staging phase is skipped (siblings have installed to the same
+      prefix; the build env's PATH/OCAMLPATH already covers it via
+      {!Solver.Ctx.switch_env}).
+    - The layer-cache lookup is skipped: a prior cached entry was captured
+      against a per-node staging dir with that path baked into binaries, so
+      reusing it would leave [install_to] either empty or full of stale paths.
+    - The pre-build snapshot, post-build diff, and layer store are all skipped:
+      the snapshot would be of the whole toolchain prefix and the stored layer
+      would carry [install_to] baked into binaries, useless as a cache entry on
+      any other host.
+    - [install_to] is NOT cleaned up after the build; only [build_dir] (the
+      per-node sources/work area) is. *)

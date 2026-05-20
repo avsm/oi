@@ -42,6 +42,14 @@ module Ctx : sig
             PATH/lib layering — the binary cache then matches what no-toolchain
             mode would produce. The version pinning via [packages]/[root_names]
             still applies. *)
+    preinstalled_override : bool option;
+        (** Force the [ocaml:preinstalled] opam variable to this value during
+            [Ctx.create], independent of [relocatable]. [None] (the default)
+            uses the conventional derivation [preinstalled = not relocatable].
+            Set to [Some false] by the aux-prefix install path so [ocamlfind+ox]
+            sees a relocatable compiler context and builds with [topfind]
+            enabled; everything else still treats the compiler at
+            [install_prefix] as preinstalled. *)
     packages : OpamPackage.Set.t;
     root_names : OpamPackage.Name.Set.t;
         (** Solver-root subset of [packages]. The consumer solve uses this to

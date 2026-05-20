@@ -100,10 +100,16 @@ let staging_dir_for d10 (n : Plan.node) =
   / Layer_hash.to_string n.layer_hash
 
 let build_dir_for d10 (n : Plan.node) =
+  (* Keep this in sync with {!Oi.Plan}'s [build_dir] derivation: it
+     emits scripts that bake in absolute paths under [_build/<pkg>-<12-hex>]
+     via opam's [%{build}%] expansion, so the cwd we hand to the script
+     must use the same 12-char short-hash. An 8-vs-12-char mismatch leaves
+     [tar -xf]-extracted sources under the cwd while the baked
+     [--root]/[--prefix] paths point at a non-existent 12-char dir. *)
   cache_root_native d10 / "build" / "_build"
   / Fmt.str "%s.%s-%s" n.package.name n.package.version
       (let h = Layer_hash.to_string n.layer_hash in
-       String.sub h 0 (min 8 (String.length h)))
+       String.sub h 0 (min 12 (String.length h)))
 
 let log_dir_for ~(config : Config.t) ~d10 =
   match config.log_dir with
@@ -179,8 +185,8 @@ let is_hex_char c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
    alphanumerics, ['.'], ['_'], ['-'], ['+'], ['~'] are path chars; anything
    here ends the token. ([':'] in particular splits [PATH]-style lists.) *)
 let path_delim = function
-  | '"' | '\'' | ' ' | '\t' | '\n' | '\r' | '\000' | '=' | ':' | '(' | ')'
-  | ',' | ';' | '<' | '>' | '[' | ']' | '{' | '}' | '`' ->
+  | '"' | '\'' | ' ' | '\t' | '\n' | '\r' | '\000' | '=' | ':' | '(' | ')' | ','
+  | ';' | '<' | '>' | '[' | ']' | '{' | '}' | '`' ->
       true
   | _ -> false
 
@@ -256,7 +262,9 @@ let binary_probe_bytes = 8192
 let read_text_file path =
   In_channel.with_open_bin path @@ fun ic ->
   let probe = Bytes.create binary_probe_bytes in
-  let head = Bytes.sub_string probe 0 (In_channel.input ic probe 0 binary_probe_bytes) in
+  let head =
+    Bytes.sub_string probe 0 (In_channel.input ic probe 0 binary_probe_bytes)
+  in
   if String.contains head '\000' then None
   else Some (head ^ In_channel.input_all ic)
 
@@ -579,6 +587,15 @@ let cleanup_staging ~fs ~(config : Config.t) staging build_dir =
     with Eio.Exn.Io _ -> ()
   end
 
+(* Clean up just the per-node sources/build dir, leaving the install
+   target alone. Used when the install destination is user-owned (e.g.
+   the toolchain prefix in {!Oi.Aux_install}'s flow) and must not be
+   nuked by the executor's post-build sweep. *)
+let cleanup_build_dir ~fs ~(config : Config.t) build_dir =
+  if not config.keep_staging then
+    try Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / build_dir)
+    with Eio.Exn.Io _ -> ()
+
 let now_s ~clock = Eio.Time.now clock
 
 (* Wrap a phase. Emits [Node_phase] before [body ()] runs; on failure
@@ -590,57 +607,112 @@ let with_phase ~reporter (n : Plan.node) phase body =
   reporter.event (Node_phase { node = n; phase });
   try body () with exn -> raise (Phase_failed (phase, exn))
 
+(* In aux-install mode ([install_to <> None]) we don't capture / store a
+   layer: the snapshot would be of the whole toolchain prefix and the
+   on-disk files have absolute [install_prefix] paths baked in, so it
+   would be unusable as a cache entry on any other host (and on this
+   host the marker file gates re-runs anyway). [body] is the install
+   steps between snapshot and diff; its result is returned untouched. *)
+let with_layer_capture ~install_to ~reporter ~d10 ~fs ~install_target n body =
+  match install_to with
+  | Some _ -> body ()
+  | None ->
+      let before =
+        with_phase ~reporter n Snapshot_pre (fun () ->
+            D10.Prefix.snapshot ~fs install_target)
+      in
+      let result = body () in
+      let files =
+        with_phase ~reporter n Diff_layer (fun () ->
+            D10.Prefix.diff ~fs ~prefix:install_target ~before |> List.map fst)
+      in
+      with_phase ~reporter n Store_layer (fun () ->
+          store_layer ~d10 n ~staging:install_target ~files);
+      result
+
+(* Post-build cleanup: in normal consumer mode nuke both the per-node
+   [staging] and its [build_dir]; in aux-install mode the install target
+   is the user-owned toolchain prefix and must be preserved, so only
+   the temp [build_dir] is removed. *)
+let cleanup_after ~install_to ~fs ~config ~staging ~build_dir =
+  if install_to = None then cleanup_staging ~fs ~config staging build_dir
+  else cleanup_build_dir ~fs ~config build_dir
+
 (* Cross-process serialisation is provided by {!Oi.Lock.acquire_global} in
    {!Cmd.Harness.bootstrap}, so [build_one] does not take its own lock; the
    per-hash [staging] / [build_dir] paths only need to be safe against
    in-process scheduling, which the d10ir scheduler handles by not
    dispatching the same node twice. *)
-let build_one ~rebase_restaged ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir
-    ~archive_root ~producers ~reporter ~mount_env (n : Plan.node) =
-  if succeeded d10 n.layer_hash then `Cached
+(* The phases that take a [Plan.node] from "sources extracted" to "files
+   installed at [install_target]": stage dep layers (consumer mode only),
+   unpack the archive, apply the [n.prefix → install_target] substitution
+   to scripts/env/substs, run the recipe, then replay any [.install] file.
+   Returns the per-node log path. In aux-install mode dep-staging is
+   skipped — see the top-of-module note in {!Oi.Aux_install.ensure}'s
+   docstring; siblings have already installed into [install_target] and
+   the build env's PATH covers them. *)
+let run_build_phases ~rebase_restaged ~install_to ~config ~d10 ~fs ~proc_mgr
+    ~plan_dir ~archive_root ~producers ~reporter ~mount_env ~staging
+    ~install_target ~build_dir (n : Plan.node) =
+  if install_to = None then
+    with_phase ~reporter n Stage_deps (fun () ->
+        stage_dependencies ~rebase_restaged ~producers ~fs d10 n staging);
+  with_phase ~reporter n Unpack_archive (fun () ->
+      unpack_archive ~proc_mgr ~fs ~plan_dir ~archive_root n ~build_dir);
+  let rebase = str_replace ~from_str:n.prefix ~to_str:install_target in
+  with_phase ~reporter n Apply_substs (fun () ->
+      apply_substs ~rebase n ~build_dir);
+  with_layer_capture ~install_to ~reporter ~d10 ~fs ~install_target n (fun () ->
+      let log_path =
+        with_phase ~reporter n Run_script (fun () ->
+            run_script ~proc_mgr ~fs ~config ~d10 ~mount_env n
+              ~staging:install_target ~build_dir)
+      in
+      with_phase ~reporter n Apply_install_file (fun () ->
+          maybe_apply_install_file ~fs n ~staging:install_target ~build_dir);
+      log_path)
+
+let build_one ~rebase_restaged ?install_to ~config ~d10 ~fs ~proc_mgr ~clock
+    ~plan_dir ~archive_root ~producers ~reporter ~mount_env (n : Plan.node) =
+  (* In aux-install mode ([install_to <> None]) we deliberately ignore the
+     layer cache: toolchain layers stored by prior runs were captured
+     against a per-node [staging] dir (their files bake that path in
+     binaries / [.cmxs] / ocamlfind metadata), so reusing them when the
+     install target is the fixed toolchain prefix would either leave
+     [install_prefix] empty (cached → no-op) or restore stale paths that
+     don't exist. The toolchain marker [.oi-toolchain-ready] (set by
+     {!Oi.Aux_install.ensure}) is the real "skip the whole build" gate;
+     once it's present, we never even reach this function. *)
+  if install_to = None && succeeded d10 n.layer_hash then `Cached
   else begin
     let staging = staging_dir_for d10 n in
     let build_dir = build_dir_for d10 n in
+    (* [install_target] is what opam's [%{prefix}%] expands to at exec time
+       (via the [str_replace] rebase inside [run_build_phases]). Normal
+       consumer flow: per-node, hash-named [staging] dir, captured as the
+       layer. Aux toolchain flow: the toolchain's fixed
+       [$XDG_CACHE_HOME/oi/toolchains/<id>] prefix — packages install
+       directly where they'll live, no staging-then-restore, no
+       baked-staging-path-in-binary problem. *)
+    let install_target = Option.value install_to ~default:staging in
+    if install_to <> None then
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / install_target);
+    let cleanup () =
+      cleanup_after ~install_to ~fs ~config ~staging ~build_dir
+    in
     let t0 = now_s ~clock in
     try
       reporter.event (Node_started { node = n });
-      with_phase ~reporter n Stage_deps (fun () ->
-          stage_dependencies ~rebase_restaged ~producers ~fs d10 n staging);
-      with_phase ~reporter n Unpack_archive (fun () ->
-          unpack_archive ~proc_mgr ~fs ~plan_dir ~archive_root n ~build_dir);
-      let rebase = str_replace ~from_str:n.prefix ~to_str:staging in
-      with_phase ~reporter n Apply_substs (fun () ->
-          apply_substs ~rebase n ~build_dir);
-      let before =
-        with_phase ~reporter n Snapshot_pre (fun () ->
-            D10.Prefix.snapshot ~fs staging)
-      in
       let log_path =
-        with_phase ~reporter n Run_script (fun () ->
-            run_script ~proc_mgr ~fs ~config ~d10 ~mount_env n ~staging
-              ~build_dir)
+        run_build_phases ~rebase_restaged ~install_to ~config ~d10 ~fs ~proc_mgr
+          ~plan_dir ~archive_root ~producers ~reporter ~mount_env ~staging
+          ~install_target ~build_dir n
       in
-      with_phase ~reporter n Apply_install_file (fun () ->
-          maybe_apply_install_file ~fs n ~staging ~build_dir);
-      let files =
-        with_phase ~reporter n Diff_layer (fun () ->
-            D10.Prefix.diff ~fs ~prefix:staging ~before |> List.map fst)
-      in
-      with_phase ~reporter n Store_layer (fun () ->
-          store_layer ~d10 n ~staging ~files);
-      cleanup_staging ~fs ~config staging build_dir;
-      let dt = now_s ~clock -. t0 in
-      `Built (log_path, dt)
+      cleanup ();
+      `Built (log_path, now_s ~clock -. t0)
     with Phase_failed (phase, exn) ->
-      (* Build failures are NOT logged as warnings here — they're
-         a normal part of any non-trivial build. The Failed event
-         carries enough info, the per-node log file has the full
-         output, and the run-level summary printed by the caller
-         is where the user should see the failure. Logging here
-         too would duplicate (during the run) and mid-bar the
-         progress UI. *)
       let log_path = log_path_for ~config ~d10 n in
-      cleanup_staging ~fs ~config staging build_dir;
+      cleanup ();
       let dt = now_s ~clock -. t0 in
       `Failed (phase, log_path, tidy_error_string (Printexc.to_string exn), dt)
   end
@@ -761,9 +833,15 @@ let handle_build_outcome ~counts ~reporter ~bump ~resolve outcome n =
         (Node_failed { node = n; phase; log_path; error; duration_s = dt });
       resolve n `Failed
 
-let try_build_node ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
-    ~reporter ~mount_env ~counts ~bump ~resolve ~with_slot n =
-  if succeeded d10 n.Plan.layer_hash then begin
+let try_build_node ?install_to ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan
+    ~tables ~reporter ~mount_env ~counts ~bump ~resolve ~with_slot n =
+  (* Same gate as [build_one]: in aux-install mode ignore layer-cache
+     hits so every toolchain node actually executes and writes into
+     [install_to]. Without this, a prior cached build (captured against
+     a per-node staging dir) reports [Cached] here and never materialises
+     into the toolchain prefix, leaving later packages unable to find
+     [bin/ocaml] / [share/ocaml-config/]. *)
+  if install_to = None && succeeded d10 n.Plan.layer_hash then begin
     bump (fun () -> counts#cached ());
     reporter.event (Node_cached { node = n });
     resolve n `Ok
@@ -777,15 +855,15 @@ let try_build_node ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
     let rebase_restaged = plan.Plan.external_layers <> [] in
     let outcome =
       with_slot (fun () ->
-          build_one ~rebase_restaged ~config ~d10 ~fs ~proc_mgr ~clock
-            ~plan_dir ~archive_root:plan.Plan.archive_root
+          build_one ~rebase_restaged ?install_to ~config ~d10 ~fs ~proc_mgr
+            ~clock ~plan_dir ~archive_root:plan.Plan.archive_root
             ~producers:tables.producers ~reporter ~mount_env n)
     in
     handle_build_outcome ~counts ~reporter ~bump ~resolve outcome n
   end
 
-let pkg_fiber ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
-    ~reporter ~mount_env ~counts ~bump ~with_slot n =
+let pkg_fiber ?install_to ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan
+    ~tables ~reporter ~mount_env ~counts ~bump ~with_slot n =
   let resolve = resolve_node ~tables in
   reporter.event (Node_queued { node = n });
   match dep_status ~tables ~d10 n with
@@ -794,11 +872,12 @@ let pkg_fiber ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
       reporter.event (Node_skipped { node = n; reason = "dep failed" });
       resolve n `Skipped
   | `Ok ->
-      try_build_node ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
-        ~reporter ~mount_env ~counts ~bump ~resolve ~with_slot n
+      try_build_node ?install_to ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir
+        ~plan ~tables ~reporter ~mount_env ~counts ~bump ~resolve ~with_slot n
 
 let run ~(config : Config.t) ~d10 ~fs ~proc_mgr ~clock
-    ?(reporter = null_reporter) ?(plan_dir = Sys.getcwd ()) (plan : Plan.t) =
+    ?(reporter = null_reporter) ?(plan_dir = Sys.getcwd ()) ?install_to
+    (plan : Plan.t) =
   let mount_env = prepare_mounts ~fs plan.mounts in
   reporter.event (Plan_started { total = List.length plan.nodes });
   let tables = build_node_tables plan in
@@ -811,8 +890,8 @@ let run ~(config : Config.t) ~d10 ~fs ~proc_mgr ~clock
     Fun.protect ~finally:(fun () -> Eio.Semaphore.release build_sem) f
   in
   let run_pkg n =
-    pkg_fiber ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan ~tables
-      ~reporter ~mount_env ~counts ~bump ~with_slot n
+    pkg_fiber ?install_to ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~plan
+      ~tables ~reporter ~mount_env ~counts ~bump ~with_slot n
   in
   Eio.Switch.run (fun sw ->
       List.iter (fun n -> Eio.Fiber.fork ~sw (fun () -> run_pkg n)) plan.nodes);

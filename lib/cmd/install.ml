@@ -244,7 +244,11 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs ~clock
     ~clock:(clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
+  let solved =
+    Oi.Build_pipeline.solve pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote)
+      req
+  in
   let result =
     Oi.Build_pipeline.build pipeline_env ~reporter
       {
@@ -255,6 +259,7 @@ let solve_and_build ~pipeline_env ~req ~layer_remote ~source_remote ~jobs ~clock
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   (solved, result)

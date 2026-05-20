@@ -56,22 +56,6 @@ val default_toolchain : string
     [--toolchain] is given. Exactly one toolchain definition in the reporepo may
     carry this flag (validated by [oi repo lint]). *)
 
-val external_prefix : string
-(** [external_prefix] [x-oi-external-prefix: <abs-path>] — when set, the
-    toolchain's compiler is NOT built by oi: it is expected to be preinstalled
-    at this fixed prefix (e.g. [/opt/oxcaml/5.2.0minus31] from a system
-    package). A non-relocatable toolchain is unusable without it (the legacy
-    opam-switch build path is gone), but the check is deferred to
-    [Toolchain.ensure_installed] — which hard-errors with an install hint and
-    only fires for the selected toolchain — rather than enforced at reporepo
-    parse time, so pre-migration entries on disk still load. *)
-
-val external_brew : string
-(** [external_brew] [x-oi-external-brew: <tap/formula>] — Homebrew cask/formula
-    reference (e.g. ["avsm/oxcaml/oxcaml"]). On macOS oi resolves the external
-    prefix by running [brew --prefix <this>] instead of using
-    {!external_prefix}. Only meaningful alongside {!external_prefix}. *)
-
 (** {1 Project / overlay payload} *)
 
 val root_packages : string
@@ -86,10 +70,9 @@ val repos : string
 val reporepo_hash : string
 (** [x-reporepo-hash: <sha>] — git revision of the default reporepo at the time
     a bundle ([oi dist duniverse]) was produced. Stamps the metadata snapshot
-    the solve
-    used so a downstream [oi build] can reproduce the same opam-file resolution
-    by rolling the local reporepo back to that sha. Information-only for now;
-    consumed by [oi build] in a future revision. *)
+    the solve used so a downstream [oi build] can reproduce the same opam-file
+    resolution by rolling the local reporepo back to that sha. Information-only
+    for now; consumed by [oi build] in a future revision. *)
 
 (** {1 Bake markers} *)
 

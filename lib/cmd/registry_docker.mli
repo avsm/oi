@@ -94,9 +94,9 @@ val dockerfile_makefile :
     compiler layers), copies the bundle in, and runs
     [make install PREFIX=/usr/local DESTDIR=/dist]. The runtime stage is a clean
     [d] image carrying only [overlay_depexts] (the libraries the binaries dlopen
-    at run time) plus the gathered [/dist/usr/local] tree. [label] is the
-    target description used in the header comment. Write it with
-    {!write_dockerfile} to [output/]{!one_distro_filename}[ d]. *)
+    at run time) plus the gathered [/dist/usr/local] tree. [label] is the target
+    description used in the header comment. Write it with {!write_dockerfile} to
+    [output/]{!one_distro_filename}[ d]. *)
 
 type opam_vars = {
   os_distribution : string;

@@ -118,6 +118,7 @@ let tc_ctx_of_info tc_info : Oi.Solver.Ctx.toolchain option =
           Oi.Solver.Ctx.install_prefix;
           hash = "";
           relocatable;
+          preinstalled_override = None;
           packages = OpamPackage.Set.empty;
           root_names = OpamPackage.Name.Set.empty;
         }
@@ -532,7 +533,11 @@ let drive_solve_and_build ~ctx ~target ~req =
     ~clock:(ctx.clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
+  let solved =
+    Oi.Build_pipeline.solve pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:ctx.source_remote)
+      req
+  in
   if ctx.dry_run then print_dry_run_plan solved;
   (match ctx.save_d10ir with
   | None -> ()
@@ -547,6 +552,7 @@ let drive_solve_and_build ~ctx ~target ~req =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   interpret_build_result ~sys:ctx.sys ~fs:ctx.fs ~clock:ctx.clock
@@ -677,7 +683,11 @@ let script_solve ~ctx ~req ~target =
     ~enabled:(Tty.is_tty ())
   @@ fun reporter ->
   let pipeline_env = pipeline_env_of_ctx ctx in
-  let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
+  let solved =
+    Oi.Build_pipeline.solve pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:ctx.source_remote)
+      req
+  in
   if ctx.dry_run then print_dry_run_plan solved;
   (match ctx.save_d10ir with
   | None -> ()
@@ -693,6 +703,7 @@ let script_solve ~ctx ~req ~target =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved

@@ -316,7 +316,11 @@ let run_solve_build (b : build_inputs) =
     ~clock:(b.clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve b.pipeline_env ~reporter b.req in
+  let solved =
+    Oi.Build_pipeline.solve b.pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:b.source_remote)
+      b.req
+  in
   let _ : D10ir.Direct.result option =
     Oi.Build_pipeline.build b.pipeline_env ~reporter
       {
@@ -327,6 +331,7 @@ let run_solve_build (b : build_inputs) =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved

@@ -289,9 +289,9 @@ let makefile_depext_plan ~mgr ~needs_host_ocaml ~overlay_depexts =
   in
   let toolchain_note =
     if needs_host_ocaml then
-      "Host-provided compiler layer(s): the distro OCaml package is \
-       installed. For a fully self-contained build, regenerate with a \
-       relocatable --toolchain."
+      "Host-provided compiler layer(s): the distro OCaml package is installed. \
+       For a fully self-contained build, regenerate with a relocatable \
+       --toolchain."
     else
       "Self-contained: the OCaml compiler is built from source (no host \
        toolchain needed)."

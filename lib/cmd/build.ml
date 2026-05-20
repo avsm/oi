@@ -573,7 +573,11 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
     ~clock:(clock :> _ Eio.Resource.t)
     ~enabled:(Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
+  let solved =
+    Oi.Build_pipeline.solve pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote)
+      req
+  in
   let _ : D10ir.Direct.result option =
     Oi.Build_pipeline.build pipeline_env ~reporter
       {
@@ -584,6 +588,7 @@ let solve_and_build_target_test ~fs ~proc_mgr ~clock ~sys ~os_key ~cache
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -1655,7 +1660,9 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
   let gi_offset = !gi_offset_ref in
   let req = bucket_req ~bi ~refresh ~override bucket_groups in
   let solved =
-    Oi.Build_pipeline.solve bi.pipeline_env ~reporter:ui_reporter req
+    Oi.Build_pipeline.solve bi.pipeline_env ~reporter:ui_reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:bi.source_remote)
+      req
   in
   record_solve_results ~fs ~cache ~os_key ~acc ~gi_offset solved;
   let any_solved =
@@ -1684,6 +1691,7 @@ let run_one_bucket ~fs ~cache ~os_key ~ui_reporter ~bi ~acc ~refresh
         upload_archive_url = upload_archive;
         archive_sources = bi.archive_sources;
         snapshot_reporepo = bi.snapshot_reporepo;
+        install_to = None;
       }
   in
   record_build_results ~acc ~gi_offset solved result_opt;

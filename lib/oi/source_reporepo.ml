@@ -116,8 +116,6 @@ type entry = {
   toolchain_name : string option;
   toolchain_compiler : string option;
   relocatable : bool option;
-  external_prefix : string option;
-  external_brew : string option;
   toolchain_roots : string list list;
   toolchain_tools : string list;
   default_toolchain : bool;
@@ -471,12 +469,10 @@ let validate_toolchain_fields ~path ~url_bare ~toolchain_name
     Error.fail_config_error
       "%s: %s is only meaningful on toolchain definitions (entries with %s set)"
       path Keys.default_toolchain Keys.toolchain_name
-(* NB: a non-relocatable toolchain definition without [x-oi-external-prefix]
-     is NOT rejected here. [load] parses every historical version on disk, so
-     a parse-time hard-fail would brick [oi] for any reporepo still carrying
-     pre-migration entries. The real enforcement is in
-     [Toolchain.ensure_installed], which hard-errors with an install hint and
-     only fires for the toolchain actually selected. *)
+(* No external-prefix bookkeeping any more: every non-relocatable toolchain
+     resolves to an [oi]-owned [$XDG_CACHE_HOME] prefix that
+     {!Toolchain.ensure_installed} (via {!Aux_install}) builds from source on
+     first use, no root needed. *)
 
 let build_entry ~path opam : entry =
   let handle = require_name ~path opam in
@@ -491,8 +487,6 @@ let build_entry ~path opam : entry =
     read_string_extension extensions Keys.toolchain_compiler
   in
   let relocatable = read_bool_extension ~path extensions Keys.relocatable in
-  let external_prefix = read_string_extension extensions Keys.external_prefix in
-  let external_brew = read_string_extension extensions Keys.external_brew in
   let toolchain_roots =
     read_root_packages_extension ~path extensions Keys.toolchain_roots
   in
@@ -519,8 +513,6 @@ let build_entry ~path opam : entry =
     toolchain_name;
     toolchain_compiler;
     relocatable;
-    external_prefix;
-    external_brew;
     toolchain_roots;
     toolchain_tools;
     default_toolchain;
@@ -890,23 +882,12 @@ type toolchain_def = {
   td_name : string;
   td_compiler : string option;
   td_relocatable : bool option;
-  td_external_prefix : string option;
-  td_external_brew : string option;
   td_roots : string list list;
   td_tools : string list;
   td_default : bool;
 }
 
-let render_opam ~synopsis ~url ~commit ~ref_ ~toolchain ?toolchain_def ~depends
-    ~root_packages () =
-  let buf = Buffer.create 512 in
-  let pp = Fmt.with_buffer buf in
-  Fmt.pf pp "opam-version: \"2.0\"\n";
-  Fmt.pf pp "synopsis: %s\n" (escape_string synopsis);
-  if url <> "" then
-    Fmt.pf pp "url {\n  src: %s\n}\n"
-      (escape_string (if commit = "" then url else url ^ "#" ^ commit));
-  (match depends with
+let render_depends buf pp = function
   | [] -> ()
   | ds ->
       Buffer.add_string buf "depends: [\n";
@@ -917,7 +898,37 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~toolchain ?toolchain_def ~depends
               Fmt.pf pp "  %s { = %s }\n" (escape_string h) (escape_string ver)
           | None -> Fmt.pf pp "  %s\n" (escape_string h))
         ds;
-      Buffer.add_string buf "]\n");
+      Buffer.add_string buf "]\n"
+
+let render_toolchain_def buf pp (td : toolchain_def) =
+  let opt_str key = function
+    | Some s -> Fmt.pf pp "%s: %s\n" key (escape_string s)
+    | None -> ()
+  in
+  Fmt.pf pp "%s: %s\n" Keys.toolchain_name (escape_string td.td_name);
+  opt_str Keys.toolchain_compiler td.td_compiler;
+  Stdlib.Option.iter
+    (fun b -> Fmt.pf pp "%s: %b\n" Keys.relocatable b)
+    td.td_relocatable;
+  if td.td_default then Fmt.pf pp "%s: true\n" Keys.default_toolchain;
+  render_root_groups buf Keys.toolchain_roots td.td_roots;
+  match td.td_tools with
+  | [] -> ()
+  | tools ->
+      Fmt.pf pp "%s: [\n" Keys.toolchain_tools;
+      List.iter (fun t -> Fmt.pf pp "  %s\n" (escape_string t)) tools;
+      Buffer.add_string buf "]\n"
+
+let render_opam ~synopsis ~url ~commit ~ref_ ~toolchain ?toolchain_def ~depends
+    ~root_packages () =
+  let buf = Buffer.create 512 in
+  let pp = Fmt.with_buffer buf in
+  Fmt.pf pp "opam-version: \"2.0\"\n";
+  Fmt.pf pp "synopsis: %s\n" (escape_string synopsis);
+  if url <> "" then
+    Fmt.pf pp "url {\n  src: %s\n}\n"
+      (escape_string (if commit = "" then url else url ^ "#" ^ commit));
+  render_depends buf pp depends;
   Fmt.pf pp "%s: true\n" Keys.overlay;
   Stdlib.Option.iter
     (fun s -> Fmt.pf pp "%s: %s\n" Keys.ref (escape_string s))
@@ -925,31 +936,7 @@ let render_opam ~synopsis ~url ~commit ~ref_ ~toolchain ?toolchain_def ~depends
   Stdlib.Option.iter
     (fun s -> Fmt.pf pp "%s: %s\n" Keys.toolchain (escape_string s))
     toolchain;
-  Stdlib.Option.iter
-    (fun (td : toolchain_def) ->
-      Fmt.pf pp "%s: %s\n" Keys.toolchain_name (escape_string td.td_name);
-      Stdlib.Option.iter
-        (fun s ->
-          Fmt.pf pp "%s: %s\n" Keys.toolchain_compiler (escape_string s))
-        td.td_compiler;
-      Stdlib.Option.iter
-        (fun b -> Fmt.pf pp "%s: %b\n" Keys.relocatable b)
-        td.td_relocatable;
-      Stdlib.Option.iter
-        (fun s -> Fmt.pf pp "%s: %s\n" Keys.external_prefix (escape_string s))
-        td.td_external_prefix;
-      Stdlib.Option.iter
-        (fun s -> Fmt.pf pp "%s: %s\n" Keys.external_brew (escape_string s))
-        td.td_external_brew;
-      if td.td_default then Fmt.pf pp "%s: true\n" Keys.default_toolchain;
-      render_root_groups buf Keys.toolchain_roots td.td_roots;
-      match td.td_tools with
-      | [] -> ()
-      | tools ->
-          Fmt.pf pp "%s: [\n" Keys.toolchain_tools;
-          List.iter (fun t -> Fmt.pf pp "  %s\n" (escape_string t)) tools;
-          Buffer.add_string buf "]\n")
-    toolchain_def;
+  Stdlib.Option.iter (render_toolchain_def buf pp) toolchain_def;
   render_root_groups buf Keys.root_packages root_packages;
   Buffer.contents buf
 
@@ -1357,8 +1344,6 @@ let add ~fs ~sys ~path ~handle ~url ?ref_ ?toolchain ?base_handles ?depends
     toolchain_name = None;
     toolchain_compiler = None;
     relocatable = None;
-    external_prefix = None;
-    external_brew = None;
     toolchain_roots = [];
     toolchain_tools = [];
     default_toolchain = false;
@@ -1418,8 +1403,6 @@ let toolchain_def_of_prev ~default_toolchain (prev : entry) =
           td_name = name;
           td_compiler = prev.toolchain_compiler;
           td_relocatable = prev.relocatable;
-          td_external_prefix = prev.external_prefix;
-          td_external_brew = prev.external_brew;
           td_roots = prev.toolchain_roots;
           td_tools = prev.toolchain_tools;
           td_default = default_toolchain;
@@ -1479,8 +1462,6 @@ let bump ~fs ~sys ~path ~handle ?url ?ref_ ?toolchain ?base_handles ?depends
         toolchain_name = prev.toolchain_name;
         toolchain_compiler = prev.toolchain_compiler;
         relocatable = prev.relocatable;
-        external_prefix = prev.external_prefix;
-        external_brew = prev.external_brew;
         toolchain_roots = prev.toolchain_roots;
         toolchain_tools = prev.toolchain_tools;
         default_toolchain;

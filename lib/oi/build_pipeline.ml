@@ -125,6 +125,9 @@ let expand_targets ~fs ~sys ~reporepo_path ~reporepo_url (targets : target list)
 
 (* -- Per-group toolchain / packages_dirs ---------------------------------- *)
 
+type aux_installer =
+  env:env -> ?reporter:Build_progress.reporter -> Toolchain.info -> unit
+
 (* Pick one toolchain for the whole batch. Same precedence rules
    {Pipeline.pick_toolchain} uses for any other command — explicit
    override wins, then implicit pickup from the union of in-scope
@@ -159,33 +162,54 @@ let pick_batch_toolchain ?reporter ~env ~conf ~override ~all_handles () =
   | _ -> ());
   info
 
-let packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
+(* Preserve insertion order (not alphabetical) so the overlay-precedence
+   filter in {!Solver.Ctx.create} sees [dep_handles] in the order the
+   toolchain reporepo entry declared them. Without this, two overlays
+   that ship the same package name would be loaded alphabetically and the
+   "earlier wins" rule could pick the wrong one. *)
+let dedup_preserving_order xs =
+  let seen = Hashtbl.create 8 in
+  List.filter
+    (fun x ->
+      if Hashtbl.mem seen x then false
+      else (
+        Hashtbl.add seen x ();
+        true))
+    xs
+
+let load_reporepo_entries ~reporepo_path =
+  try Source.Reporepo.load ~path:reporepo_path
+  with Sys_error _ | Failure _ -> []
+
+(* Resolve [effective] handles to reporepo entries. With no active
+   toolchain we run the full [resolve] dep walk so package ordering
+   matches [dep_handles]; with a toolchain we just look up the latest
+   entry per handle — the toolchain context already pins versions. *)
+let resolve_overlay_entries ~toolchain ~entries effective =
+  match (toolchain : Toolchain.info option) with
+  | None -> (
+      let roots =
+        List.rev effective
+        |> List.map (fun h : Source.Reporepo.root ->
+            { handle = h; version = None })
+      in
+      try Source.Reporepo.resolve entries ~roots |> List.rev
+      with Error.E _ -> [])
+  | Some _ ->
+      List.filter_map
+        (fun h -> Source.Reporepo.latest entries ~handle:h)
+        effective
+
+let packages_dirs_for_group ~reporepo_path ~base_pkgs_dirs
     ?(toolchain_override = None) ?pin_dir ?local_packages_dir ~global_handles
     ~toolchain handles =
   let global_handles =
     Pipeline.filter_compatible_overlays ~reporepo_path
       ~override:toolchain_override ~toolchain global_handles
   in
-  let effective = global_handles @ handles |> List.sort_uniq String.compare in
-  let entries =
-    try Source.Reporepo.load ~path:reporepo_path
-    with Sys_error _ | Failure _ -> []
-  in
-  let resolved =
-    match (toolchain : Toolchain.info option) with
-    | None -> (
-        let roots =
-          List.rev effective
-          |> List.map (fun h : Source.Reporepo.root ->
-              { handle = h; version = None })
-        in
-        try Source.Reporepo.resolve entries ~roots |> List.rev
-        with Error.E _ -> [])
-    | Some _ ->
-        List.filter_map
-          (fun h -> Source.Reporepo.latest entries ~handle:h)
-          effective
-  in
+  let effective = dedup_preserving_order (global_handles @ handles) in
+  let entries = load_reporepo_entries ~reporepo_path in
+  let resolved = resolve_overlay_entries ~toolchain ~entries effective in
   let overlay_dirs =
     List.map
       (fun (e : Source.Reporepo.entry) ->
@@ -197,19 +221,7 @@ let packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
     | None -> base_pkgs_dirs
     | Some i -> i.packages_dirs
   in
-  let seen = Hashtbl.create 8 in
-  let dedup xs =
-    List.filter
-      (fun d ->
-        if Hashtbl.mem seen d then false
-        else begin
-          Hashtbl.replace seen d ();
-          true
-        end)
-      xs
-  in
-  let _ = env in
-  dedup
+  dedup_preserving_order
     (Stdlib.Option.to_list local_packages_dir
     @ Stdlib.Option.to_list pin_dir
     @ overlay_dirs @ base)
@@ -357,14 +369,17 @@ let toolchain_handle_or_system (t : Toolchain.info option) =
    all-toolchain-pkgs short-circuit and the recipe emit + archive bake. *)
 let finish_after_elaborate ~env ~d10 ~cache_root ~toolchain exec_plan =
   let toolchain_name = toolchain_handle_or_system toolchain in
-  (* An external non-relocatable toolchain (oxcaml) lives at a fixed system
-     prefix outside the oi cache. Mark it oi-owned so [Recipe_emitter]'s PATH
-     scrub keeps its [bin/] and consumer [+ox] builds use the right compiler
-     instead of falling back to the host system OCaml. *)
+  (* A non-relocatable toolchain (oxcaml) lives at a fixed
+     [$XDG_CACHE_HOME/oi/toolchains/<id>] prefix that [oi] source-built and
+     owns. The dir is already under [Cache.toolchains_root] which
+     [Recipe_emitter]'s PATH scrub keeps unconditionally, so no extra
+     path-owning bookkeeping is needed for the [+ox] flow today; we still
+     thread an empty list here in case future toolchains land outside the
+     cache. *)
   let extra_owned_paths =
     match (toolchain : Toolchain.info option) with
-    | Some i -> Option.to_list i.external_prefix
-    | None -> []
+    | Some i when not i.relocatable -> [ i.install_prefix ]
+    | _ -> []
   in
   let toolchain_layer = toolchain_layer_of exec_plan in
   if toolchain_layer = "" then
@@ -442,9 +457,8 @@ let solve_group ~env ~conf ~toolchain_override ~global_handles ~base_pkgs_dirs
     ((tokens, group_handles) : string list * string list) : group_result =
   let label = String.concat ", " tokens in
   let pkgs_dir =
-    packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
-      ~toolchain_override ?pin_dir ?local_packages_dir ~global_handles
-      ~toolchain group_handles
+    packages_dirs_for_group ~reporepo_path ~base_pkgs_dirs ~toolchain_override
+      ?pin_dir ?local_packages_dir ~global_handles ~toolchain group_handles
   in
   let group_conf, tc_ctx = Pipeline.solver_inputs toolchain conf in
   let stripped_tokens =
@@ -753,8 +767,8 @@ let merge_group_recipes groups =
              batch."
             (List.length recipes) msg)
 
-let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
-    solved =
+let solve_uncached env ?(reporter = Build_progress.null) ?aux_installer
+    (req : request) : solved =
   let reporepo_path = Source.Reporepo.env_path () in
   let reporepo_url = Source.Reporepo.env_url () in
   Pipeline.init_opam_root ~fs:env.fs ~data_dir:env.data_dir;
@@ -766,6 +780,15 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
         pick_batch_toolchain ~reporter ~env ~conf:req.conf
           ~override:req.toolchain_override ~all_handles ()
   in
+  (* Eagerly populate the toolchain's aux prefix here, after we've
+     resolved [toolchain] regardless of how (caller-supplied
+     [req.toolchain] OR our own [pick_batch_toolchain]). The
+     [aux_installer] parameter passes through to {!Aux_install.ensure}
+     when supplied; its sub-build's recursive {!solve} omits the
+     parameter so we don't re-enter. *)
+  (match (toolchain, aux_installer) with
+  | Some i, Some f -> f ~env ?reporter:(Some reporter) i
+  | _ -> ());
   let conf, _tc_ctx = Pipeline.solver_inputs toolchain req.conf in
   let pin_dir, base_pkgs_dirs, global_handles =
     prepare_sources ~env ~reporter ~req ~toolchain ~token_handles
@@ -798,7 +821,8 @@ let solve_uncached env ?(reporter = Build_progress.null) (req : request) :
 (* Cross-process serialisation against [oi repo bump] (and against
    other [oi]s) is provided by {!Oi.Lock.acquire_global} in
    {!Cmd.Harness.bootstrap}. *)
-let solve env ?(reporter = Build_progress.null) (req : request) : solved =
+let solve env ?(reporter = Build_progress.null) ?aux_installer (req : request) :
+    solved =
   let reporepo_path = Source.Reporepo.env_path () in
   let cache_root = Cache.root_s env.cache in
   let key_opt = cache_key ~sys:env.sys ~reporepo_path req in
@@ -817,9 +841,15 @@ let solve env ?(reporter = Build_progress.null) (req : request) : solved =
       Fmt.kstr
         (fun s -> reporter.Build_progress.event (Status s))
         "Solve cache hit (%d groups)" (List.length s.groups);
+      (* Even on a cache hit, the aux prefix may need populating —
+         the solve cache only covers the solver state, not the
+         on-disk install of the toolchain's aux packages. *)
+      (match (s.toolchain, aux_installer) with
+      | Some i, Some f -> f ~env ?reporter:(Some reporter) i
+      | _ -> ());
       s
   | None ->
-      let s = solve_uncached env ~reporter req in
+      let s = solve_uncached env ~reporter ?aux_installer req in
       (* Only cache successful solves. A solve where every group
          failed produces a [merged = None] struct that's not worth
          re-loading. *)
@@ -841,6 +871,7 @@ type build_inputs = {
   upload_archive_url : string option;
   archive_sources : bool;
   snapshot_reporepo : bool;
+  install_to : string option;
 }
 
 (* -- Upload primitives ------------------------------------------------ *)
@@ -1768,7 +1799,7 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
         D10ir.Direct.run ~config:direct_cfg ~d10:d10_cfg ~fs:env.fs
           ~proc_mgr:env.proc_mgr
           ~clock:(env.clock :> D10.Config.clk)
-          ~reporter:direct_reporter ~plan_dir merged
+          ~reporter:direct_reporter ~plan_dir ?install_to:inp.install_to merged
       in
       write_provenance_for_solved ~fs:env.fs ~cache_root ~os_key:env.os_key
         ~d10:d10_cfg inp.solved;

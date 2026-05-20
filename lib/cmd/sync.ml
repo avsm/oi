@@ -102,7 +102,11 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
     ~clock:(c.clock :> _ Eio.Resource.t)
     ~enabled:((not c.quiet) && Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve pipeline_env ~reporter req in
+  let solved =
+    Oi.Build_pipeline.solve pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:c.source_remote)
+      req
+  in
   let _ : D10ir.Direct.result option =
     Oi.Build_pipeline.build pipeline_env ~reporter
       {
@@ -113,6 +117,7 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -551,7 +556,11 @@ let solve_and_build (i : run_inputs) (s : state) =
     ~clock:(i.clock :> _ Eio.Resource.t)
     ~enabled:((not i.quiet) && Tty.is_tty ())
   @@ fun reporter ->
-  let solved = Oi.Build_pipeline.solve s.pipeline_env ~reporter s.req in
+  let solved =
+    Oi.Build_pipeline.solve s.pipeline_env ~reporter
+      ~aux_installer:(Oi.Aux_install.ensure ~source_remote:s.source_remote)
+      s.req
+  in
   let build_result =
     Oi.Build_pipeline.build s.pipeline_env ~reporter
       {
@@ -562,6 +571,7 @@ let solve_and_build (i : run_inputs) (s : state) =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        install_to = None;
       }
   in
   check_sync_outcome ~solved ~build_result;

@@ -111,7 +111,7 @@ let pick_toolchain ~fs ~sys ~data_dir ~conf ~install ~override ~handles
   in
   let handle = pick_toolchain_handle ~entries ~path ~override ~handles in
   let info = Toolchain.resolve ~fs ~sys ~data_dir ~conf ~handle in
-  if install then Toolchain.ensure_installed ~reporter ~fs info;
+  if install then Toolchain.ensure_installed ~reporter info;
   Some info
 
 let strip_compiler_roots_for_override ~override ~toolchain names =

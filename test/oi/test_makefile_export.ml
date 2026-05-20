@@ -121,9 +121,9 @@ let test_missing_archive_is_fatal () =
   let out = Helpers.fresh_dir ~prefix:"mkbad" () in
   Alcotest.check_raises "missing archive raises"
     (Failure
-       "oi dist makefile: 1 package(s) have no pre-baked source archive \
-        (need x-d10-archive): bad.1.0. Run `oi repo bump` to bake them, or \
-        drop them from the target set.") (fun () ->
+       "oi dist makefile: 1 package(s) have no pre-baked source archive (need \
+        x-d10-archive): bad.1.0. Run `oi repo bump` to bake them, or drop them \
+        from the target set.") (fun () ->
       Oi_cmd.Makefile_export.emit p ~output:out ~registry:"r" ())
 
 let suite =

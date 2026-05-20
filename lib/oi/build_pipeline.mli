@@ -31,6 +31,14 @@ type env = {
     Same shape as [Harness.env] minus [format] (a presentation concern). Lives
     here so non-cmdliner callers can construct it. *)
 
+type aux_installer =
+  env:env -> ?reporter:Build_progress.reporter -> Toolchain.info -> unit
+(** Eager aux-prefix installer signature, satisfied by {!Oi.Aux_install.ensure}.
+    Threaded explicitly through {!solve} (rather than a global hook) so the
+    module-cycle [Build_pipeline → Aux_install → Build_pipeline] stays one-way:
+    the implementer reuses {!solve} for its own sub-build by simply not passing
+    this parameter back into the recursion. *)
+
 (** {1 Targets and requests} *)
 
 (** Parsed target token. {!parse} converts CLI strings into this shape; callers
@@ -153,10 +161,16 @@ type solved = {
           {!Pipeline.pick_toolchain} would return. *)
 }
 
-val solve : env -> ?reporter:Build_progress.reporter -> request -> solved
-(** [solve] Solve every group in [request.targets], elaborate each into an
-    {!Plan.t}, emit one in-memory {!D10ir.Plan.t} per successful group, and
-    merge the recipes via {!D10ir.Plan.merge}.
+val solve :
+  env ->
+  ?reporter:Build_progress.reporter ->
+  ?aux_installer:aux_installer ->
+  request ->
+  solved
+(** [solve] (with optional [?aux_installer], typically {!Oi.Aux_install.ensure})
+    Solve every group in [request.targets], elaborate each into an {!Plan.t},
+    emit one in-memory {!D10ir.Plan.t} per successful group, and merge the
+    recipes via {!D10ir.Plan.merge}.
 
     The function never raises for a per-group failure — those land in
     [group_result.error]. It can still raise for environment-level problems
@@ -210,6 +224,17 @@ type build_inputs = {
           downstream consumer is expected to clone the reporepo from its own
           URL. Flip on when the reporepo is private and the bucket needs to be
           the canonical archival source. *)
+  install_to : string option;
+      (** When [Some p], every node's install destination is redirected from its
+          per-layer-hash [build/staging/<hash>] dir to [p]. Used by
+          {!Oi.Aux_install.ensure} to make the non-relocatable toolchain install
+          directly into its fixed XDG prefix — opam's [%{prefix}%] expansion
+          targets [p] for every package, the compiler's [--prefix=<p>/lib/ocaml]
+          gets baked into the binary correctly, no staging-then-restore round
+          trip, and {!D10ir.Direct} skips the dep-staging phase (siblings have
+          also installed into [p]; the build env's PATH/OCAMLPATH covers it via
+          {!Solver.Ctx.switch_env}). [None] keeps the normal
+          staging-and-layer-cache flow. *)
 }
 
 val build :

@@ -76,6 +76,8 @@ val pick_toolchain :
       default; [oi repo lint] enforces this.
 
     [install:true] runs {!Toolchain.ensure_installed} on the chosen toolchain;
+    the actual source-build of the toolchain prefix is driven by
+    {!Oi.Aux_install.ensure} via {!Build_pipeline.aux_installer}.
     [install:false] returns the [info] without preparing its on-disk prefix.
     Compose with {!solver_inputs} when the caller also needs the [conf] /
     [Ctx.toolchain] views. The lower-level [Toolchain.resolve] handles a single

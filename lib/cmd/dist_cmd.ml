@@ -52,6 +52,7 @@ let oi_build_and_binaries ~harness ~pipeline_env ~req ~layer_remote
           upload_archive_url = None;
           archive_sources = false;
           snapshot_reporepo = false;
+          install_to = None;
         }
     in
     (solved, result)
@@ -310,7 +311,8 @@ let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
       if binaries <> [] then
         Oi.Say.field "binaries" "%s" (String.concat " " binaries);
       emit_dockerfiles ~harness ~refresh ~output
-        ~label:(String.concat ", " targets) ~plan;
+        ~label:(String.concat ", " targets)
+        ~plan;
       Oi.Say.ok
         "wrote portable Makefile + per-distro Dockerfiles to %s (run: make, or \
          docker build -f Dockerfile.<distro> .)"
@@ -342,10 +344,10 @@ let makefile_man =
     `P
       "A $(b,Dockerfile.<distro>) is also written for each target distro \
        (Alpine, Debian, Ubuntu 24.04/26.04, Fedora). Each is a two-stage \
-       standalone build: a $(b,build) stage installs that distro's depexts \
-       and runs $(b,make), and a clean runtime stage carries only the \
-       resulting binaries/share. Build one with $(b,docker build -f \
-       Dockerfile.<distro> .).";
+       standalone build: a $(b,build) stage installs that distro's depexts and \
+       runs $(b,make), and a clean runtime stage carries only the resulting \
+       binaries/share. Build one with $(b,docker build -f Dockerfile.<distro> \
+       .).";
     `S Manpage.s_examples;
     `Pre
       "  oi dist makefile utop -o ./utop-mk\n\

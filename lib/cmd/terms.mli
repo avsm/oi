@@ -49,8 +49,7 @@ val locked : bool Cmdliner.Term.t
 (** [locked] flag: best-effort offline mode. Implies [--use-registry=never] and
     clears [--refresh]. Intended for agents and CI jobs that pre-warmed the
     cache (typically via a [oi dist duniverse]-produced bundle) and want any
-    cache miss
-    to fail fast rather than silently fetch. *)
+    cache miss to fail fast rather than silently fetch. *)
 
 val skip_local : bool Cmdliner.Term.t
 (** [skip_local] flag: do not probe the cwd for project files ($(b,*.opam),

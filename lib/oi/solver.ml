@@ -175,6 +175,7 @@ module Ctx = struct
     install_prefix : string;
     hash : string;
     relocatable : bool;
+    preinstalled_override : bool option;
     packages : OpamPackage.Set.t;
     root_names : OpamPackage.Name.Set.t;
   }
@@ -276,19 +277,18 @@ module Ctx = struct
     | None -> no_toolchain_env ()
     | Some { relocatable = true; _ } -> no_toolchain_env ()
     | Some tc ->
-        (* Non-relocatable toolchain (e.g. oxcaml prebuilt): the
-           toolchain's [lib/ocaml/] is read-only, but [ocamlfind
-           install] of a package with stublibs (zarith's [dllzarith.so],
-           gmp, sqlite3, …) tries to register them by appending to
-           [$OCAMLLIB/lib/ocaml/ld.conf]. That path lives inside the
-           toolchain root, so the install step fails with [Permission
-           denied]. opam's [ocaml-system] package handles the same
-           "system compiler with read-only lib" case by exporting
-           [OCAMLFIND_LDCONF=ignore], which tells ocamlfind to skip
-           reading/writing [ld.conf] entirely. Stublibs stay resolvable
-           because [CAML_LD_LIBRARY_PATH] (set just above) already
-           covers [lib/stublibs] and [lib/ocaml/stublibs] in both the
-           prefix and the toolchain. *)
+        (* Non-relocatable toolchain (oxcaml): the toolchain's [lib/ocaml/]
+           contains the compiler stdlib AND [ocamlfind+ox]'s [topfind] /
+           [findlib.conf] / [ocamlbuild+ox]'s artefacts — all built by
+           {!Oi.Toolchain_install} into the same user-writable
+           [$XDG_CACHE_HOME/oi/toolchains/<id>] prefix so we can both read
+           from it (ocamlc finds stdlib, [#use "topfind"] resolves via
+           [OCAMLTOP_INCLUDE_PATH], findlib resolves packages from
+           [path=…]) and have [ocamlfind install] of a consumer package
+           with stublibs (zarith's [dllzarith.so], etc.) NOT try to write
+           into it. The latter case still routes through
+           [OCAMLFIND_LDCONF=ignore] for the [ld.conf] append; consumer
+           META files go to [OCAMLFIND_DESTDIR=prefix/lib] as usual. *)
         [
           ("OPAM_SWITCH_PREFIX", prefix);
           ( "CAML_LD_LIBRARY_PATH",
@@ -298,7 +298,7 @@ module Ctx = struct
                 prefix / "lib" / "ocaml" / "stublibs";
                 tc.install_prefix / "lib" / "stublibs";
               ] );
-          ("OCAMLFIND_CONF", prefix / "lib" / "findlib.conf");
+          ("OCAMLFIND_CONF", tc.install_prefix / "lib" / "findlib.conf");
           ("OCAMLFIND_DESTDIR", prefix / "lib");
           ("OCAMLFIND_LDCONF", "ignore");
           ( "OCAMLPATH",
@@ -307,6 +307,7 @@ module Ctx = struct
                 prefix / "lib";
                 prefix / "lib" / "ocaml";
                 tc.install_prefix / "lib";
+                tc.install_prefix / "lib" / "ocaml";
               ] );
           ("OCAMLTOP_INCLUDE_PATH", prefix / "lib" / "toplevel");
           ("OCAML_TOPLEVEL_PATH", prefix / "lib" / "toplevel");
@@ -360,6 +361,21 @@ module Ctx = struct
       { sc with env }
     in
     OpamStateConfig.update ~root_dir:root ();
+    (* Overlay precedence on identical [(name, version)] keys: the
+       {e earlier-listed} overlay in [packages_dirs] wins (the merge fold
+       below is [union (fun a _ -> a)] = first wins). This must agree with
+       {!Solver.find_opam_file}'s [List.find_map] (first match in
+       [packages_dirs]) which {!Oi.Plan} uses to retrieve per-package build
+       commands — if [Ctx.create] picked the later overlay's [opam] while
+       [find_opam_file] picked the earlier one's, the solver would see one
+       variant ([make PREFIX=…]) but the build script would come from the
+       other ([tar -xf init-… && configure && make && …]). Different
+       versions of the same name across overlays stay visible; the solver
+       picks per [x-oi-toolchain-roots] constraints. The order of
+       [packages_dirs] is driven by the [dep_handles] / [depends:] order
+       in the reporepo entry (see {!Build_pipeline.packages_dirs_for_group});
+       put the most-specific overlay (e.g. [relocatable]) FIRST in
+       [depends:] to make its packages win. *)
     let all_opams =
       List.fold_left
         (fun acc dir ->
@@ -443,7 +459,10 @@ module Ctx = struct
        Relocatable / no-toolchain builds get a fresh writable stdlib, so
        [false] (matching upstream opam for a from-source switch). *)
     let preinstalled =
-      match toolchain with Some tc -> not tc.relocatable | None -> false
+      match toolchain with
+      | Some { preinstalled_override = Some b; _ } -> b
+      | Some tc -> not tc.relocatable
+      | None -> false
     in
     let ocaml_conf_config name =
       match OpamPackage.Name.to_string name with
