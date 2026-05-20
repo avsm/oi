@@ -197,6 +197,21 @@ let packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
     | None -> base_pkgs_dirs
     | Some i -> i.packages_dirs
   in
+  (* The synthetic-builtins dir ([<data_dir>/synthetic/packages/]) lives
+     outside any overlay graph, so [resolve] never picks it up. Prepend
+     it here so the [oi-docs] marker enters the solve — but only when
+     the active toolchain lists [odoc-driver] in its tools, so the doc
+     step's preconditions are satisfied. Without [odoc-driver] in
+     [tools], [install_tools] never builds voodoo and the doc step
+     warn-skips — meanwhile the [oi-docs] presence in the hash chain
+     would salt every layer hash with no doc payload to show for it,
+     which is the stale-cache trap. *)
+  let synthetic =
+    match (toolchain : Toolchain.info option) with
+    | Some i when List.mem "odoc-driver" i.tools ->
+        [ Source.Reporepo.synthetic_packages_dir ~data_dir:env.data_dir ]
+    | _ -> []
+  in
   let seen = Hashtbl.create 8 in
   let dedup xs =
     List.filter
@@ -208,11 +223,10 @@ let packages_dirs_for_group ~env ~reporepo_path ~base_pkgs_dirs
         end)
       xs
   in
-  let _ = env in
   dedup
     (Stdlib.Option.to_list local_packages_dir
     @ Stdlib.Option.to_list pin_dir
-    @ overlay_dirs @ base)
+    @ overlay_dirs @ base @ synthetic)
 
 (* -- Per-group solve / elaborate / emit ----------------------------------- *)
 
@@ -678,6 +692,11 @@ let prepare_sources ~env ~reporter ~req ~toolchain ~token_handles =
     Source.Reporepo.ensure_base ~fs:env.fs ~sys:env.sys ~data_dir:env.data_dir
       ~refresh:req.refresh ()
   in
+  (* Materialise oi's built-in opam packages ([oi-docs] today) into a dir
+     outside the reporepo's git tree, then prepend it to [base_pkgs_dirs]
+     below so the solver finds them without any overlay add. *)
+  Source.Reporepo.ensure_synthetic_packages ~fs:env.fs ~data_dir:env.data_dir
+    ();
   let pins =
     Source.Pin.resolve_pins ~fs:env.fs ~sys:env.sys
       ?project_root:req.project_root req.pins
@@ -696,6 +715,10 @@ let prepare_sources ~env ~reporter ~req ~toolchain ~token_handles =
         Source.Reporepo.ensure_base ~fs:env.fs ~sys:env.sys
           ~data_dir:env.data_dir ()
     | Some (i : Toolchain.info) -> i.packages_dirs
+  in
+  let base_pkgs_dirs =
+    Source.Reporepo.synthetic_packages_dir ~data_dir:env.data_dir
+    :: base_pkgs_dirs
   in
   let global_handles =
     let toks = List.sort_uniq String.compare token_handles in

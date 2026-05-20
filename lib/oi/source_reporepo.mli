@@ -190,6 +190,24 @@ val base_entries : unit -> entry list
     [oi config]. Empty list when the reporepo is missing or has no [relocatable]
     entry. *)
 
+(** {2 Synthetic builtin packages} *)
+
+val synthetic_packages_dir : data_dir:string -> string
+(** [synthetic_packages_dir ~data_dir] returns the [packages/] dir oi
+    materialises a small set of built-in opam packages into ([oi-docs] today).
+    Lives outside the reporepo's git tree so [oi repo push] never sees it.
+    Callers prepend this to [packages_dirs] before handing them to the
+    solver so the synthetic packages are discoverable without any overlay
+    add. *)
+
+val ensure_synthetic_packages :
+  fs:Eio.Fs.dir_ty Eio.Path.t -> data_dir:string -> unit -> unit
+(** [ensure_synthetic_packages ~fs ~data_dir ()] writes any missing
+    builtin opam files under {!synthetic_packages_dir}. Idempotent. Today
+    that means [oi-docs/oi-docs.dev/opam] — a [flags: conf] marker the
+    solver injects as a compiler depopt so its presence in the solved
+    set folds into every package's layer hash via the compiler chain. *)
+
 (** {2 Paths and bootstrapping} *)
 
 val default_path : string
