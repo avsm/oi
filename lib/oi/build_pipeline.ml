@@ -135,32 +135,15 @@ type aux_installer =
    is a corner case [oi build] supports today; we'll thread that in if
    a caller actually needs it.
 
-   [~install:true] is load-bearing for non-relocatable toolchains
-   (oxcaml today): the build pipeline stages the toolchain's
-   [install_prefix] into every consumer's build env, so the prefix
-   has to actually exist on disk before any [+ox] package compiles.
-   Relocatable toolchains short-circuit inside [Toolchain.ensure_installed]
-   (the consumer solve builds the compiler into its own prefix). *)
+   No "is the prefix populated?" post-condition here: for non-relocatable
+   toolchains the populating happens later, via the [aux_installer] hook
+   that {!solve_uncached} invokes immediately after this call returns.
+   Relocatable toolchains never need the prefix on disk in the first
+   place. *)
 let pick_batch_toolchain ?reporter ~env ~conf ~override ~all_handles () =
   let key = List.sort_uniq String.compare all_handles in
-  let info =
-    Pipeline.pick_toolchain ?reporter ~fs:env.fs ~sys:env.sys
-      ~data_dir:env.data_dir ~conf ~install:true ~override ~handles:key ()
-  in
-  (* Belt-and-braces post-condition. [pick_toolchain ~install:true] calls
-     [Toolchain.ensure_installed], so by the time we get here either
-     the toolchain is relocatable (no fixed prefix needed) or
-     [is_ready] holds. If not, surface a clear error before the per-
-     package builds start spewing "compiler not found" failures. *)
-  (match info with
-  | Some i when not (Toolchain.is_ready i) ->
-      Error.fail_config_error
-        "toolchain %s is not installed at %s — run [oi config] to inspect, \
-         then re-run [oi build] (the install step should have happened \
-         automatically and reporting a bug helps if it didn't)."
-        i.handle i.install_prefix
-  | _ -> ());
-  info
+  Pipeline.pick_toolchain ?reporter ~fs:env.fs ~sys:env.sys
+    ~data_dir:env.data_dir ~conf ~install:true ~override ~handles:key ()
 
 (* Preserve insertion order (not alphabetical) so the overlay-precedence
    filter in {!Solver.Ctx.create} sees [dep_handles] in the order the

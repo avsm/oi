@@ -61,13 +61,41 @@ let request_of ~info_for_install ~conf root_names =
     refresh = false;
   }
 
-let check_build_outcome ~handle = function
-  | None ->
-      Log.info (fun m ->
-          m
-            "toolchain %s: all toolchain layers already cached, no source \
-             build needed"
-            handle)
+(* Report the first per-group solve/elaborate/emit error if any, with the
+   handle / context in the message. Used as the "[Build_pipeline.build]
+   returned None" diagnostic: that result conflates "nothing to build,
+   everything cached" with "solve produced no plan because every group
+   failed", so we have to inspect [solved] directly to tell them apart. *)
+let solve_error_of (solved : Build_pipeline.solved) =
+  List.find_map
+    (fun (gr : Build_pipeline.group_result) ->
+      match gr.error with Ok () -> None | Error err -> Some err)
+    solved.groups
+
+let format_group_error = function
+  | Build_pipeline.Solve_failed { msg; log_path } ->
+      Fmt.str "solve: %s (see %s)" msg log_path
+  | Build_pipeline.Cycle cycles ->
+      Fmt.str "cycle in %d group(s)" (List.length cycles)
+  | Build_pipeline.Empty_after_strip ->
+      "no roots remain after stripping toolchain-provided packages"
+  | Build_pipeline.Elaborate_failed { msg } -> Fmt.str "elaborate: %s" msg
+  | Build_pipeline.Emit_failed { msg } -> Fmt.str "emit: %s" msg
+
+let check_build_outcome ~handle ~solved = function
+  | None -> (
+      match solve_error_of solved with
+      | Some err ->
+          Error.fail_config_error
+            "toolchain %s: solve failed (%s) — re-run with --verbosity=debug \
+             for the 0install trace"
+            handle (format_group_error err)
+      | None ->
+          Log.info (fun m ->
+              m
+                "toolchain %s: all toolchain layers already cached, no source \
+                 build needed"
+                handle))
   | Some (r : D10ir.Direct.result) when r.failed = 0 && r.skipped = 0 -> ()
   | Some (r : D10ir.Direct.result) when r.failures <> [] ->
       let f = List.hd r.failures in
@@ -148,7 +176,7 @@ let ensure ~(env : Build_pipeline.env) ?(reporter = Build_progress.null)
       run_build ~env ~reporter ~source_remote
         ~install_prefix:info.install_prefix solved
     in
-    check_build_outcome ~handle:info.handle outcome;
+    check_build_outcome ~handle:info.handle ~solved outcome;
     verify_installed ~handle:info.handle ~install_prefix:info.install_prefix;
     mark_ready env.fs info.install_prefix;
     Say.ok "Toolchain %s installed at %s" info.handle info.install_prefix;
