@@ -170,6 +170,16 @@ let layer_hash_with_toolchain ctx base_hash =
       Digest.string (base_hash ^ ":" ^ tc.hash) |> Digest.to_hex
   | _ -> base_hash
 
+(* The [oi-docs] feature flag rides in via opam metadata, not a hash-time
+   string salt: {!Solver.find_opam_file_in} monkey-patches the compiler's
+   [depopts:] in-memory to include [oi-docs] at load time, so once
+   [oi-docs] is in the solved set {!Solver.direct_deps_of_opam} treats it
+   as a satisfied dep of the compiler. The compiler is in every package's
+   transitive closure, so [oi-docs]'s [effective_part] folds into every
+   package's hash via {!D10.Layer.hash}. Toggling [oi-docs] in/out of the
+   solve changes every layer hash; editing the [oi-docs] opam (synopsis,
+   version) invalidates every doc layer en masse. *)
+
 let method_for ~d10 layer_hash : Identity.method_ =
   match d10 with
   | Some d10 when D10.Layer.succeeded d10 ~hash:layer_hash -> Binary

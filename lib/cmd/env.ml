@@ -106,6 +106,7 @@ let build_oneshot_prefix (i : oneshot_inputs) =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   Oi.Pipeline.assemble_prefix ~sys ~fs ~clock ~cache ~os_key

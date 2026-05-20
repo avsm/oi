@@ -113,6 +113,7 @@ let solve_one_tool (c : tools_ctx) ~tool_name ~constraints =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir = None;
       }
   in
   Oi.Build_pipeline.layer_hashes solved
@@ -398,8 +399,15 @@ type run_inputs = {
   cwd : string;
 }
 
-(* Build the solver-input [names] (deps from *.opam + extras from --with
-   + URL-project roots, with toolchain compiler roots stripped). *)
+(* Build the solver-input [names] (deps from *.opam + extras from --with +
+   URL-project roots, with toolchain compiler roots stripped). [oi-docs] is
+   injected here so voodoo docs are produced by default — consumers don't
+   have to opt in by adding the conf-package to their depends.
+   {!Solver.find_opam_file_in} adds a matching depopt to the compiler's
+   opam in-memory, so once oi-docs lands in the solve it folds into every
+   package's {!D10.Layer.hash} via the compiler's transitive closure. *)
+let oi_docs_name = OpamPackage.Name.of_string "oi-docs"
+
 let build_root_names ~(project : Oi.Project.t) ~(url_project : Oi.Project.Url.t)
     ~extra_cli ~toolchain_override ~toolchain =
   let extra_names =
@@ -410,7 +418,13 @@ let build_root_names ~(project : Oi.Project.t) ~(url_project : Oi.Project.Url.t)
       extra_cli
   in
   let url_names = List.map OpamPackage.Name.of_string url_project.roots in
-  List.map OpamPackage.Name.of_string project.deps @ extra_names @ url_names
+  let project_names = List.map OpamPackage.Name.of_string project.deps in
+  let all = project_names @ extra_names @ url_names in
+  let with_docs =
+    if List.exists (OpamPackage.Name.equal oi_docs_name) all then all
+    else oi_docs_name :: all
+  in
+  with_docs
   |> Oi.Pipeline.strip_compiler_roots_for_override ~override:toolchain_override
        ~toolchain
 
@@ -545,8 +559,12 @@ let prepare_state (i : run_inputs) : state =
   }
 
 (* Solve + build the project request, surfacing failures and returning
-   the per-package layer hashes for the upcoming [Prefix.assemble]. *)
-let solve_and_build (i : run_inputs) (s : state) =
+   the per-package layer hashes for the upcoming [Prefix.assemble].
+   [doc_tools_dir] is the absolute path to [_oi/tools/] from a preceding
+   [install_tools] pass; when [None] the doc step no-ops even if
+   [oi-docs] is in the solve. *)
+let solve_and_build ?(doc_tools_dir : string option) (i : run_inputs)
+    (s : state) =
   Progress_ui.with_ui ~target:i.cwd
     ~clock:(i.clock :> _ Eio.Resource.t)
     ~enabled:((not i.quiet) && Tty.is_tty ())
@@ -562,6 +580,7 @@ let solve_and_build (i : run_inputs) (s : state) =
         upload_archive_url = None;
         archive_sources = false;
         snapshot_reporepo = false;
+        doc_tools_dir;
       }
   in
   check_sync_outcome ~solved ~build_result;
@@ -588,7 +607,22 @@ let run_with_inputs (i : run_inputs) =
     (Oi.Source.Reporepo.ensure_base ~fs:i.fs ~sys:i.sys ~data_dir:i.data_dir
        ~refresh:i.refresh ());
   let s = prepare_state i in
-  let layer_hashes = solve_and_build i s in
+  (* Install dev tools FIRST so [_oi/tools/] exists before the main solve
+     runs. When the project's depends carry [oi-docs], the build pipeline
+     stages tool binaries (odoc_driver_voodoo, odoc, odoc-md, sherlodoc)
+     from this path into each package's build and runs voodoo as a
+     post-install step. Tool install failures stay best-effort
+     ([install_named] swallows them); a missing tool path just means the
+     doc step no-ops. *)
+  say_step ~quiet:i.quiet "Installing dev tools";
+  let tools =
+    install_tools ~quiet:i.quiet ?refresh:(Some i.refresh) ?jobs:i.jobs
+      ~proc_mgr:i.proc_mgr ~fs:i.fs ~clock:i.clock ~sys:i.sys ~cache:i.cache
+      ~data_dir:i.data_dir ~conf:s.conf ~os_key:i.os_key ~session:i.session
+      ~extra_repos:s.all_extras ~pins:s.project.pins ?toolchain:s.toolchain
+      ?layer_remote:s.layer_remote ?source_remote:s.source_remote ~cwd:i.cwd ()
+  in
+  let layer_hashes = solve_and_build ?doc_tools_dir:tools i s in
   let oi_dir = i.cwd / "_oi" in
   let prefix = oi_dir / "prefix" in
   Eio.Path.rmtree ~missing_ok:true Eio.Path.(i.fs / prefix);
@@ -599,14 +633,6 @@ let run_with_inputs (i : run_inputs) =
   in
   say_step ~quiet:i.quiet "Assembling project prefix";
   D10.Prefix.assemble d10 ~layer_hashes ~dst:Eio.Path.(i.fs / prefix);
-  say_step ~quiet:i.quiet "Installing dev tools";
-  let tools =
-    install_tools ~quiet:i.quiet ?refresh:(Some i.refresh) ?jobs:i.jobs
-      ~proc_mgr:i.proc_mgr ~fs:i.fs ~clock:i.clock ~sys:i.sys ~cache:i.cache
-      ~data_dir:i.data_dir ~conf:s.conf ~os_key:i.os_key ~session:i.session
-      ~extra_repos:s.all_extras ~pins:s.project.pins ?toolchain:s.toolchain
-      ?layer_remote:s.layer_remote ?source_remote:s.source_remote ~cwd:i.cwd ()
-  in
   if envrc_should_write i.envrc_mode then write_envrc i s ~prefix ~tools
   else
     Log.info (fun m ->

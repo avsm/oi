@@ -7,6 +7,44 @@ let log_src = Logs.Src.create "oi.solver"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
+(* -- Compiler depopts monkey-patch --------------------------------------
+
+   Inject [oi-docs] into the compiler's [depopts:] in-memory at opam-load
+   time so the on-disk opam files in the reporepo stay untouched. Once
+   [oi-docs] is in the solved set, {!direct_deps_of_opam} picks it up as a
+   satisfied dep of the compiler — the compiler is in every package's
+   transitive closure, so [oi-docs]'s effective_part folds into every
+   package's {!D10.Layer.hash} automatically. Modelled on the
+   [Dir_context.quirk_filter_depends] pattern that used to live here,
+   except for additions rather than removals.
+
+   The patch is applied at every opam-file load site that feeds the solver
+   or the plan-graph traversal: {!Dir_context.load} (for the solver) and
+   {!find_opam_file_in} (for {!direct_deps_within} + downstream
+   {!D10.Layer.hash}). *)
+let oi_docs_name = OpamPackage.Name.of_string "oi-docs"
+
+let compiler_pkg_names =
+  List.map OpamPackage.Name.of_string
+    [ "relocatable-compiler"; "oxcaml-compiler" ]
+
+let inject_oi_docs_depopt pkg opam =
+  let is_compiler =
+    List.exists
+      (OpamPackage.Name.equal (OpamPackage.name pkg))
+      compiler_pkg_names
+  in
+  if not is_compiler then opam
+  else
+    let new_atom = OpamFormula.Atom (oi_docs_name, OpamFormula.Empty) in
+    let depopts = OpamFile.OPAM.depopts opam in
+    let depopts' =
+      match depopts with
+      | OpamFormula.Empty -> new_atom
+      | _ -> OpamFormula.And (depopts, new_atom)
+    in
+    OpamFile.OPAM.with_depopts depopts' opam
+
 (* -- Dir_context -------------------------------------------------------- *)
 
 (* Multi-directory Dir_context for opam-0install with first-wins lookup
@@ -55,7 +93,7 @@ module Dir_context = struct
           |> Option.get |> OpamFilename.raw |> OpamFile.make
           |> OpamFile.OPAM.read
     in
-    raw
+    inject_oi_docs_depopt pkg raw
 
   let user_restrictions t name =
     OpamPackage.Name.Map.find_opt name t.constraints
@@ -918,7 +956,9 @@ let find_opam_file_in packages_dir pkg =
   let pkg_s = OpamPackage.to_string pkg in
   let path = packages_dir / name_s / pkg_s / "opam" in
   if Sys.file_exists path then
-    Some (OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw path)))
+    Some
+      (OpamFile.OPAM.read (OpamFile.make (OpamFilename.raw path))
+      |> inject_oi_docs_depopt pkg)
   else None
 
 let find_opam_file packages_dirs pkg =

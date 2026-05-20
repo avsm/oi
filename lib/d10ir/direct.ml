@@ -10,6 +10,7 @@ type phase =
   | Snapshot_pre
   | Run_script
   | Apply_install_file
+  | Run_docs
   | Diff_layer
   | Store_layer
 
@@ -20,6 +21,7 @@ let string_of_phase = function
   | Snapshot_pre -> "snapshot"
   | Run_script -> "build"
   | Apply_install_file -> "install"
+  | Run_docs -> "docs"
   | Diff_layer -> "diff"
   | Store_layer -> "store"
 
@@ -380,6 +382,134 @@ let store_layer ~d10 (n : Plan.node) ~staging ~files =
     ~prefix:staging ~files ~package:pkg_str ~deps:dep_hashes_str
     ~parent_hashes:dep_hashes_str ~exit_status:0 ()
 
+(* ---- Doc generation step (voodoo) ------------------------------------- *)
+
+let doc_log_path_for ~config ~d10 (n : Plan.node) =
+  let h = Layer_hash.to_string n.layer_hash in
+  let short = String.sub h 0 (min 8 (String.length h)) in
+  log_dir_for ~config ~d10
+  / Fmt.str "%s.%s-%s.doc.log" n.package.name n.package.version short
+
+(* Fixed universe name for the prep tree's [universes/<U>/] directory.
+   voodoo infers the universe from the tree shape at runtime, so the string
+   only matters as the directory name — [--blessed] output paths ignore it
+   entirely. *)
+let voodoo_universe = "oi"
+
+(* Hardlink each install-delta file from [staging] into
+   [<prep_root>/prep/universes/oi/<pkg>/<ver>/<rel>], the layout voodoo's
+   hard-coded [prep_path = "prep"] expects relative to its CWD. No copy
+   fallback: [staging] and [prep_root] live under the same d10 cache root,
+   so a same-FS [Unix.link] always succeeds. An exotic cache layout that
+   crosses filesystems would raise [Unix_error EXDEV], which bubbles up to
+   {!maybe_run_docs}' warn-continue handler. *)
+let materialise_prep_tree ~fs ~staging ~prep_root ~pkg_name ~pkg_ver
+    ~install_delta =
+  let pkg_root =
+    prep_root / "prep" / "universes" / voodoo_universe / pkg_name / pkg_ver
+  in
+  List.iter
+    (fun (rel_path, _abs) ->
+      let src = staging / rel_path in
+      let dst = pkg_root / rel_path in
+      if Sys.file_exists src && not (Sys.is_directory src) then begin
+        Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+          Eio.Path.(fs / Filename.dirname dst);
+        Unix.link src dst
+      end)
+    install_delta
+
+(* Run [odoc_driver_voodoo] with [cwd = prep_root] so [./prep/...] resolves,
+   and absolute paths for outputs and helper binaries so they land in /
+   come from the staging dir. PATH includes [doc_tools_dir/bin] so
+   voodoo's runtime [sherlodoc] lookup succeeds. *)
+let run_voodoo ~proc_mgr ~fs ~doc_tools_dir ~prep_root ~staging ~pkg_name
+    ~log_path =
+  let bin name = doc_tools_dir / "bin" / name in
+  let argv =
+    [
+      bin "odoc_driver_voodoo";
+      pkg_name;
+      "--blessed";
+      "--odoc-dir=" ^ (staging / "odoc" / "odoc");
+      "--html-dir=" ^ (staging / "odoc" / "html");
+      "--odoc=" ^ bin "odoc";
+      "--odoc-md=" ^ bin "odoc-md";
+    ]
+  in
+  let home =
+    match Sys.getenv_opt "HOME" with Some h when h <> "" -> h | _ -> "/"
+  in
+  let env =
+    [|
+      "PATH=" ^ (doc_tools_dir / "bin") ^ ":/usr/bin:/bin";
+      "HOME=" ^ home;
+    |]
+  in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
+    Eio.Path.(fs / Filename.dirname log_path);
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / prep_root);
+  let cwd = Eio.Path.(fs / prep_root) in
+  Eio.Path.with_open_out ~create:(`Or_truncate 0o644) Eio.Path.(fs / log_path)
+  @@ fun log_sink ->
+  let env_lines =
+    Array.to_list env
+    |> List.map (fun e -> "#   " ^ e)
+    |> String.concat "\n"
+  in
+  Eio.Flow.copy_string
+    (Fmt.str
+       "# d10ir.direct doc step %s\n# argv: %s\n# cwd: %s\n# env:\n%s\n"
+       pkg_name (String.concat " " argv) prep_root env_lines)
+    log_sink;
+  try
+    Eio.Process.run proc_mgr ~env ~cwd
+      ~stdout:(log_sink :> Eio.Flow.sink_ty Eio.Resource.t)
+      ~stderr:(log_sink :> Eio.Flow.sink_ty Eio.Resource.t)
+      argv
+  with exn ->
+    Eio.Flow.copy_string
+      (Fmt.str "# voodoo failed: %s\n" (Printexc.to_string exn))
+      log_sink;
+    raise exn
+
+(* Best-effort doc step. No-op when [config.doc_tools_dir = None] (docs
+   off). Failures — binary missing, voodoo crash, prep materialisation
+   error — warn and let the build proceed without docs for this package;
+   downstream cross-refs degrade gracefully. *)
+let maybe_run_docs ~(config : Config.t) ~d10 ~fs ~proc_mgr (n : Plan.node)
+    ~staging ~before =
+  match config.doc_tools_dir with
+  | None -> ()
+  | Some doc_tools_dir -> (
+      let voodoo_bin = doc_tools_dir / "bin" / "odoc_driver_voodoo" in
+      if not (Sys.file_exists voodoo_bin) then
+        Log.warn (fun m ->
+            m "docs: %s.%s: voodoo binary missing at %s; skipping"
+              n.package.name n.package.version voodoo_bin)
+      else
+        try
+          let install_delta = D10.Prefix.diff ~fs ~prefix:staging ~before in
+          if install_delta = [] then
+            Log.info (fun m ->
+                m "docs: %s.%s: empty install delta; skipping"
+                  n.package.name n.package.version)
+          else begin
+            let prep_root = build_dir_for d10 n / "_doc_prep" in
+            Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / prep_root);
+            materialise_prep_tree ~fs ~staging ~prep_root
+              ~pkg_name:n.package.name ~pkg_ver:n.package.version
+              ~install_delta;
+            let log_path = doc_log_path_for ~config ~d10 n in
+            run_voodoo ~proc_mgr ~fs ~doc_tools_dir ~prep_root ~staging
+              ~pkg_name:n.package.name ~log_path
+          end
+        with exn ->
+          Log.warn (fun m ->
+              m "docs: %s.%s failed: %s (continuing)" n.package.name
+                n.package.version
+                (tidy_error_string (Printexc.to_string exn))))
+
 let cleanup_staging ~fs ~(config : Config.t) staging build_dir =
   if not config.keep_staging then begin
     (try Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / staging)
@@ -431,6 +561,8 @@ let build_one ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir ~archive_root
       in
       with_phase ~reporter n Apply_install_file (fun () ->
           maybe_apply_install_file ~fs n ~staging ~build_dir);
+      with_phase ~reporter n Run_docs (fun () ->
+          maybe_run_docs ~config ~d10 ~fs ~proc_mgr n ~staging ~before);
       let files =
         with_phase ~reporter n Diff_layer (fun () ->
             D10.Prefix.diff ~fs ~prefix:staging ~before |> List.map fst)

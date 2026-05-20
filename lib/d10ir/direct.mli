@@ -33,6 +33,7 @@ type phase =
   | Snapshot_pre
   | Run_script
   | Apply_install_file
+  | Run_docs
   | Diff_layer
   | Store_layer
 

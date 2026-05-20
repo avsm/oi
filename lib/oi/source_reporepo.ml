@@ -135,6 +135,44 @@ let write_file ~fs path content =
   mkdir_p ~fs (Filename.dirname path);
   Eio.Path.save ~create:(`Or_truncate 0o644) Eio.Path.(fs / path) content
 
+(* -- Synthetic builtin packages --------------------------------------- *
+
+   A small set of opam packages oi materialises into the user's data dir
+   on every bootstrap, then injects into the solver's [packages_dirs] —
+   so consumers don't have to add a side-overlay (or commit anything to
+   the reporepo) just to satisfy these markers. Currently a single
+   entry: [oi-docs], the doc-generation feature flag.
+
+   The dir lives outside the reporepo's git tree so [oi repo bump] and
+   [oi repo push] never see it. {!D10.Layer.hash_opam_file} can still
+   find the opam file when computing layer hashes because the dir is
+   appended to [packages_dirs] in {!Build_pipeline.prepare_sources}. *)
+
+let synthetic_packages_dir ~data_dir = data_dir / "synthetic" / "packages"
+
+let synthetic_oi_docs_opam =
+  {|opam-version: "2.0"
+synopsis: "Marker: enable oi's odoc-based documentation generation"
+description: """
+Adding `oi-docs` to a project's depends: tells oi to generate per-package
+documentation via odoc_driver_voodoo. This package is purely a marker —
+empty install, no opam deps. oi's solver injects it as a depopt of the
+compiler so its presence in the solved set folds into every package's
+layer hash via the compiler's transitive closure.
+"""
+maintainer: "oi"
+authors: "oi"
+license: "ISC"
+flags: conf
+|}
+
+let ensure_synthetic_packages ~fs ~data_dir () =
+  let opam_path =
+    synthetic_packages_dir ~data_dir / "oi-docs" / "oi-docs.dev" / "opam"
+  in
+  if not (Sys.file_exists opam_path) then
+    write_file ~fs opam_path synthetic_oi_docs_opam
+
 (* Default age threshold for auto-pulling the reporepo when [--refresh]
    wasn't explicitly passed. Overridable via [OI_REPOREPO_MAX_AGE]
    (positive float seconds; non-positive disables). *)
