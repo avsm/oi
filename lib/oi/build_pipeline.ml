@@ -1739,10 +1739,32 @@ let upload_group_failures ~env ~cache_root ~url_base (s : solved) =
             ~hash)
     s.groups
 
+(* Non-relocatable toolchain builds (oxcaml today) bake the host's
+   [<XDG_CACHE_HOME>/oi/toolchains/<id>] into bytecode shebangs, [findlib.conf],
+   stub-library rpaths, etc. The toolchain hash is deterministic across hosts
+   but [XDG_CACHE_HOME] is not, so a layer built on one host won't run on
+   another even though their layer hashes agree. Force every registry channel
+   off for those builds — both directions: no fetch and no upload. Local
+   d10-cache reuse still works because the local toolchain prefix matches at
+   build time and at consume time. *)
+let registry_io_for_inputs ~reporter (inp : build_inputs) =
+  match inp.solved.toolchain with
+  | Some i when not i.relocatable ->
+      if inp.layer_remote <> None || inp.upload_archive_url <> None then
+        Fmt.kstr
+          (fun s -> reporter.Build_progress.event (Status s))
+          "Non-relocatable toolchain %s: layer cache is local-only \
+           (registry fetch + upload disabled)"
+          i.handle;
+      (None, None)
+  | _ -> (inp.layer_remote, inp.upload_archive_url)
+
 let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
     D10ir.Direct.result option =
   let started_at = Unix.gettimeofday () in
   let cache_root = Cache.root_s env.cache in
+  let layer_remote, upload_archive_url = registry_io_for_inputs ~reporter inp in
+  let inp = { inp with layer_remote; upload_archive_url } in
   (match inp.upload_archive_url with
   | None -> ()
   | Some raw_url ->

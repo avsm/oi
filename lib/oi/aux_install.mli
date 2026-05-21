@@ -14,8 +14,8 @@
     build phases, threading [install_to = Some install_prefix] through
     {!D10ir.Direct.run} so every package writes directly into the toolchain
     prefix at install time — no staging-then-restore, no post-build
-    hardlink-assemble, no [rebase_restaged_staging_paths] walk over baked binary
-    paths. *)
+    hardlink-assemble, no cross-host path rewriting (registry-share is now
+    disabled for non-relocatable builds in {!Build_pipeline.build}). *)
 
 [@@@ai_disclosure "ai-assisted"]
 [@@@ai_model "claude-opus-4-7"]
