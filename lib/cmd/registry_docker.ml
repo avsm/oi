@@ -37,23 +37,6 @@ let build_depexts = function
        s3cmd"
   | _ -> failwith "unsupported package manager"
 
-(* OxCaml is now a preinstalled system package: oi probes for it and no
-   longer builds the toolchain itself. Generated registry images / obuilder
-   specs must therefore install it from the signed OxCaml repo before
-   [oi build --all] reaches any [+ox] package. The script auto-detects the
-   distro and wires the matching apt/dnf/pacman repo; [--yes] keeps it
-   non-interactive. OxCaml is glibc-only, so this is skipped on Alpine/musl
-   ([`Apk]) — the script refuses musl anyway, and oxcaml [+ox] packages
-   can't run there.
-
-   TEMPORARY: this whole step disappears once oxcaml ships a relocatable
-   variant that oi can build like any other compiler (the non-relocatable
-   external-prefix scheme is a stopgap). *)
-let oxcaml_install_cmd =
-  "curl -fsSL https://oi.thicket.dev/repo/install.sh | sh -s -- --yes"
-
-let oxcaml_install_for = function `Apk -> None | _ -> Some oxcaml_install_cmd
-
 (* -- Distro → opam platform variables ----------------------------------- *)
 
 type opam_vars = {
@@ -214,13 +197,6 @@ let distro_stage ?(overlay_depexts = []) d =
   @@ DF.from ~alias ~tag img
   @@ DF.env [ ("CI", "true") ]
   @@ DF.run "%s" (install_cmd mgr combined)
-  @@ (match oxcaml_install_for mgr with
-    | None -> DF.empty
-    | Some c ->
-        DF.comment
-          "OxCaml: preinstalled system package (oi probes for it; temporary \
-           until oxcaml is relocatable)"
-        @@ DF.run "%s" c)
   @@ DF.run "%s" fetch_oi @@ DF.workdir "/work"
 
 (* -- Top-level Dockerfiles ---------------------------------------------- *)
@@ -587,15 +563,6 @@ let fetch_oi_obuilder =
      0755 /usr/local/bin/oi /usr/local/bin/oix"
     oi_fetch_cache_bust release_repo release_repo
 
-(* Optional obuilder [(run …)] op that installs the OxCaml system package
-   before the build. Empty (no op) on Alpine/musl. Returned with a leading
-   space + trailing newline so it slots between the depexts and fetch-oi
-   run ops, mirroring [shell_op]. *)
-let oxcaml_obuilder_run mgr =
-  match oxcaml_install_for mgr with
-  | None -> ""
-  | Some c -> Fmt.str " (run (network host) (shell \"%s\"))\n" (sexp_escape c)
-
 let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
     =
   let resolved = Distro.resolve_alias d in
@@ -627,7 +594,7 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
  (env OI_CACHE_DIR "/cache")
  (env OI_DATA_DIR "/state")
 %s (run (network host) (shell "%s"))
-%s (run (network host) (shell "%s"))
+ (run (network host) (shell "%s"))
  (run (cache (oi-d10ir-archives (target /cache/d10ir/archives))
              (oi-layers (target /cache/layers)))
       (secrets (%s (target /run/secrets/%s))
@@ -636,7 +603,7 @@ let obuilder_spec_one_distro ?(s3 = default_s3_config) ?(overlay_depexts = []) d
       (shell "%s")))
 |}
     distro_label s3_access_key_secret s3_secret_key_secret distro_label
-    s3.bucket img tag shell_op (sexp_escape install) (oxcaml_obuilder_run mgr)
+    s3.bucket img tag shell_op (sexp_escape install)
     (sexp_escape fetch_oi_obuilder)
     s3_access_key_secret s3_access_key_secret s3_secret_key_secret
     s3_secret_key_secret
