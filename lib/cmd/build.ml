@@ -917,6 +917,29 @@ let handle_included ~only_set ~skip_set h =
   (match only_set with None -> true | Some s -> List.mem h s)
   && not (List.mem h skip_set)
 
+(* True when [h]'s associated toolchain is declared non-relocatable in the
+   reporepo, i.e. layers built against it bake the host's
+   [<XDG_CACHE_HOME>/oi/toolchains/<id>] into bytecode shebangs and
+   stub-library rpaths, so {!Oi.Build_pipeline.registry_io_for_inputs}
+   would drop the uploads anyway. *)
+let handle_uses_non_relocatable_toolchain ~entries h =
+  let tc_names = Oi.Pipeline.toolchain_names_of_handle entries h in
+  List.exists
+    (fun tc_name ->
+      match
+        List.find_opt
+          (fun (e : Oi.Source.Reporepo.entry) ->
+            e.toolchain_name = Some tc_name)
+          entries
+      with
+      | Some e -> e.relocatable = Some false
+      | None -> false)
+    tc_names
+
+let handle_non_relocatable_skipped ~entries ~only_set h =
+  handle_uses_non_relocatable_toolchain ~entries h
+  && match only_set with None -> true | Some s -> not (List.mem h s)
+
 let groups_of_entry h (e : Oi.Source.Reporepo.entry) =
   if e.toolchain_name <> None then begin
     Log.info (fun m -> m "--all: skipping toolchain definition %s" h);
@@ -939,6 +962,14 @@ let groups_for_handle ~entries ~only_set ~skip_set h =
   if handle_default_skipped ~only_set h then begin
     Log.info (fun m ->
         m "--all: skipping %s (pass --only default to include)" h);
+    []
+  end
+  else if handle_non_relocatable_skipped ~entries ~only_set h then begin
+    Log.info (fun m ->
+        m
+          "--all: skipping %s (non-relocatable toolchain; layers are \
+           local-only and never uploaded — pass --only %s to include)"
+          h h);
     []
   end
   else if not (handle_included ~only_set ~skip_set h) then []
