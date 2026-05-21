@@ -1753,8 +1753,8 @@ let registry_io_for_inputs ~reporter (inp : build_inputs) =
       if inp.layer_remote <> None || inp.upload_archive_url <> None then
         Fmt.kstr
           (fun s -> reporter.Build_progress.event (Status s))
-          "Non-relocatable toolchain %s: layer cache is local-only \
-           (registry fetch + upload disabled)"
+          "Non-relocatable toolchain %s: layer cache is local-only (registry \
+           fetch + upload disabled)"
           i.handle;
       (None, None)
   | _ -> (inp.layer_remote, inp.upload_archive_url)

@@ -520,8 +520,8 @@ let build_one ?install_to ~config ~d10 ~fs ~proc_mgr ~clock ~plan_dir
       reporter.event (Node_started { node = n });
       let log_path =
         run_build_phases ~install_to ~config ~d10 ~fs ~proc_mgr ~plan_dir
-          ~archive_root ~producers ~reporter ~mount_env ~staging
-          ~install_target ~build_dir n
+          ~archive_root ~producers ~reporter ~mount_env ~staging ~install_target
+          ~build_dir n
       in
       cleanup ();
       `Built (log_path, now_s ~clock -. t0)
