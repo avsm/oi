@@ -12,4 +12,5 @@ let () =
       Test_makefile_export.suite;
       Test_depopt.suite;
       Test_depopt_matrix.suite;
+      Test_osdist.suite;
     ]

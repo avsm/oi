@@ -2,7 +2,7 @@
 
 (name oi)
 
-(version 0.13.5)
+(version 0.14.0)
 
 (generate_opam_files true)
 
@@ -21,10 +21,17 @@
   (opam-format (>= 2.2.0)) (jsont (>= 0.2)) (bytesrw (>= 0.2)) sqlite3 requests (alcotest :with-test)
   nox-crypto-rng fmt logs))
 
+(package (name osdist)
+ (synopsis "Native distro packaging (deb/rpm/static) for OCaml projects")
+ (depends (ocaml (>= 5.2.0)) (opam-format (>= 2.2.0))
+  (jsont (>= 0.2)) (bytesrw (>= 0.2))
+  (dockerfile (>= 8.3.9)) (dockerfile-opam (>= 8.3.9)) fmt))
+
 (package (name oi) (synopsis "A stateless OCaml package builder")
  (depends (ocaml (>= 5.2.0)) dune-build-info (eio_main (>= 1.0))
   (d10 (= :version))
-  (osrel (= :version)) (opam-format (>= 2.2.0)) (opam-state (>= 2.2.0))
+  (osrel (= :version)) (osdist (= :version))
+  (opam-format (>= 2.2.0)) (opam-state (>= 2.2.0))
   (opam-repository (>= 2.2.0))
   (opam-0install (>= 0.4)) nox-tty nox-tty-eio nox-xdg
   cmdliner fmt logs jsont bytesrw sqlite3 parsexp sexplib0 progress
