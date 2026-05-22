@@ -13,6 +13,7 @@ depends: [
   "eio_main" {>= "1.0"}
   "d10" {= version}
   "osrel" {= version}
+  "osdist" {= version}
   "opam-format" {>= "2.2.0"}
   "opam-state" {>= "2.2.0"}
   "opam-repository" {>= "2.2.0"}

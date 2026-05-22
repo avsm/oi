@@ -3,6 +3,7 @@
  (libraries
   oi
   oi_cmd
+  osdist
   d10
   d10ir
   alcotest
@@ -10,4 +11,5 @@
   eio_main
   opam-format
   jsont
-  jsont.bytesrw))
+  jsont.bytesrw
+  dockerfile))

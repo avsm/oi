@@ -6,6 +6,7 @@
   d10ir
   d10ir_cmd
   osrel
+  osdist
   cmdliner
   dune-build-info
   fmt

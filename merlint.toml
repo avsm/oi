@@ -102,3 +102,36 @@ exclude = ["E415"]
 [[rules]]
 files = "lib/cmd/makefile_export.ml"
 exclude = ["E005", "E205"]
+
+# ---------------------------------------------------------------------------
+# osdist — cmdliner glue + pure-data templates.
+#
+# E005 (long function):
+#   - lib/cmd/osdist_pkg.ml :: pkg_cmd — cmdliner [Term.( $ ... $ ...)]
+#     pipeline of ~14 cmdliner arg declarations. Decomposing it would just
+#     spread the same boilerplate across helpers and obscure the 1:1
+#     mapping between flag definitions and `const pkg_run $ ... $ ...`.
+#   - lib/cmd/osdist_repo.ml :: repo_cmd — same shape as [pkg_cmd].
+#   - lib/osdist/repo_index.ml :: install_sh / install_md — these emit
+#     the verbatim installer shell script and the human-readable
+#     INSTALL.md respectively; the body is a long format-string template
+#     interpolating distro tags, codenames and the baseurl. Splitting
+#     across helpers would just fragment the template.
+#
+# E350 (boolean blindness):
+#   - lib/cmd/osdist_pkg.ml :: pkg_run takes [refresh] and [build_flag]
+#     as plain bools. Same shape as the existing `makefile_run`; both
+#     come straight from cmdliner [Term] composition where labeled args
+#     and records don't compose with the [$] operator without adding a
+#     dedicated wrapper layer.
+[[rules]]
+files = "lib/cmd/osdist_pkg.ml"
+exclude = ["E005", "E350"]
+
+[[rules]]
+files = "lib/cmd/osdist_repo.ml"
+exclude = ["E005"]
+
+[[rules]]
+files = "lib/osdist/repo_index.ml"
+exclude = ["E005"]
