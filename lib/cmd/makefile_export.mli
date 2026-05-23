@@ -32,6 +32,7 @@ val emit :
   output:string ->
   ?binaries:string list ->
   ?bin_roots:string list ->
+  ?emit_dest_install:bool ->
   ?local:local ->
   unit ->
   unit
@@ -51,6 +52,13 @@ val emit :
     [make dest] copies only those layers' [bin/]+[sbin/] into [dest/], i.e. just
     the selected package's own binaries, not the dependency closure. Defaults to
     the plan's (non-toolchain) roots if empty.
+
+    [emit_dest_install] (default [true]) controls whether the [dest:] and
+    [install:] recipes (plus [.DEFAULT_GOAL := dest] and the [dest install]
+    phony entries) are written. Pass [false] when a downstream caller (e.g.
+    [Cmd.Duniverse]) appends its own [dest:] / [install:] / default goal —
+    avoids the "overriding recipe" warning [make] emits when a target is
+    redefined.
 
     The build/scratch tree is [src/] (deliberately not [dist/], to not collide
     with [dest/]). Per-node build output (both stdout and stderr — dune is

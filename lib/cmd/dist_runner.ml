@@ -24,7 +24,7 @@ let built_binaries ~harness ~solved =
       | None -> [])
   |> List.sort_uniq compare
 
-let oi_build_and_binaries ~harness ~pipeline_env ~req ~layer_remote
+let ensure_toolchain_built ~harness ~pipeline_env ~req ~layer_remote
     ~source_remote ~targets ~clock =
   let solved, build_result =
     Progress_ui.with_ui
@@ -296,7 +296,7 @@ let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
       ~with_deps ~toolchain_override ~targets:grouped_targets ()
   in
   let binaries =
-    oi_build_and_binaries ~harness ~pipeline_env ~req ~layer_remote
+    ensure_toolchain_built ~harness ~pipeline_env ~req ~layer_remote
       ~source_remote ~targets ~clock
   in
   let recipe_solved =

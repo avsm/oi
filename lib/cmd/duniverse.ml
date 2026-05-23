@@ -2,65 +2,11 @@ open Cmdliner
 
 let ( / ) = Filename.concat
 
-(* Best-effort handle name from a packages_dir path:
-   [.../v2/avsm/packages] → "avsm"; [.../packages] → "default". *)
-let handle_of_packages_dir d =
-  let parent = Filename.dirname d in
-  let name = Filename.basename parent in
-  if name = "" || name = "/" then "default" else name
+(* -- absolute path / dir helpers ---------------------------------------- *)
 
-(* Locate the [<pkgs_dir>/<name>/<name.version>] dir that contributed
-   [pkg]'s opam file. Same lookup as [Plan.find_pkg_source_dir], but
-   we need it without a resolved [Plan.t] in scope. *)
-let find_pkg_source_dir ~packages_dirs (pkg : OpamPackage.t) =
-  let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-  let full = OpamPackage.to_string pkg in
-  List.find_map
-    (fun d ->
-      if Sys.file_exists (d / name / full) then Some (d, name, full) else None)
-    packages_dirs
-
-(* Read [pkg]'s [url:] block — the package's "main" source. Multi-archive
-   packages (with [extra-sources:]) deliberately ignored: per the
-   bundle's "pick the first one" contract, we only carry the main url
-   for each package. Returns [None] for sourceless / virtual packages. *)
-let main_source ~packages_dirs (pkg : OpamPackage.t) =
-  match find_pkg_source_dir ~packages_dirs pkg with
-  | None -> None
-  | Some (d, name, full) -> (
-      let path = d / name / full / "opam" in
-      try
-        let opam =
-          OpamFile.OPAM.read (OpamFile.make (OpamFilename.of_string path))
-        in
-        match OpamFile.OPAM.url opam with
-        | None -> None
-        | Some u -> Some (OpamFile.URL.url u, OpamFile.URL.checksum u)
-      with Sys_error _ | Failure _ -> None)
-
-(* Identity key for dedup. Tarballs key on their first declared
-   checksum (content-addressed); git URLs key on the URL string
-   (which carries the [#commit] pin). Two packages whose main source
-   maps to the same key share one extracted directory — the second
-   one's [*.opam] file lives inside the first's tree, dune walks
-   both. *)
-let archive_key (url : OpamUrl.t) (checksums : OpamHash.t list) =
-  match checksums with
-  | ck :: _ -> "h:" ^ OpamHash.to_string ck
-  | [] -> "u:" ^ OpamUrl.to_string url
-
-(* Split the solver's closure into [(consumer, toolchain)]. Toolchain
-   packages stay out of the bundle entirely — they're built by oi's
-   [--toolchain] machinery, and listing them in [depends:] would force
-   [opam install --deps-only] to materialise the compiler outside that
-   pinning. *)
-let partition_toolchain ~(toolchain : Oi.Toolchain.info option) pkgs =
-  match toolchain with
-  | None -> (pkgs, [])
-  | Some info ->
-      List.partition (fun p -> not (OpamPackage.Set.mem p info.packages)) pkgs
-
-(* -- Reporepo subset ---------------------------------------------------- *)
+let absolutize_output output =
+  if Filename.is_relative output then Filename.concat (Sys.getcwd ()) output
+  else output
 
 let mkdir_p d =
   let rec go d =
@@ -72,263 +18,22 @@ let mkdir_p d =
   in
   go d
 
-(* Byte-copy fallback when [link] is unavailable (cross-fs etc.). *)
-let copy_file_contents src dst =
-  let i = open_in_bin src and o = open_out_bin dst in
-  Fun.protect
-    ~finally:(fun () ->
-      close_in_noerr i;
-      close_out_noerr o)
-    (fun () ->
-      let buf = Bytes.create 65536 in
-      let rec loop () =
-        let n = input i buf 0 (Bytes.length buf) in
-        if n > 0 then begin
-          output_bytes o buf;
-          loop ()
-        end
-      in
-      loop ())
+let prepare_output_dirs ~fs output =
+  let output = absolutize_output output in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / output);
+  let vendor_dir = output / "vendor" in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / vendor_dir);
+  (output, vendor_dir)
 
-(* Hardlink [src] to [dst], falling back to a byte copy on failure
-   (typically [EXDEV] across filesystems). *)
-let link_or_copy src dst =
-  try Unix.link src dst with Unix.Unix_error _ -> copy_file_contents src dst
+(* -- dune-buildable detection ------------------------------------------- *)
 
-let copy_symlink src dst =
-  let target = Unix.readlink src in
-  try Unix.symlink target dst with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-
-let mkdir_existing_ok dst =
-  try Unix.mkdir dst 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-
-(* Recursive copy of [src] into [dst], hardlinking regular files when
-   possible (cross-fs gracefully falls back to byte copy). Used to
-   snapshot a reporepo [<pkg>/<pkg.ver>/] directory — that tree
-   carries the [opam] file plus any [files/] subdir holding
-   [extra-files:] patches. *)
-let rec copy_tree src dst =
-  Sys.readdir src |> Array.iter (fun name -> copy_entry src dst name)
-
-and copy_entry src dst name =
-  let s = src / name and d = dst / name in
-  match (Unix.lstat s).Unix.st_kind with
-  | Unix.S_DIR ->
-      mkdir_existing_ok d;
-      copy_tree s d
-  | Unix.S_REG when not (Sys.file_exists d) -> link_or_copy s d
-  | Unix.S_LNK -> copy_symlink s d
-  | _ -> ()
-
-let copy_reporepo_subset ~packages_dirs ~bundle_repo (pkgs : OpamPackage.t list)
-    =
-  let n = ref 0 in
-  List.iter
-    (fun pkg ->
-      match find_pkg_source_dir ~packages_dirs pkg with
-      | None -> ()
-      | Some (d, name, full) ->
-          let src = d / name / full in
-          let dst =
-            bundle_repo / "v2" / handle_of_packages_dir d / "packages" / name
-            / full
-          in
-          if Sys.file_exists src && not (Sys.file_exists dst) then begin
-            mkdir_p dst;
-            copy_tree src dst;
-            incr n
-          end)
-    pkgs;
-  !n
-
-(* -- Per-package extraction --------------------------------------------- *)
-
-(* Extract [pkg]'s main source into [dst] via the same fetch chain
-   [oi build] uses. [cache_urls] points opam at the local mirror
-   (which we just warmed up), so tarballs we already fetched are
-   read from disk; git URLs are cloned + checked out at the pinned
-   commit. opam's [pull_tree] handles tarball strip-1, git
-   clone-and-checkout, and patch application uniformly. *)
-let extract_main_source ~cache_urls ~dst (pkg : OpamPackage.t) (url : OpamUrl.t)
-    (checksums : OpamHash.t list) =
-  let cache_dir =
-    OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
-  in
-  let result =
-    OpamRepository.pull_tree
-      (OpamPackage.to_string pkg)
-      ~cache_dir ~cache_urls
-      (OpamFilename.Dir.of_string dst)
-      checksums [ url ]
-    |> OpamProcess.Job.run
-  in
-  match result with
-  | OpamTypes.Result _ | OpamTypes.Up_to_date _ -> Ok ()
-  | OpamTypes.Not_available (_, msg) -> Error msg
-
-type install = {
-  extracted : OpamPackage.t list;  (** Got their own [vendor/<pkg>/]. *)
-  duplicates : (OpamPackage.t * string) list;
-      (** Share an archive with an [extracted] package; second arg is the
-          basename of the directory hosting both opam files. *)
-  virtuals : OpamPackage.t list;
-      (** No main [url:] in the opam file (sourceless package). *)
-  failures : (string * string) list;
-}
-
-(* pkg-name → bundle subdir. Duplicates point at the [extracted]
-   package they share an archive with. *)
-let dir_of_pkg install =
-  let m = Hashtbl.create 64 in
-  let bind pkg dir =
-    Hashtbl.replace m (OpamPackage.Name.to_string (OpamPackage.name pkg)) dir
-  in
-  List.iter
-    (fun pkg -> bind pkg (OpamPackage.Name.to_string (OpamPackage.name pkg)))
-    install.extracted;
-  List.iter (fun (pkg, dir) -> bind pkg dir) install.duplicates;
-  m
-
+(* A tree is "dune-buildable" if it has a [dune-project] (preferred) or a
+   top-level [dune] file. We check the unpacked source tree directly, so
+   the detection is independent of any opam-file build commands. *)
 let dir_is_dune_buildable dir =
   Sys.file_exists (dir / "dune-project") || Sys.file_exists (dir / "dune")
 
-(* Accumulator for [install_sources]; mutated as packages are visited. *)
-type install_acc = {
-  by_key : (string, string) Hashtbl.t;
-  mutable extracted : OpamPackage.t list;
-  mutable duplicates : (OpamPackage.t * string) list;
-  mutable virtuals : OpamPackage.t list;
-  mutable failures : (string * string) list;
-}
-
-let new_install_acc () =
-  {
-    by_key = Hashtbl.create 64;
-    extracted = [];
-    duplicates = [];
-    virtuals = [];
-    failures = [];
-  }
-
-(* Extract [pkg] into [vendor_dir/<name>/], unless an existing tree
-   already covers it. Records the outcome in [acc]. *)
-let install_one ~cache_urls ~vendor_dir ~acc pkg url checksums =
-  let key = archive_key url checksums in
-  match Hashtbl.find_opt acc.by_key key with
-  | Some dir -> acc.duplicates <- (pkg, dir) :: acc.duplicates
-  | None -> (
-      let pkg_name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-      let dst = vendor_dir / pkg_name in
-      let record_extracted () =
-        Hashtbl.add acc.by_key key pkg_name;
-        acc.extracted <- pkg :: acc.extracted
-      in
-      if Sys.file_exists dst then record_extracted ()
-      else
-        match extract_main_source ~cache_urls ~dst pkg url checksums with
-        | Ok () -> record_extracted ()
-        | Error msg -> acc.failures <- (pkg_name, msg) :: acc.failures)
-
-let install_sources ~cache_urls ~vendor_dir ~packages_dirs pkgs =
-  (* [by_key] maps an archive's identity to the basename of the
-     directory that hosts its extracted source. The first package to
-     claim an archive owns the directory; later ones merely note the
-     name they should pin against. *)
-  let acc = new_install_acc () in
-  List.iter
-    (fun pkg ->
-      match main_source ~packages_dirs pkg with
-      | None -> acc.virtuals <- pkg :: acc.virtuals
-      | Some (url, checksums) ->
-          install_one ~cache_urls ~vendor_dir ~acc pkg url checksums)
-    pkgs;
-  {
-    extracted = List.rev acc.extracted;
-    duplicates = List.rev acc.duplicates;
-    virtuals = List.rev acc.virtuals;
-    failures = List.rev acc.failures;
-  }
-
-(* -- workspace files ----------------------------------------------------
-
-   [root.opam] drives [oi build]: [depends:] names externally-resolved
-   packages (non-dune sources and virtuals) at their solved versions;
-   dune-buildable in-tree packages are omitted because dune builds them
-   from [vendor/]. [x-repos:] and [x-reporepo-hash:] stamp the reporepo
-   for reproducible re-solves.
-
-   [dune-project] is the workspace marker; the root [dune] file's
-   [(vendored_dirs vendor)] tells dune to relax warnings-as-errors and
-   strict project checks for the extracted sources. *)
-
-let dune_project_contents = "(lang dune 3.20)\n"
-let dune_root_contents = "(vendored_dirs vendor)\n"
-
-let render_root_opam ~target_label ~packages ~repos ~reporepo_hash =
-  let buf = Buffer.create 1024 in
-  let pf fmt = Fmt.kstr (Buffer.add_string buf) fmt in
-  pf "opam-version: \"2.0\"\n";
-  pf "synopsis: \"oi dist duniverse bundle for %s\"\n" target_label;
-  pf "depends: [\n";
-  List.iter
-    (fun pkg ->
-      pf "  %S {= %S}\n"
-        (OpamPackage.Name.to_string (OpamPackage.name pkg))
-        (OpamPackage.Version.to_string (OpamPackage.version pkg)))
-    packages;
-  pf "]\n";
-  if repos <> [] then begin
-    pf "x-repos: [\n";
-    List.iter (fun tok -> pf "  %S\n" tok) repos;
-    pf "]\n"
-  end;
-  Stdlib.Option.iter
-    (fun sha -> pf "%s: %S\n" Oi.Keys.reporepo_hash sha)
-    reporepo_hash;
-  Buffer.contents buf
-
-let write_workspace_files ~output ~target_label ~packages ~repos ~reporepo_hash
-    =
-  let write path content =
-    Out_channel.with_open_bin path (fun oc ->
-        Out_channel.output_string oc content)
-  in
-  write (output / "dune-project") dune_project_contents;
-  write (output / "dune") dune_root_contents;
-  write (output / "root.opam")
-    (render_root_opam ~target_label ~packages ~repos ~reporepo_hash)
-
-(* -- Local mirror warm-up ------------------------------------------------
-
-   The actual [pull_tree] extraction reads from opam's [cache_dir] /
-   the local mirror; warm both up-front via the same
-   [Source.Mirror.fetch_archives] [oi build --archives-only] uses, so
-   extractions afterwards are pure CPU + disk. *)
-let warm_local_mirror ~fs ~cache ~packages_dirs pkgs =
-  let archives = Oi.Source.Mirror.collect_archives ~packages_dirs pkgs in
-  if archives = [] then None
-  else begin
-    Oi.Say.step "Fetching %d source archive(s)" (List.length archives);
-    let last = ref "" in
-    let on_progress ~fetched ~total ~current =
-      let msg =
-        match current with
-        | None -> Fmt.str "fetched %d/%d" fetched total
-        | Some c -> Fmt.str "fetched %d/%d  %s" fetched total c
-      in
-      if msg <> !last then begin
-        last := msg;
-        Oi.Say.progress msg
-      end
-    in
-    let summary =
-      Oi.Source.Mirror.fetch_archives ~fs ~cache ~on_progress archives
-    in
-    Oi.Say.progress_clear ();
-    Some summary
-  end
-
-(* -- @handle/pkg shorthand ---------------------------------------------- *)
+(* -- @handle/pkg shorthand --------------------------------------------- *)
 
 (* Strip [@handle/pkg] prefixes the same way [oi build] / [oi run] do:
    the handle joins [with_repos] (overlay shows up in the solve), the
@@ -350,152 +55,320 @@ let split_handle_targets ~with_repos ~with_deps targets =
   in
   (List.rev targets, with_repos, with_deps)
 
-(* -- Main flow ---------------------------------------------------------- *)
+(* -- partition + layout ------------------------------------------------- *)
 
-(* [Eio.Path.mkdirs] mishandles relative paths whose split-parent is the
-   empty string (it ends up calling [mkdirat] with [""]). Resolve to
-   absolute against cwd before any filesystem op. *)
-let absolutize_output output =
-  if Filename.is_relative output then Filename.concat (Sys.getcwd ()) output
-  else output
+(* List the [*.opam] package names at the root of an unpacked tree
+   ([atp.opam] → ["atp"]). Used to detect monorepos: when two trees
+   declare overlapping opam packages, they're (almost certainly) two
+   archive releases of the same source repo, and dune would barf if
+   we vendored both. *)
+let opam_names_at_root dir =
+  match Sys.readdir dir with
+  | exception Sys_error _ -> []
+  | entries ->
+      Array.to_list entries
+      |> List.filter_map (fun name ->
+          if Filename.check_suffix name ".opam" then
+            Some (Filename.chop_suffix name ".opam")
+          else None)
+      |> List.sort_uniq String.compare
 
-(* Create the bundle's three top-level dirs and return their absolute
-   paths. *)
-let prepare_output_dirs ~fs output =
-  let output = absolutize_output output in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / output);
-  let vendor_dir = output / "vendor" in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / vendor_dir);
-  let bundle_repo = output / "reporepo" in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / bundle_repo);
-  (output, vendor_dir, bundle_repo)
+(* For each dune-buildable node in [plan], expose its source tree at
+   either [project/<pkg>/] (if the node is a solve root — i.e. one of
+   the targets the user asked for) or [vendor/<pkg>/] (otherwise).
+   Symlinks point at [sources/<sha>/]; the Makefile (emitted from a
+   sub-plan that drops the project trees) still builds the deps from
+   there. The split matters because the root [dune] file marks
+   [vendor/] as excluded from dune's walk — dune uses src/prefix/lib/
+   for vendored deps via OCAMLPATH — while [project/] gets full strict
+   dune treatment.
 
-type solve_inputs = {
-  with_repos : string list;
-  all_extras : Oi.Project.extra_repo list;
-  extra_constraints : OpamFormula.version_constraint OpamPackage.Name.Map.t;
-  url_project : Oi.Project.Url.t;
+   Dedup by opam-name overlap: if a new tree's root contains any
+   [*.opam] file whose name is already owned by another tree (in
+   project/ or vendor/), the new tree is a monorepo sibling and we
+   skip it — exposing both would have dune barf with [The package "X"
+   is defined more than once] (since both archives ship the same
+   dune-project listing X). Roots win: pass-1 places every dune-
+   buildable root in [project/] and claims its opam names, so a later
+   non-root pass-2 sharing the same monorepo tree is correctly elided
+   from [vendor/]. *)
+type vendor_layout = {
+  project_pkgs : D10ir.Plan.package list;
+  vendor_pkgs : D10ir.Plan.package list;
+  project_owned_names : string list;
+      (** opam package names ([atp], [xrpc-auth], …) that live inside a
+          [project/<root>/] tree. The Makefile sub-plan drops every node whose
+          package name is in this set: those packages are dune- built from
+          [project/] by [./build.sh] and don't need a parallel opam-script build
+          into [src/prefix/]. *)
 }
 
-let collect_solve_inputs ~fs ~sys ~cache ~refresh ~with_repos ~with_deps
-    ~(project : Oi.Project.t) =
-  let extra_deps, url_project =
-    Oi.Pipeline.classify_with_args ~fs ~sys ~cache ~refresh with_deps
-  in
-  let extra_constraints = Oi.Project.Script.constraints extra_deps in
-  let with_repos =
-    with_repos
-    @ Oi.Pipeline.filter_compatible_overlays
-        ~reporepo_path:(Terms.reporepo_path ()) ~toolchain:None
-        (project.overlays @ url_project.overlays)
-  in
-  let cli_extras = Target.cli_extra_repos ~fs ~sys ?toolchain:None with_repos in
-  let all_extras =
-    Target.merge_extras ~cli:cli_extras
-      ~project:(project.extra_repos @ url_project.extra_repos)
-  in
-  { with_repos; all_extras; extra_constraints; url_project }
-
-let toolchain_packages_dirs ~fs ~sys ~data_dir = function
-  | Some (info : Oi.Toolchain.info) -> info.packages_dirs
-  | None -> Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ()
-
-let discover_packages_dirs ~fs ~sys ~cache ~refresh ~data_dir
-    ~(project : Oi.Project.t) ~(url_project : Oi.Project.Url.t) ~all_extras
-    ~toolchain =
-  Stdlib.Option.to_list project.packages_dir
-  @ Stdlib.Option.to_list
-      (Oi.Source.Pin.materialize ~fs ~sys ~cache ~refresh
-         (project.pins @ url_project.pins))
-  @ Oi.Source.Repo.ensure_many ~fs ~data_dir ~refresh all_extras
-  @ toolchain_packages_dirs ~fs ~sys ~data_dir toolchain
-
-(* Enable {with-test} / {with-doc} for every known package, not
-   just the solve roots: the bundle's [dune build] compiles
-   in-tree tests of all consumer packages, so their test deps
-   need to land in the closure. The set is a name catalogue —
-   over-listing is harmless since the filter only fires for
-   packages the solver actually visits. *)
-let test_doc_universe_of packages_dirs =
-  packages_dirs
-  |> List.concat_map (fun d ->
-      try
-        Sys.readdir d |> Array.to_list
-        |> List.filter (fun n -> n <> "" && n.[0] <> '.')
-      with Sys_error _ -> [])
-  |> List.filter_map (fun n ->
-      try Some (OpamPackage.Name.of_string n) with Failure _ -> None)
-  |> OpamPackage.Name.Set.of_list
-
-let solve_or_fail ~ctx ~sys ~fs ~cache_root ~packages_dirs ~names
-    ~extra_constraints =
-  let test_doc_universe = test_doc_universe_of packages_dirs in
-  match
-    Oi.Solver.solve ~test:test_doc_universe ~doc:test_doc_universe ~sys ~fs
-      ~cache_root ctx ~packages_dirs ~constraints:extra_constraints names
-  with
-  | Ok pkgs -> pkgs
-  | Error msg -> Oi.Error.no_solution msg
-
-(* Drop dune-buildable in-tree packages from [depends:] — dune
-   builds them from [vendor/] directly. Non-dune sources,
-   virtuals, and packages whose source we didn't extract stay
-   in [depends:] for [oi build] to resolve via the reporepo. *)
-let external_packages ~install ~vendor_dir consumer_pkgs =
-  let dirs = dir_of_pkg install in
-  let needs_external_resolution pkg =
-    let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
-    match Hashtbl.find_opt dirs name with
-    | None -> true
-    | Some dir -> not (dir_is_dune_buildable (vendor_dir / dir))
-  in
-  consumer_pkgs
-  |> List.filter needs_external_resolution
-  |> List.sort (fun a b ->
-      OpamPackage.Name.compare (OpamPackage.name a) (OpamPackage.name b))
-
-(* Normalise [with_repos] to [x-repos:] tokens: URLs (anything with a
-   [:]) pass through; bare names get an [@] prefix. *)
-let normalize_x_repos with_repos =
-  with_repos
-  |> List.filter_map (fun tok ->
-      if tok = "" then None
-      else if String.contains tok ':' || tok.[0] = '@' then Some tok
-      else Some ("@" ^ tok))
-  |> List.sort_uniq String.compare
-
-let current_reporepo_hash ~sys =
-  let path = Terms.reporepo_path () in
-  if not (Sys.file_exists (path / ".git")) then None
-  else
-    try
-      Some
-        (D10.Sysops.Cmd.run_out sys [ "git"; "-C"; path; "rev-parse"; "HEAD" ])
-    with Eio.Exn.Io _ | Failure _ -> None
-
-let report_fetch_failures = function
-  | None -> ()
-  | Some (s : Oi.Source.Mirror.fetch_summary) ->
-      List.iter
-        (fun (url, msg) -> Oi.Say.warn "fetch failed %s: %s" url msg)
-        s.failed
-
-let report_install (install : install) ~vendor_dir =
-  Oi.Say.field "sources" "%d extracted, %d shared, %d virtual → %s"
-    (List.length install.extracted)
-    (List.length install.duplicates)
-    (List.length install.virtuals)
-    vendor_dir;
+let layout_project_and_vendor ~output ~(plan : D10ir.Plan.t) =
+  let sources_dir = output / "sources" in
+  let vendor_dir = output / "vendor" in
+  let project_dir = output / "project" in
+  let owned = Hashtbl.create 64 in
+  let project_owned = Hashtbl.create 64 in
+  let project_pkgs = ref [] in
+  let vendor_pkgs = ref [] in
+  let ext = Hashtbl.create 16 in
   List.iter
-    (fun (pkg, msg) -> Oi.Say.warn "extract %s: %s" pkg msg)
-    install.failures
+    (fun h -> Hashtbl.replace ext (D10ir.Layer_hash.to_string h) ())
+    plan.external_layers;
+  let roots = Hashtbl.create 16 in
+  List.iter
+    (fun h -> Hashtbl.replace roots (D10ir.Layer_hash.to_string h) ())
+    plan.roots;
+  let place ~dst_dir ~kind ~claim_project n =
+    let h = D10ir.Layer_hash.to_string n.D10ir.Plan.layer_hash in
+    if Hashtbl.mem ext h then `External
+    else
+      let sha = n.D10ir.Plan.archive.sha256 in
+      let sha_dir = sources_dir / sha in
+      if not (Sys.file_exists sha_dir && dir_is_dune_buildable sha_dir) then
+        `Non_dune
+      else
+        let opams = opam_names_at_root sha_dir in
+        match List.find_opt (fun name -> Hashtbl.mem owned name) opams with
+        | Some existing_name ->
+            let owning =
+              try Hashtbl.find owned existing_name with Not_found -> "?"
+            in
+            Oi.Say.info "dedup: %s.%s shares source tree with %s (skip)"
+              n.D10ir.Plan.package.name n.D10ir.Plan.package.version owning;
+            `Dedup
+        | None ->
+            let pkg_dir = dst_dir / n.D10ir.Plan.package.name in
+            mkdir_p dst_dir;
+            if not (Sys.file_exists pkg_dir) then begin
+              let target = ".." / "sources" / sha in
+              try Unix.symlink target pkg_dir
+              with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+            end;
+            List.iter
+              (fun name ->
+                Hashtbl.replace owned name
+                  (kind ^ "/" ^ n.D10ir.Plan.package.name);
+                if claim_project then Hashtbl.replace project_owned name ())
+              opams;
+            `Placed
+  in
+  (* Pass 1: roots go to project/. Their opam names are also claimed
+     for project_owned, so the makefile sub-plan can drop every node
+     that contributes to a project tree (root or monorepo sibling). *)
+  List.iter
+    (fun (n : D10ir.Plan.node) ->
+      let h = D10ir.Layer_hash.to_string n.layer_hash in
+      if Hashtbl.mem roots h then
+        match
+          place ~dst_dir:project_dir ~kind:"project" ~claim_project:true n
+        with
+        | `Placed -> project_pkgs := n.package :: !project_pkgs
+        | _ -> ())
+    plan.nodes;
+  (* Pass 2: remaining dune-buildable nodes go to vendor/. *)
+  List.iter
+    (fun (n : D10ir.Plan.node) ->
+      let h = D10ir.Layer_hash.to_string n.layer_hash in
+      if not (Hashtbl.mem roots h) then
+        match
+          place ~dst_dir:vendor_dir ~kind:"vendor" ~claim_project:false n
+        with
+        | `Placed -> vendor_pkgs := n.package :: !vendor_pkgs
+        | _ -> ())
+    plan.nodes;
+  {
+    project_pkgs = List.rev !project_pkgs;
+    vendor_pkgs = List.rev !vendor_pkgs;
+    project_owned_names =
+      Hashtbl.fold (fun k () acc -> k :: acc) project_owned [];
+  }
 
-let short_sha = function
-  | None -> "(none)"
-  | Some s -> String.sub s 0 (min 12 (String.length s))
+(* Build a sub-plan for the Makefile by dropping every node whose
+   package name was claimed by a [project/] tree. The Makefile then
+   builds compiler + dune + every dep (vendored or not) into
+   [src/prefix/]; [./build.sh dune build] picks up from there to build
+   the project trees themselves. Roots are reset to "every kept node"
+   so [make all] (and the default goal [dest]) drives the full closure
+   to completion — without this, the rendered Makefile would target
+   the project roots and refuse to build their deps. *)
+let makefile_plan ~(plan : D10ir.Plan.t) ~project_owned_names : D10ir.Plan.t =
+  let project_names = Hashtbl.create 32 in
+  List.iter (fun n -> Hashtbl.replace project_names n ()) project_owned_names;
+  let is_project (n : D10ir.Plan.node) =
+    Hashtbl.mem project_names n.D10ir.Plan.package.name
+  in
+  let nodes = List.filter (fun n -> not (is_project n)) plan.nodes in
+  let roots = List.map (fun (n : D10ir.Plan.node) -> n.layer_hash) nodes in
+  { plan with nodes; roots }
 
-(* Resolve the initial CLI / project state into the inputs the solver
-   needs. Pure plumbing — separated out so the main flow stays linear. *)
+(* -- workspace files ---------------------------------------------------- *)
+
+let dune_project_contents = "(lang dune 3.20)\n"
+
+(* dune walks [project/] (the user's own packages, strict treatment)
+   and ignores everything else: [vendor/] (the Makefile already
+   installed those deps into src/prefix/lib/, so dune resolves them
+   via OCAMLPATH instead of re-building from source); [sources/]
+   (canonical unpacked trees — the Makefile reads these); [src/]
+   (the Makefile's build scratch dir + layers + prefix). *)
+let dune_root_contents = "(dirs (:standard \\ vendor sources src))\n"
+
+(* The build.sh wrapper. Exports PATH / OCAMLPATH / OCAMLFIND_CONF to
+   point at the Makefile-built prefix under [src/prefix/], then exec's
+   either an explicit command (the args you pass to build.sh) or a
+   default [dune build]. Hard-fail with a clear message if the prefix
+   doesn't exist (i.e. the user hasn't run [make] yet). *)
+let build_sh_contents =
+  {sh|#!/bin/sh
+# Generated by `oi dist duniverse`. Wraps a command (default: `dune build`)
+# with PATH / OCAMLPATH / OCAMLFIND_CONF pointed at the Makefile-built
+# toolchain + non-dune deps under src/prefix/. Run `make` first.
+set -eu
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="$ROOT/src/prefix"
+if [ ! -d "$PREFIX/bin" ]; then
+  echo "build.sh: $PREFIX/bin missing — run 'make prefix' first (or just 'make', which is 'make dest' which depends on prefix)" >&2
+  exit 1
+fi
+export PATH="$PREFIX/bin:$PATH"
+export OCAMLPATH="$PREFIX/lib:${OCAMLPATH:-}"
+if [ -f "$PREFIX/lib/findlib.conf" ]; then
+  export OCAMLFIND_CONF="$PREFIX/lib/findlib.conf"
+fi
+cd "$ROOT"
+if [ "$#" -eq 0 ]; then
+  exec dune build
+else
+  exec "$@"
+fi
+|sh}
+
+let write_workspace_files ~output =
+  let write ?(mode = 0o644) path s =
+    Out_channel.with_open_bin path (fun oc -> Out_channel.output_string oc s);
+    try Unix.chmod path mode with Unix.Unix_error _ -> ()
+  in
+  write (output / "dune-project") dune_project_contents;
+  write (output / "dune") dune_root_contents;
+  write ~mode:0o755 (output / "build.sh") build_sh_contents
+
+(* Append the duniverse-specific targets to the Makefile that
+   [Makefile_export.emit] just wrote with [~emit_dest_install:false]
+   (which suppressed its own [dest:] / [install:] / default-goal so
+   nothing here gets overridden — no "overriding recipe" warning from
+   make). The extras:
+   - [deps:] alias for [all] (just the layer-build closure).
+   - [prefix:] assembles src/layers/* into src/prefix/ (build_node.sh
+     wipes $PREFIX after each node, so we need an explicit join).
+   - [build:] runs [./build.sh dune build @install] over project/.
+   - [runtest:] runs [./build.sh dune runtest] over project/.
+   - [dest:] (default goal) copies project binaries from
+     [project/*/_build/install/default/{bin,sbin}] into dest/, using
+     [cp -L] to dereference dune's promote symlinks so dest/bin/<x>
+     is a real executable, not a link into a project's _build/.
+   - [install:] same but to [$(DESTDIR)$(PREFIX)/{bin,sbin}/]. *)
+let duniverse_makefile_suffix =
+  {make|
+# -- duniverse additions --------------------------------------------------
+# Layered on top of the dist-makefile layer-build targets above to
+# drive the dune-build phase of project/ from the same `make`
+# invocation. The dist-makefile dest/install rules were suppressed
+# (via Makefile_export.emit ~emit_dest_install:false) so the targets
+# below define the canonical dest/install for the duniverse flow.
+
+.PHONY: deps prefix build runtest dest install
+
+# `make deps` — just the Makefile-built dep closure (every layer
+# under src/layers/). Doesn't materialise a usable prefix.
+deps: all
+
+# `make prefix` — assemble every layer into a single usable prefix
+# at src/prefix/. oi-build-node.sh wipes $PREFIX after each node, so
+# this final cp pass is needed before any tool can use it.
+prefix: all
+	@rm -rf $(SRC)/prefix
+	@mkdir -p $(SRC)/prefix
+	@for sub in bin sbin lib/stublibs lib/toplevel share man etc doc; do \
+	  mkdir -p "$(SRC)/prefix/$$sub"; \
+	done
+	@for h in $(ROOTS); do \
+	  if [ -d "$(SRC)/layers/$$h" ]; then \
+	    cp -a "$(SRC)/layers/$$h/." "$(SRC)/prefix/"; \
+	  fi; \
+	done
+	@echo "  PREFIX $(SRC)/prefix"
+
+# `make build` — dune build @install over project/ using src/prefix/'s
+# compiler + dune + installed deps. Targets @install (rather than the
+# default @@default) so install-stanza binaries land in
+# _build/install/default/bin where `make dest` can find them.
+build: prefix
+	@./build.sh dune build @install
+
+# `make runtest` — dune runtest over project/.
+runtest: prefix
+	@./build.sh dune runtest
+
+# `make dest` (default) — project binaries only, in dest/{bin,sbin}/.
+# Walks every sub-project's _build/install/default/{bin,sbin}/ as
+# well as the workspace-root _build/ (in case dune treated the whole
+# bundle as a single project). `cp -L` dereferences dune's promote
+# symlinks so dest/bin/<binary> is a real executable, not a link into
+# the project's _build/.
+dest: build
+	@rm -rf dest
+	@mkdir -p dest
+	@found=0; for pkg_build in project/*/_build/install/default _build/install/default; do \
+	  for sub in bin sbin; do \
+	    if [ -d "$$pkg_build/$$sub" ]; then \
+	      mkdir -p "dest/$$sub"; \
+	      for f in "$$pkg_build/$$sub"/*; do \
+	        [ -e "$$f" ] || continue; \
+	        cp -L "$$f" "dest/$$sub/"; \
+	      done; \
+	      found=1; \
+	    fi; \
+	  done; \
+	done; \
+	if [ "$$found" = 0 ]; then \
+	  echo "make dest: no binaries found under project/*/_build/install/default/{bin,sbin}" >&2; \
+	fi
+	@echo "dest/ — project binaries (from dune build @install):"
+	@{ ls dest/bin 2>/dev/null | sed 's|^|  dest/bin/|'; ls dest/sbin 2>/dev/null | sed 's|^|  dest/sbin/|'; } || true
+
+# `make install PREFIX=/opt/foo` — same as `make dest` but copies into
+# $(DESTDIR)$(PREFIX)/{bin,sbin}/ instead of dest/.
+install: build
+	@found=0; for pkg_build in project/*/_build/install/default _build/install/default; do \
+	  for sub in bin sbin; do \
+	    if [ -d "$$pkg_build/$$sub" ]; then \
+	      mkdir -p "$(DESTDIR)$(PREFIX)/$$sub"; \
+	      for f in "$$pkg_build/$$sub"/*; do \
+	        [ -e "$$f" ] || continue; \
+	        cp -L "$$f" "$(DESTDIR)$(PREFIX)/$$sub/"; \
+	      done; \
+	      found=1; \
+	    fi; \
+	  done; \
+	done; \
+	if [ "$$found" = 0 ]; then \
+	  echo "make install: no binaries found under project/*/_build/install/default/{bin,sbin}" >&2; \
+	fi
+	@echo "installed project binaries to $(DESTDIR)$(PREFIX)"
+
+.DEFAULT_GOAL := dest
+|make}
+
+let append_duniverse_targets ~output =
+  let path = output / "Makefile" in
+  let oc = open_out_gen [ Open_append; Open_text ] 0o644 path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr oc)
+    (fun () -> output_string oc duniverse_makefile_suffix)
+
+(* -- main flow ---------------------------------------------------------- *)
+
 let resolve_initial_inputs ~fs ~cwd_s ~targets ~with_repos ~with_deps =
   let project = Oi.Project.load ~fs cwd_s in
   let targets = if targets = [] then project.deps else targets in
@@ -508,160 +381,146 @@ let resolve_initial_inputs ~fs ~cwd_s ~targets ~with_repos ~with_deps =
   in
   (project, targets, with_repos, with_deps)
 
-(* Outputs of the solve stage that downstream steps consume. *)
-type solved = {
-  consumer_pkgs : OpamPackage.t list;
-  packages_dirs : string list;
-  inputs : solve_inputs;
-}
-
-(* Solve the dep closure for [targets]. Bundles the toolchain pick,
-   packages-dirs assembly, and root-name massaging so the main flow is
-   linear. *)
-let run_solve ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
-    ~targets ~data_dir ~(project : Oi.Project.t) =
-  let { Harness.fs; sys; platform; cache; _ } = harness in
-  let conf =
-    Oi.Pipeline.conf ~platform ~ocaml_version:Workspace.ocaml_version
-  in
-  let inputs =
-    collect_solve_inputs ~fs ~sys ~cache ~refresh ~with_repos ~with_deps
-      ~project
-  in
-  let toolchain =
-    Oi.Pipeline.pick_toolchain ~fs ~sys ~data_dir ~conf ~install:false
-      ~override:toolchain_override
-      ~handles:(List.sort_uniq String.compare inputs.with_repos)
-      ()
-  in
-  let conf, tc_ctx = Oi.Pipeline.solver_inputs toolchain conf in
-  let packages_dirs =
-    discover_packages_dirs ~fs ~sys ~cache ~refresh ~data_dir ~project
-      ~url_project:inputs.url_project ~all_extras:inputs.all_extras ~toolchain
-  in
-  let cache_root = Oi.Cache.root_s cache in
-  let ctx =
-    Oi.Solver.Ctx.create
-      ~prefix:(cache_root / "build" / "prefix")
-      ~packages_dirs ~conf ?toolchain:tc_ctx ()
-  in
-  let names =
-    List.map OpamPackage.Name.of_string targets
-    @ List.map OpamPackage.Name.of_string inputs.url_project.roots
-    |> Oi.Pipeline.strip_compiler_roots_for_override
-         ~override:toolchain_override ~toolchain
-  in
-  Oi.Say.step "Solving %d target(s) (+test, +doc)" (List.length names);
-  let pkgs =
-    solve_or_fail ~ctx ~sys ~fs ~cache_root ~packages_dirs ~names
-      ~extra_constraints:inputs.extra_constraints
-  in
-  let consumer_pkgs, toolchain_pkgs = partition_toolchain ~toolchain pkgs in
-  Oi.Say.info "%d package(s) in solve closure (%d toolchain)"
-    (List.length consumer_pkgs)
-    (List.length toolchain_pkgs);
-  ignore cache_root;
-  { consumer_pkgs; packages_dirs; inputs }
-
-(* After sources are installed, write [root.opam] / [dune-project] /
-   [dune] and emit the final summary line. Returns the install result so
-   the caller can propagate the failure exit code. *)
-let finalize_workspace ~sys ~output ~vendor_dir ~targets ~(solved : solved)
-    ~(install : install) =
-  let packages = external_packages ~install ~vendor_dir solved.consumer_pkgs in
-  let repos = normalize_x_repos solved.inputs.with_repos in
-  let reporepo_hash = current_reporepo_hash ~sys in
-  write_workspace_files ~output
-    ~target_label:(String.concat ", " targets)
-    ~packages ~repos ~reporepo_hash;
-  Oi.Say.field "workspace"
-    "%d external dep(s) (of %d in solve), %d x-repos, reporepo-hash %s"
-    (List.length packages)
-    (List.length solved.consumer_pkgs)
-    (List.length repos) (short_sha reporepo_hash);
-  Oi.Say.ok "wrote source bundle to %s" output
-
-let run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
-    ~targets ~output ~data_dir =
-  let { Harness.fs; sys; cache; _ } = harness in
+let run_bundle ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
+    ~toolchain_override ~targets ~output =
+  let { Harness.fs; clock; _ } = harness in
   if output = "" then
     Oi.Error.fail_config_error "oi dist duniverse: -o DIR is required";
   let cwd_s, _ = Workspace.resolved_cwd fs in
-  let project, targets, with_repos, with_deps =
+  let _project, targets, with_repos, with_deps =
     resolve_initial_inputs ~fs ~cwd_s ~targets ~with_repos ~with_deps
   in
-  let output, vendor_dir, bundle_repo = prepare_output_dirs ~fs output in
-  Oi.Pipeline.init_opam_root ~fs ~data_dir;
-  ignore (Oi.Source.Reporepo.ensure_base ~fs ~sys ~data_dir ~refresh ());
-  let solved =
-    run_solve ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
-      ~targets ~data_dir ~project
+  let output, vendor_dir = prepare_output_dirs ~fs output in
+  let grouped_targets = Dist_runner.coalesce_targets targets in
+  let {
+    Pipeline_setup.env = pipeline_env;
+    request = req;
+    layer_remote;
+    source_remote;
+    _;
+  } =
+    Pipeline_setup.prepare ~harness ~refresh ~locked:false ~skip_local:true
+      ~registry ~use_registry ~with_repos ~with_deps ~toolchain_override
+      ~targets:grouped_targets ()
   in
-  report_fetch_failures
-    (warm_local_mirror ~fs ~cache ~packages_dirs:solved.packages_dirs
-       solved.consumer_pkgs);
-  let cache_urls = [ Oi.Source.Mirror.url ~cache ] in
-  let install =
-    install_sources ~cache_urls ~vendor_dir ~packages_dirs:solved.packages_dirs
-      solved.consumer_pkgs
+  (* Aux-install the relocatable toolchain and warm the d10 source-archive
+     cache. Without this, the [force_source = true] solve below produces a
+     plan whose [ocaml-compiler] / [ocaml-base-compiler] are empty stubs
+     (no [relocatable-compiler] node), and the Makefile bootstrap fails
+     with [Unbound module Stdlib] when [ocaml.gen_ocaml_config] runs. *)
+  let _binaries =
+    Dist_runner.ensure_toolchain_built ~harness ~pipeline_env ~req ~layer_remote
+      ~source_remote ~targets ~clock
   in
-  report_install install ~vendor_dir;
-  let n_repo =
-    copy_reporepo_subset ~packages_dirs:solved.packages_dirs ~bundle_repo
-      solved.consumer_pkgs
+  (* Force every package to materialise from source (no layer-cache
+     short-circuit) and pull test deps so the bundled
+     [./build.sh dune runtest] has what it needs. *)
+  let req =
+    { req with Oi.Build_pipeline.force_source = true; with_test = true }
   in
-  Oi.Say.field "reporepo" "%d package dir(s) → %s" n_repo bundle_repo;
-  finalize_workspace ~sys ~output ~vendor_dir ~targets ~solved ~install;
-  if install.failures <> [] then exit 1
+  let recipe_solved = Oi.Build_pipeline.solve pipeline_env req in
+  match recipe_solved.Oi.Build_pipeline.merged with
+  | None ->
+      Oi.Error.fail_config_error
+        "oi dist duniverse: every solve group failed; nothing to emit."
+  | Some plan ->
+      (* 1. Prefetch + statically unpack every archive into
+         [<output>/sources/<sha>/]. *)
+      Dist_runner.unpack_sources ~harness ~registry ~plan ~output;
+      (* 2. [project/<pkg>/] symlinks for solve roots; [vendor/<pkg>/]
+         for the rest of the dune-buildable closure; record opam-name
+         ownership so the Makefile sub-plan can skip project trees. *)
+      let { project_pkgs; vendor_pkgs; project_owned_names } =
+        layout_project_and_vendor ~output ~plan
+      in
+      (* 3. Emit the Makefile against a sub-plan that BUILDS THE DEPS
+         ONLY (everything that isn't part of a [project/] tree). The
+         project trees are built by [./build.sh dune build] against
+         the resulting [src/prefix/]. The dist-makefile dest/install
+         is suppressed so the duniverse suffix can append its own
+         without redefinition. *)
+      let mk_plan = makefile_plan ~plan ~project_owned_names in
+      Makefile_export.emit mk_plan ~output ~emit_dest_install:false ();
+      append_duniverse_targets ~output;
+      (* 4. Workspace files + build.sh dune wrapper. *)
+      write_workspace_files ~output;
+      Oi.Say.field "project" "%d root package(s) → %s/"
+        (List.length project_pkgs) (output / "project");
+      Oi.Say.field "vendor"
+        "%d dune-buildable dep(s) → %s/ (browseable; Makefile installs them to \
+         src/prefix/)"
+        (List.length vendor_pkgs) vendor_dir;
+      Oi.Say.field "makefile"
+        "%d dep node(s) (of %d total; %d project trees skipped)"
+        (List.length mk_plan.nodes)
+        (List.length plan.nodes)
+        (List.length plan.nodes - List.length mk_plan.nodes);
+      Oi.Say.ok
+        "wrote duniverse bundle to %s — run: cd %s && make   (== make dest: \
+         deps + prefix + dune build + project binaries → dest/)"
+        output output
 
 let man_block =
   [
     `S Manpage.s_description;
     `P
-      "Solve $(b,TARGET)'s dep closure (including $(b,with-test) and \
-       $(b,with-doc)), fetch every source archive, and lay them out under \
-       $(b,DIR) as a vendored workspace. Hand off to $(b,oi build), $(b,dune \
-       pkg lock), or $(b,opam install --deps-only).";
+      "Vendor $(b,TARGET)'s dep closure into a self-contained bundle that \
+       needs no $(b,oi) or $(b,opam) at build time. Sources are fetched from \
+       the d10ir archive store (local cache, then $(b,--registry)).";
     `S "OUTPUT LAYOUT";
     `I
+      ( "$(b,DIR/project/<pkg>/)",
+        "Symlink into $(b,sources/<sha>/) for each solve root (the packages \
+         the user asked for). Treated as a normal workspace member — strict \
+         warnings, tests run." );
+    `I
       ( "$(b,DIR/vendor/<pkg>/)",
-        "Per-package source tree. Tarballs unpacked, $(b,git+) URLs cloned at \
-         the pinned commit. Packages sharing an archive share a directory." );
+        "Symlink into $(b,sources/<sha>/) for every dune-buildable dependency. \
+         The root $(b,dune) file excludes $(b,vendor/) from dune's walk; the \
+         Makefile installs these into $(b,src/prefix/lib/) and dune resolves \
+         them via $(b,OCAMLPATH)." );
     `I
-      ( "$(b,DIR/reporepo/)",
-        "Snapshot of the opam metadata the solve consulted." );
+      ( "$(b,DIR/sources/<sha>/)",
+        "Canonical unpacked source tree for every package in the plan \
+         (dune-buildable or not). The Makefile builds from here." );
     `I
-      ( "$(b,DIR/root.opam)",
-        "Bundle manifest. $(b,depends:) pins externally-resolved packages; \
-         dune-buildable in-tree packages build from $(b,vendor/). \
-         $(b,x-repos:) and $(b,x-reporepo-hash:) stamp the reporepo." );
+      ( "$(b,DIR/Makefile)",
+        "Builds the dep closure (every node minus project trees) into \
+         $(b,src/prefix/), drives $(b,dune build @install) over $(b,project/) \
+         via $(b,build.sh), and assembles project binaries into $(b,dest/)." );
+    `I
+      ( "$(b,DIR/build.sh)",
+        "Exports $(b,PATH) / $(b,OCAMLPATH) / $(b,OCAMLFIND_CONF) so they \
+         point at $(b,src/prefix/), then $(b,exec)'s its arguments (default: \
+         $(b,dune build))." );
     `I
       ( "$(b,DIR/dune-project), $(b,DIR/dune)",
-        "Workspace marker; $(b,(vendored_dirs vendor)) relaxes \
-         warnings-as-errors over $(b,vendor/)." );
-    `S "NOTES";
-    `P "$(b,extra-sources:) blocks are skipped.";
-    `P "Toolchain packages are pinned via $(b,--toolchain), not $(b,depends:).";
-    `P
-      "For a portable, $(b,oi)-free build from registry archives see $(b,oi \
-       dist makefile).";
-    `S Manpage.s_examples;
+        "Workspace marker; the $(b,(dirs ...)) stanza excludes $(b,vendor/), \
+         $(b,sources/), and $(b,src/) so dune only walks $(b,project/)." );
+    `S "TYPICAL USE";
     `Pre
       "  oi dist duniverse @avsm/owntracks-cli -o ./bundle\n\
-      \  oi dist duniverse dune fmt -o /tmp/dune-fmt-src\n\
-      \  oi dist duniverse @avsm/oi --toolchain ocaml-5.4 -o ./oi-src";
+      \  cd ./bundle\n\
+      \  make            # == make dest: deps + prefix + dune build + dest/\n\
+      \  make runtest    # deps + prefix + `dune runtest`\n\
+      \  make deps       # just the dep closure (no prefix, no dune)\n\
+      \  make prefix     # deps + assemble src/prefix/\n\
+      \  make install PREFIX=/opt/foo   # project binaries -> /opt/foo/bin\n\
+      \  ./build.sh CMD ...   # CMD with src/prefix/ on PATH/OCAMLPATH";
+    `S "SEE ALSO";
+    `P "$(b,oi dist makefile)(1)";
   ]
 
 let cmd =
-  let run (c : Terms.common) refresh _registry _use_registry with_repos
-      with_deps _jobs toolchain_override targets output =
+  let run (c : Terms.common) refresh registry use_registry with_repos with_deps
+      _jobs toolchain_override targets output =
     Harness.run @@ fun ~sw env ->
     let harness =
       Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
         c.cache_dir
     in
-    run_bundle ~harness ~refresh ~with_repos ~with_deps ~toolchain_override
-      ~targets ~output ~data_dir:c.data_dir
+    run_bundle ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
+      ~toolchain_override ~targets ~output
   in
   let output =
     Arg.(
@@ -680,7 +539,9 @@ let cmd =
   in
   let info =
     Cmd.info "duniverse"
-      ~doc:"Vendor a target's sources into a self-contained bundle"
+      ~doc:
+        "Vendor a target into a self-contained bundle (Makefile-built \
+         toolchain + dune-vendored sources)"
       ~man:man_block
   in
   Cmd.v info
