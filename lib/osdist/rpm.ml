@@ -102,10 +102,10 @@ let spec (s : Spec.t) (t : Target.t) ~overlay_depexts ~date_rpm =
      %%build\n\
      ./build.sh build %%{?_smp_build_ncpus}%%{!?_smp_build_ncpus:$(nproc)}\n\n\
      %%install\n\
-     ./build.sh install %s %%{buildroot}\n\n\
-     %%files\n\
-     %s/bin/*\n\
-     %s/share/*\n\n\
+     ./build.sh install %s %%{buildroot}\n\
+     ( cd %%{buildroot} && find . \\( -type f -o -type l \\) -printf '/%%%%P\\n' ) \
+     > %%{_builddir}/%s.files\n\n\
+     %%files -f %%{_builddir}/%s.files\n\n\
      %%changelog\n\
      * %s %s - %s%s-%s\n\
      - Packaged by osdist from the oi dist bundle.\n"
@@ -117,7 +117,7 @@ let spec (s : Spec.t) (t : Target.t) ~overlay_depexts ~date_rpm =
     (match t.arch with "x86_64" -> "x86_64" | a -> a)
     build_requires requires
     (if s.description = "" then s.synopsis else s.description)
-    s.package s.version s.prefix s.prefix s.prefix date_rpm s.maintainer
+    s.package s.version s.prefix s.package s.package date_rpm s.maintainer
     (epoch_evr s) s.version (rpmrel t)
 
 let filename (s : Spec.t) (t : Target.t) =
