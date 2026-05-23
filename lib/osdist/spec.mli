@@ -28,8 +28,8 @@ type t = {
           a recursive glob of [bin/]. *)
   depexts : (string * string list) list;
       (** Per-{!Dockerfile_opam.Distro.tag_of_distro} overlay depexts, computed
-          at bundle time and consumed at pkg time. Keyed by the upstream
-          distro tag (e.g. ["ubuntu-26.04"], ["fedora-44"]); empty for the
+          at bundle time and consumed at pkg time. Keyed by the upstream distro
+          tag (e.g. ["ubuntu-26.04"], ["fedora-44"]); empty for the
           [alpine-static] target (it builds inside the bundled musl chain). *)
 }
 
@@ -55,14 +55,11 @@ val of_target_name : name:string -> version:string -> t
     caller will overlay any cmdliner overrides on top. *)
 
 val of_opam_file :
-  name:string ->
-  version:string ->
-  path:string ->
-  (t, string) result
+  name:string -> version:string -> path:string -> (t, string) result
 (** [of_opam_file ~name ~version ~path] parses [path] as an opam file and
     returns a {!t} with [maintainer], [homepage], [license], [synopsis] and
-    [description] taken from it. Useful in TARGET mode to enrich the spec
-    with the resolved package's opam metadata. *)
+    [description] taken from it. Useful in TARGET mode to enrich the spec with
+    the resolved package's opam metadata. *)
 
 val override :
   ?package:string ->
@@ -73,9 +70,9 @@ val override :
   ?prefix:string ->
   t ->
   t
-(** [override ?package ?epoch ?maintainer ?homepage ?license ?prefix t]
-    applies optional cmdliner overrides to [t]. Each [None] argument leaves
-    the field untouched. *)
+(** [override ?package ?epoch ?maintainer ?homepage ?license ?prefix t] applies
+    optional cmdliner overrides to [t]. Each [None] argument leaves the field
+    untouched. *)
 
 (** {1 Project mode — derive from *.opam DAG}
 
@@ -87,8 +84,8 @@ val override :
     [--pkg-name] and re-enter via {!of_target_name} (or in the future, a more
     direct [select]).
 
-    The version is read from [dune-project]'s [(version …)] stanza, falling
-    back to the opam [version:] field, then to ["0.0.0"]. *)
+    The version is read from [dune-project]'s [(version …)] stanza, falling back
+    to the opam [version:] field, then to ["0.0.0"]. *)
 
 type derive_error =
   | No_opam_files
@@ -99,10 +96,10 @@ val pp_derive_error : Format.formatter -> derive_error -> unit
 (** [pp_derive_error ppf e] renders [e] as a human-readable diagnostic. *)
 
 val of_local_project : cwd:string -> (t, derive_error) result
-(** [of_local_project ~cwd] reads every [*.opam] in [cwd] and returns a
-    {!t} derived from the "root" package (the one no other local opam
-    depends on). Errors with {!Multiple_roots} when the project has more
-    than one such package (caller must disambiguate via [--pkg-name]). *)
+(** [of_local_project ~cwd] reads every [*.opam] in [cwd] and returns a {!t}
+    derived from the "root" package (the one no other local opam depends on).
+    Errors with {!Multiple_roots} when the project has more than one such
+    package (caller must disambiguate via [--pkg-name]). *)
 
 val pp : Format.formatter -> t -> unit
 (** [pp ppf t] renders [t] as [<package> <version>] for diagnostics. *)

@@ -8,7 +8,8 @@ type config = {
   baseurl : string;
       (** Public URL the repo will be served at — baked into the installer
           snippets and dnf [.repo] files. *)
-  origin : string;  (** APT [Origin:] field. Typically the project / org name. *)
+  origin : string;
+      (** APT [Origin:] field. Typically the project / org name. *)
   label : string;  (** APT [Label:] field. *)
   description : string;  (** Free-form [Description:] (one line). *)
   gpg_key_id : string;
@@ -19,25 +20,22 @@ type config = {
           ["oi.asc"]. *)
 }
 
-val apt_distributions :
-  config -> deb_targets:Target.t list -> string
+val apt_distributions : config -> deb_targets:Target.t list -> string
 (** [apt_distributions cfg ~deb_targets] is the [conf/distributions] file for
     [reprepro]: one stanza per unique [codename] across [deb_targets], with the
     arches set to [amd64]. *)
 
-val dnf_repo_file :
-  config -> Target.t -> pkg:string -> string
-(** [dnf_repo_file cfg t ~pkg] is the [/etc/yum.repos.d/<pkg>.repo] body for
-    a single rpm target, including [baseurl], [gpgkey] and the
-    [repo_gpgcheck=1] flag. *)
+val dnf_repo_file : config -> Target.t -> pkg:string -> string
+(** [dnf_repo_file cfg t ~pkg] is the [/etc/yum.repos.d/<pkg>.repo] body for a
+    single rpm target, including [baseurl], [gpgkey] and the [repo_gpgcheck=1]
+    flag. *)
 
 val install_sh : config -> Spec.t -> targets:Target.t list -> string
-(** [install_sh cfg s ~targets] is a one-shot installer baked with
-    [cfg.baseurl] and [s.package]: detects the host distro from
-    [/etc/os-release], wires up the matching signed apt/dnf repo, then
-    [apt|dnf install <pkg>]. Falls back to the static-binary tarball
-    download. *)
+(** [install_sh cfg s ~targets] is a one-shot installer baked with [cfg.baseurl]
+    and [s.package]: detects the host distro from [/etc/os-release], wires up
+    the matching signed apt/dnf repo, then [apt|dnf install <pkg>]. Falls back
+    to the static-binary tarball download. *)
 
 val install_md : config -> Spec.t -> targets:Target.t list -> string
-(** [install_md cfg s ~targets] is a human-readable [INSTALL.md] with
-    copy-paste snippets per family. *)
+(** [install_md cfg s ~targets] is a human-readable [INSTALL.md] with copy-paste
+    snippets per family. *)

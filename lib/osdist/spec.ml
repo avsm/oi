@@ -101,7 +101,8 @@ let read_sidecar ~path =
 (* -- Defaults / construction -------------------------------------------- *)
 
 let default_maintainer () =
-  try Sys.getenv "DEBEMAIL" |> fun email ->
+  try
+    Sys.getenv "DEBEMAIL" |> fun email ->
     let name = try Sys.getenv "DEBFULLNAME" with Not_found -> "Maintainer" in
     Fmt.str "%s <%s>" name email
   with Not_found -> "Maintainer <maintainer@example.org>"
@@ -274,8 +275,7 @@ let dune_project_version cwd =
    opam-format AST when the field is malformed; we'd rather show the
    placeholder than fail the whole bundle. *)
 let string_of_opam_string_field f opam =
-  try
-    match f opam with [] -> "" | s :: _ -> s
+  try match f opam with [] -> "" | s :: _ -> s
   with Invalid_argument _ | Failure _ -> ""
 
 let synopsis_of opam =

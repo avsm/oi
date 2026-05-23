@@ -3,4 +3,3 @@
     into a self-contained bundle). *)
 
 val cmd : unit Cmdliner.Cmd.t
-

@@ -10,8 +10,8 @@ let makefile_run (c : Terms.common) refresh registry use_registry with_repos
   let harness =
     Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
-  Dist_runner.run_makefile ~harness ~refresh ~registry ~use_registry
-    ~with_repos ~with_deps ~toolchain_override ~targets ~output
+  Dist_runner.run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
+    ~with_deps ~toolchain_override ~targets ~output
 
 let makefile_man =
   [
@@ -81,10 +81,10 @@ let cmd =
             "Generate a self-contained build description for the current \
              project or a $(b,TARGET).";
           `S "SUBCOMMANDS";
-          `I ("$(b,oi dist docker)",
-              "Per-distro Dockerfiles (project / CI / registry).");
-          `I ("$(b,oi dist obuilder)",
-              "obuilder specs (s-expressions).");
+          `I
+            ( "$(b,oi dist docker)",
+              "Per-distro Dockerfiles (project / CI / registry)." );
+          `I ("$(b,oi dist obuilder)", "obuilder specs (s-expressions).");
           `I
             ( "$(b,oi dist makefile)",
               "Portable Makefile + per-distro Dockerfiles; no $(b,oi) needed \
@@ -94,15 +94,15 @@ let cmd =
               "Vendor a target's sources into a self-contained bundle." );
           `I
             ( "$(b,oi dist pkg)",
-              "Emit a source bundle + per-distro packaging tree \
-               (Dockerfiles, $(b,debian/), $(b,.spec)); with $(b,--build) \
-               drives $(b,docker compose up --build) to produce .deb / .rpm \
-               / static-musl artefacts in parallel." );
+              "Emit a source bundle + per-distro packaging tree (Dockerfiles, \
+               $(b,debian/), $(b,.spec)); with $(b,--build) drives $(b,docker \
+               compose up --build) to produce .deb / .rpm / static-musl \
+               artefacts in parallel." );
           `I
             ( "$(b,oi dist repo)",
-              "Sign and assemble those artefacts into a published APT / DNF \
-               / static-bin repo, idempotently. Auto-selects an Ed25519 \
-               signing key from your keyring." );
+              "Sign and assemble those artefacts into a published APT / DNF / \
+               static-bin repo, idempotently. Auto-selects an Ed25519 signing \
+               key from your keyring." );
         ]
   in
   Cmd.group info

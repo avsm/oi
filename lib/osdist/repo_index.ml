@@ -36,20 +36,23 @@ let dnf_repo_file cfg (t : Target.t) ~pkg =
      gpgcheck=1\n\
      repo_gpgcheck=1\n\
      gpgkey=%s/rpm/%s/%s\n"
-    pkg cfg.origin t.tag cfg.baseurl t.tag cfg.baseurl t.tag
-    cfg.pubkey_filename
+    pkg cfg.origin t.tag cfg.baseurl t.tag cfg.baseurl t.tag cfg.pubkey_filename
 
 (* -- install.sh ---------------------------------------------------------
    Lightweight POSIX-sh installer; same shape as the oxcaml-pkgs one.
    {{}} are deliberate quoting markers; the template uses single-quoted
    heredocs so OCaml-side escaping stays sane. *)
 let install_sh cfg (s : Spec.t) ~targets =
-  let deb_targets = List.filter (fun (t : Target.t) -> t.family = Target.Deb) targets in
-  let rpm_targets = List.filter (fun (t : Target.t) -> t.family = Target.Rpm) targets in
-  let has_static = List.exists (fun (t : Target.t) -> t.family = Target.Static) targets in
-  let codenames =
-    unique_codenames deb_targets |> String.concat " "
+  let deb_targets =
+    List.filter (fun (t : Target.t) -> t.family = Target.Deb) targets
   in
+  let rpm_targets =
+    List.filter (fun (t : Target.t) -> t.family = Target.Rpm) targets
+  in
+  let has_static =
+    List.exists (fun (t : Target.t) -> t.family = Target.Static) targets
+  in
+  let codenames = unique_codenames deb_targets |> String.concat " " in
   let rpm_tags =
     List.map (fun (t : Target.t) -> t.tag) rpm_targets |> String.concat " "
   in
@@ -153,11 +156,11 @@ esac
 say "no native package for $ID; falling back to static binary"
 install_static
 |}
-    s.package cfg.baseurl cfg.baseurl cfg.baseurl s.package codenames
-    rpm_tags cfg.pubkey_filename
+    s.package cfg.baseurl cfg.baseurl cfg.baseurl s.package codenames rpm_tags
+    cfg.pubkey_filename
     (String.uppercase_ascii s.package)
-    (if has_static then "" else
-       "die 'no static fallback configured; use --repo-url or pass --static'")
+    (if has_static then ""
+     else "die 'no static fallback configured; use --repo-url or pass --static'")
 
 let install_md cfg (s : Spec.t) ~targets =
   let deb_targets =
@@ -172,8 +175,8 @@ let install_md cfg (s : Spec.t) ~targets =
   let buf = Buffer.create 4096 in
   let ppf = Fmt.with_buffer buf in
   Fmt.pf ppf
-    "# Installing %s@.@.## Quick install@.@.```sh@.curl -fsSL %s/install.sh \
-     | sh@.```@.@."
+    "# Installing %s@.@.## Quick install@.@.```sh@.curl -fsSL %s/install.sh | \
+     sh@.```@.@."
     s.package cfg.baseurl;
   if deb_targets <> [] then begin
     Fmt.pf ppf "## Debian / Ubuntu@.@.```sh@.";
@@ -185,8 +188,8 @@ let install_md cfg (s : Spec.t) ~targets =
     List.iter
       (fun cn ->
         Fmt.pf ppf
-          "echo 'deb [signed-by=/usr/share/keyrings/%s.gpg] %s/apt %s \
-           main' | sudo tee /etc/apt/sources.list.d/%s.list@."
+          "echo 'deb [signed-by=/usr/share/keyrings/%s.gpg] %s/apt %s main' | \
+           sudo tee /etc/apt/sources.list.d/%s.list@."
           s.package cfg.baseurl cn s.package)
       (unique_codenames deb_targets);
     Fmt.pf ppf "sudo apt update && sudo apt install %s@.```@.@." s.package
@@ -195,11 +198,10 @@ let install_md cfg (s : Spec.t) ~targets =
     Fmt.pf ppf "## Fedora@.@.";
     List.iter
       (fun (t : Target.t) ->
-        Fmt.pf ppf "`/etc/yum.repos.d/%s.repo` (%s):@.@.```sh@." s.package
-          t.tag;
+        Fmt.pf ppf "`/etc/yum.repos.d/%s.repo` (%s):@.@.```sh@." s.package t.tag;
         Fmt.pf ppf
-          "sudo rpm --import %s/rpm/%s/%s@.sudo tee \
-           /etc/yum.repos.d/%s.repo >/dev/null <<'EOF'@."
+          "sudo rpm --import %s/rpm/%s/%s@.sudo tee /etc/yum.repos.d/%s.repo \
+           >/dev/null <<'EOF'@."
           cfg.baseurl t.tag cfg.pubkey_filename s.package;
         Buffer.add_string buf (dnf_repo_file cfg t ~pkg:s.package);
         Fmt.pf ppf "EOF@.sudo dnf install %s@.```@.@." s.package)

@@ -3,11 +3,7 @@
     Pure string / {!Dockerfile.t} emitters — same shape as {!Deb}. *)
 
 val spec :
-  Spec.t ->
-  Target.t ->
-  overlay_depexts:string list ->
-  date_rpm:string ->
-  string
+  Spec.t -> Target.t -> overlay_depexts:string list -> date_rpm:string -> string
 (** [spec] renders the RPM specfile. [date_rpm] is the [%%changelog] entry's
     date in the rpm-conventional form ([Wed May 21 2026]). *)
 

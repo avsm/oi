@@ -36,7 +36,11 @@ let copy_file ~src ~dst =
       loop ()
     end
   in
-  Fun.protect ~finally:(fun () -> close_in ic; close_out oc) loop
+  Fun.protect
+    ~finally:(fun () ->
+      close_in ic;
+      close_out oc)
+    loop
 
 let render_dockerfile path df =
   write_file ~path (Dockerfile.string_of_t df) ~mode:0o644
@@ -49,8 +53,18 @@ let now_rfc2822 () =
   let day_name = [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |] in
   let mon_name =
     [|
-      "Jan"; "Feb"; "Mar"; "Apr"; "May"; "Jun"; "Jul"; "Aug"; "Sep"; "Oct";
-      "Nov"; "Dec";
+      "Jan";
+      "Feb";
+      "Mar";
+      "Apr";
+      "May";
+      "Jun";
+      "Jul";
+      "Aug";
+      "Sep";
+      "Oct";
+      "Nov";
+      "Dec";
     |]
   in
   Fmt.str "%s, %02d %s %04d %02d:%02d:%02d +0000" day_name.(tm.tm_wday)
@@ -62,8 +76,18 @@ let now_rpm () =
   let day_name = [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |] in
   let mon_name =
     [|
-      "Jan"; "Feb"; "Mar"; "Apr"; "May"; "Jun"; "Jul"; "Aug"; "Sep"; "Oct";
-      "Nov"; "Dec";
+      "Jan";
+      "Feb";
+      "Mar";
+      "Apr";
+      "May";
+      "Jun";
+      "Jul";
+      "Aug";
+      "Sep";
+      "Oct";
+      "Nov";
+      "Dec";
     |]
   in
   Fmt.str "%s %s %02d %04d" day_name.(tm.tm_wday) mon_name.(tm.tm_mon)
@@ -95,29 +119,25 @@ let materialise_target ~out ~bundle_tarball ~(spec : Osdist.Spec.t)
      to leave in place. ENOENT used to be swallowed here, which silently
      stranded the bundle outside the target dir; now we always fall back
      to [copy_file] (it [mkdir_p]s the parent first). *)
-  (try Unix.link bundle_tarball bundle_in_dir
-   with
-   | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-   | Unix.Unix_error _ -> copy_file ~src:bundle_tarball ~dst:bundle_in_dir);
+  (try Unix.link bundle_tarball bundle_in_dir with
+  | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  | Unix.Unix_error _ -> copy_file ~src:bundle_tarball ~dst:bundle_in_dir);
   match t.family with
   | Osdist.Target.Deb ->
       let df = Osdist.Deb.dockerfile spec t ~overlay_depexts:depexts in
       render_dockerfile (dir / "Dockerfile") df;
       let deb_dir = dir / "debian" in
       mkdir_p deb_dir;
-      write_file
-        ~path:(deb_dir / "control")
+      write_file ~path:(deb_dir / "control")
         (Osdist.Deb.control spec t ~overlay_depexts:depexts)
         ~mode:0o644;
-      write_file ~path:(deb_dir / "rules") (Osdist.Deb.rules spec t)
-        ~mode:0o755;
-      write_file
-        ~path:(deb_dir / "changelog")
+      write_file ~path:(deb_dir / "rules") (Osdist.Deb.rules spec t) ~mode:0o755;
+      write_file ~path:(deb_dir / "changelog")
         (Osdist.Deb.changelog spec t ~date_rfc2822:rfc2822)
         ~mode:0o644;
-      write_file
-        ~path:(deb_dir / "copyright")
-        (Osdist.Deb.copyright spec) ~mode:0o644;
+      write_file ~path:(deb_dir / "copyright")
+        (Osdist.Deb.copyright spec)
+        ~mode:0o644;
       mkdir_p (deb_dir / "source");
       write_file
         ~path:(deb_dir / "source" / "format")
@@ -130,10 +150,11 @@ let materialise_target ~out ~bundle_tarball ~(spec : Osdist.Spec.t)
         (Osdist.Rpm.spec spec t ~overlay_depexts:depexts ~date_rpm:rpm_date)
         ~mode:0o644
   | Osdist.Target.Static ->
-      let df = Osdist.Alpine_static.dockerfile ~overlay_depexts:depexts spec t in
+      let df =
+        Osdist.Alpine_static.dockerfile ~overlay_depexts:depexts spec t
+      in
       render_dockerfile (dir / "Dockerfile") df;
-      write_file
-        ~path:(dir / "build.sh")
+      write_file ~path:(dir / "build.sh")
         (Osdist.Alpine_static.build_sh spec t)
         ~mode:0o755
 
@@ -282,8 +303,8 @@ let cmd_run_inherit ~sys argv =
 
 let pkg_run (c : Terms.common) refresh registry use_registry with_repos
     with_deps _jobs toolchain_override pkg_name version_override epoch
-    maintainer homepage license prefix distros_str cli_targets build_flag
-    output =
+    maintainer homepage license prefix distros_str cli_targets build_flag output
+    =
   if output = "" then
     Oi.Error.fail_config_error "oi dist pkg: -o DIR is required";
   let output = absolutize output in
@@ -321,14 +342,15 @@ let pkg_run (c : Terms.common) refresh registry use_registry with_repos
          [opam] UID 1000 for static). *)
       let art_dir = artefacts_root / t.Osdist.Target.tag in
       mkdir_p art_dir;
-      (try Unix.chmod art_dir 0o777 with Unix.Unix_error _ -> ()))
+      try Unix.chmod art_dir 0o777 with Unix.Unix_error _ -> ())
     targets;
   let top = output / "build.sh" in
   let compose = output / "compose.yaml" in
   write_file ~path:top (top_level_build_sh ~targets) ~mode:0o755;
   write_file ~path:compose (compose_yaml ~spec ~targets) ~mode:0o644;
   Oi.Say.ok "wrote %s" output;
-  Oi.Say.info "  parallel (compose):     docker compose -f %s up --build" compose;
+  Oi.Say.info "  parallel (compose):     docker compose -f %s up --build"
+    compose;
   Oi.Say.info "  sequential (resilient): %s" top;
   (* Stage 3 (optional): drive [docker compose up --build] for parallel
      build + extract. Project-name keyed on the package so multiple
@@ -356,11 +378,15 @@ let pkg_man =
        project's root opam package is used.";
     `S "OUTPUT LAYOUT";
     `Pre
-      "  DIR/bundle/<pkg>-<ver>.tar.gz       source tarball + .sha256 + .osdist.json\n\
-      \  DIR/<tag>/                          per-target Dockerfile + debian/ or .spec\n\
-      \  DIR/artefacts/<tag>/                .deb / .rpm / static tarball (filled by --build)\n\
+      "  DIR/bundle/<pkg>-<ver>.tar.gz       source tarball + .sha256 + \
+       .osdist.json\n\
+      \  DIR/<tag>/                          per-target Dockerfile + debian/ \
+       or .spec\n\
+      \  DIR/artefacts/<tag>/                .deb / .rpm / static tarball \
+       (filled by --build)\n\
       \  DIR/compose.yaml                    docker compose up --build driver\n\
-      \  DIR/build.sh                        sequential, per-target-failure-tolerant driver";
+      \  DIR/build.sh                        sequential, \
+       per-target-failure-tolerant driver";
     `S Manpage.s_examples;
     `Pre
       "  oi dist pkg -o ./pkg                       # tree only\n\
@@ -383,8 +409,8 @@ let pkg_cmd =
       value & pos_all string []
       & info ~docv:"TARGET"
           ~doc:
-            "Opam package, or $(b,@HANDLE/PKG) for an overlay. Omit to use \
-             the cwd project's root opam package."
+            "Opam package, or $(b,@HANDLE/PKG) for an overlay. Omit to use the \
+             cwd project's root opam package."
           [])
   in
   let pkg_name =
@@ -410,8 +436,8 @@ let pkg_cmd =
       & opt (some int) None
       & info ~docv:"N"
           ~doc:
-            "Package epoch (deb $(b,N:) prefix / rpm $(b,Epoch:)). Bump when \
-             a new version needs to sort above an earlier release."
+            "Package epoch (deb $(b,N:) prefix / rpm $(b,Epoch:)). Bump when a \
+             new version needs to sort above an earlier release."
           [ "epoch" ])
   in
   let maintainer =
@@ -465,8 +491,9 @@ let pkg_cmd =
   in
   Cmd.v
     (Cmd.info "pkg"
-       ~doc:"Emit source bundle + per-distro packaging tree (and optionally \
-             build the artefacts)"
+       ~doc:
+         "Emit source bundle + per-distro packaging tree (and optionally build \
+          the artefacts)"
        ~man:pkg_man)
     Term.(
       const pkg_run $ Terms.common $ Terms.refresh $ Terms.registry

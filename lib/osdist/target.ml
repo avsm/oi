@@ -1,9 +1,6 @@
 module Distro = Dockerfile_opam.Distro
 
-type family =
-  | Deb
-  | Rpm
-  | Static
+type family = Deb | Rpm | Static
 
 type t = {
   tag : string;
@@ -55,14 +52,12 @@ let make ?codename ?debrev ?rpmrel ?(arch = "x86_64") ?tag ?base_image distro =
   in
   { tag; family; distro; base_image; codename; debrev; rpmrel; arch }
 
-let ubuntu_24_04 =
-  make ~codename:"noble" ~debrev:"1~noble1" (`Ubuntu `V24_04)
+let ubuntu_24_04 = make ~codename:"noble" ~debrev:"1~noble1" (`Ubuntu `V24_04)
 
 let ubuntu_26_04 =
   make ~codename:"resolute" ~debrev:"1~resolute1" (`Ubuntu `V26_04)
 
 let debian_13 = make ~codename:"trixie" ~debrev:"1~deb13" (`Debian `V13)
-
 let fedora_44 = make ~rpmrel:"1" (`Fedora `V44)
 
 (* The static target is the one place that diverges from the auto-derived
@@ -89,8 +84,7 @@ let of_tag s = List.find_opt (fun t -> t.tag = s) default_targets
 
 let parse_list s =
   let toks =
-    String.split_on_char ',' s
-    |> List.map String.trim
+    String.split_on_char ',' s |> List.map String.trim
     |> List.filter (fun x -> x <> "")
   in
   let resolved = List.filter_map of_tag toks in

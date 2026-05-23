@@ -39,7 +39,9 @@ let test_default_targets () =
   in
   Alcotest.(check (list string))
     "default tags"
-    [ "ubuntu-24.04"; "ubuntu-26.04"; "debian-13"; "fedora-44"; "alpine-static" ]
+    [
+      "ubuntu-24.04"; "ubuntu-26.04"; "debian-13"; "fedora-44"; "alpine-static";
+    ]
     tags
 
 let test_of_tag () =
@@ -76,7 +78,9 @@ let test_sidecar_roundtrip () =
         List.sort (fun (a, _) (b, _) -> String.compare a b) xs
       in
       Alcotest.(check (list (pair string (list string))))
-        "depexts" (sort_pairs sample_spec.depexts) (sort_pairs r.depexts);
+        "depexts"
+        (sort_pairs sample_spec.depexts)
+        (sort_pairs r.depexts);
       Sys.remove path
 
 (* -- Sidecar path convention ------------------------------------------- *)
@@ -97,12 +101,13 @@ let test_deb_control () =
       ~overlay_depexts:[ "libgmp-dev"; "libsqlite3-dev" ]
   in
   Alcotest.(check bool) "carries source" true (contains ~needle:"Source: oi" s);
+  Alcotest.(check bool) "carries depexts" true (contains ~needle:"libgmp-dev" s);
   Alcotest.(check bool)
-    "carries depexts" true (contains ~needle:"libgmp-dev" s);
+    "carries debhelper" true
+    (contains ~needle:"debhelper-compat (= 13)" s);
   Alcotest.(check bool)
-    "carries debhelper" true (contains ~needle:"debhelper-compat (= 13)" s);
-  Alcotest.(check bool)
-    "homepage present" true (contains ~needle:"Homepage: https://" s)
+    "homepage present" true
+    (contains ~needle:"Homepage: https://" s)
 
 let test_deb_rules_dollar_at () =
   (* Regression: Fmt.str (via Format) treats [@] as a control character
@@ -111,9 +116,11 @@ let test_deb_rules_dollar_at () =
      sequence $". Pin the emitted file to contain the literal [dh $@]. *)
   let r = Osdist.Deb.rules sample_spec Osdist.Target.debian_13 in
   Alcotest.(check bool) "dh \\$@ preserved" true (contains ~needle:"dh $@" r);
-  Alcotest.(check bool) "build.sh build" true
+  Alcotest.(check bool)
+    "build.sh build" true
     (contains ~needle:"./build.sh build" r);
-  Alcotest.(check bool) "build.sh install" true
+  Alcotest.(check bool)
+    "build.sh install" true
     (contains ~needle:"./build.sh install /usr" r)
 
 let test_deb_changelog_epoch () =
@@ -122,7 +129,8 @@ let test_deb_changelog_epoch () =
       ~date_rfc2822:"Wed, 21 May 2026 00:00:00 +0000"
   in
   Alcotest.(check bool)
-    "epoch prefix" true (contains ~needle:"oi (1:0.13.5-1~resolute1)" s);
+    "epoch prefix" true
+    (contains ~needle:"oi (1:0.13.5-1~resolute1)" s);
   Alcotest.(check bool) "codename" true (contains ~needle:"resolute" s)
 
 let test_deb_dockerfile () =
@@ -142,7 +150,8 @@ let test_deb_dockerfile () =
     "writes /artefacts" true
     (contains ~needle:"/artefacts/" s);
   Alcotest.(check bool)
-    "no final scratch" false (contains ~needle:"FROM scratch" s)
+    "no final scratch" false
+    (contains ~needle:"FROM scratch" s)
 
 let test_deb_filename () =
   let s = Osdist.Deb.filename sample_spec Osdist.Target.ubuntu_26_04 in
@@ -157,11 +166,15 @@ let test_rpm_spec () =
       ~date_rpm:"Wed May 21 2026"
   in
   Alcotest.(check bool) "name" true (contains ~needle:"Name:           oi" s);
-  Alcotest.(check bool) "epoch tag" true (contains ~needle:"Epoch:          1" s);
   Alcotest.(check bool)
-    "buildrequires" true (contains ~needle:"BuildRequires:  sqlite-devel" s);
+    "epoch tag" true
+    (contains ~needle:"Epoch:          1" s);
   Alcotest.(check bool)
-    "autosetup" true (contains ~needle:"%autosetup -n oi-0.13.5" s)
+    "buildrequires" true
+    (contains ~needle:"BuildRequires:  sqlite-devel" s);
+  Alcotest.(check bool)
+    "autosetup" true
+    (contains ~needle:"%autosetup -n oi-0.13.5" s)
 
 let test_rpm_filename () =
   let s = Osdist.Rpm.filename sample_spec Osdist.Target.fedora_44 in
@@ -170,7 +183,9 @@ let test_rpm_filename () =
 (* -- Alpine static ----------------------------------------------------- *)
 
 let test_alpine_static () =
-  let df = Osdist.Alpine_static.dockerfile sample_spec Osdist.Target.alpine_static in
+  let df =
+    Osdist.Alpine_static.dockerfile sample_spec Osdist.Target.alpine_static
+  in
   let s = Dockerfile.string_of_t df in
   Alcotest.(check bool) "musl base" true (contains ~needle:"alpine-3.22" s);
   Alcotest.(check bool) "OI_STATIC" true (contains ~needle:"OI_STATIC" s);
@@ -188,7 +203,8 @@ let test_alpine_static () =
      time and writes the tarball straight into the bind-mounted
      /artefacts. *)
   Alcotest.(check bool)
-    "no final scratch" false (contains ~needle:"FROM scratch" s);
+    "no final scratch" false
+    (contains ~needle:"FROM scratch" s);
   Alcotest.(check bool)
     "tarball into /artefacts" true
     (contains ~needle:"/artefacts/oi-0.13.5-linux-x86_64-static.tar.gz" s);
@@ -208,7 +224,8 @@ let test_alpine_static_overlay_depexts () =
     "linux-headers on apk line" true
     (contains ~needle:"linux-headers" s);
   Alcotest.(check bool)
-    "libffi-dev on apk line" true (contains ~needle:"libffi-dev" s)
+    "libffi-dev on apk line" true
+    (contains ~needle:"libffi-dev" s)
 
 (* -- Repo index -------------------------------------------------------- *)
 
@@ -233,13 +250,17 @@ let test_apt_distributions () =
         ]
   in
   Alcotest.(check bool)
-    "carries noble" true (contains ~needle:"Codename: noble" s);
+    "carries noble" true
+    (contains ~needle:"Codename: noble" s);
   Alcotest.(check bool)
-    "carries resolute" true (contains ~needle:"Codename: resolute" s);
+    "carries resolute" true
+    (contains ~needle:"Codename: resolute" s);
   Alcotest.(check bool)
-    "carries trixie" true (contains ~needle:"Codename: trixie" s);
+    "carries trixie" true
+    (contains ~needle:"Codename: trixie" s);
   Alcotest.(check bool)
-    "SignWith key" true (contains ~needle:"SignWith: 0xDEADBEEF" s)
+    "SignWith key" true
+    (contains ~needle:"SignWith: 0xDEADBEEF" s)
 
 (* -- GPG signing key auto-detection ------------------------------------ *)
 
@@ -266,7 +287,9 @@ let gpg_listing_rsa_then_ed25519 =
    uid:u::::1700000000::HASH::New ED <ed@example.org>::::::::::0:\n"
 
 let test_gpg_pick_ed25519 () =
-  let keys = Oi_cmd.Osdist_repo.parse_signing_keys gpg_listing_rsa_then_ed25519 in
+  let keys =
+    Oi_cmd.Osdist_repo.parse_signing_keys gpg_listing_rsa_then_ed25519
+  in
   Alcotest.(check int) "two keys parsed" 2 (List.length keys);
   match Oi_cmd.Osdist_repo.pick_signing_key keys with
   | None -> Alcotest.fail "expected an ed25519 key to be picked"
@@ -275,7 +298,8 @@ let test_gpg_pick_ed25519 () =
         "picks ed25519 fingerprint" "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
         k.fingerprint;
       Alcotest.(check bool)
-        "curves include ed25519" true (List.mem "ed25519" k.curves)
+        "curves include ed25519" true
+        (List.mem "ed25519" k.curves)
 
 (* Real-world layout: a cert-only RSA primary with an Ed25519 sign
    subkey. The primary's caps include uppercase [S] (aggregated from
@@ -295,14 +319,14 @@ let test_gpg_subkey_signing () =
     Oi_cmd.Osdist_repo.parse_signing_keys gpg_listing_cert_primary_sign_subkey
   in
   match keys with
-  | [ k ] ->
+  | [ k ] -> (
       Alcotest.(check string)
-        "uses primary fingerprint"
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" k.fingerprint;
+        "uses primary fingerprint" "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+        k.fingerprint;
       Alcotest.(check bool)
         "subkey ed25519 curve folded in" true
         (List.mem "ed25519" k.curves);
-      (match Oi_cmd.Osdist_repo.pick_signing_key keys with
+      match Oi_cmd.Osdist_repo.pick_signing_key keys with
       | Some pk when pk.fingerprint = k.fingerprint -> ()
       | _ -> Alcotest.fail "should pick the cert+ed25519-subkey key")
   | _ -> Alcotest.failf "expected 1 key, got %d" (List.length keys)
@@ -322,14 +346,15 @@ let test_gpg_skip_expired () =
   match Oi_cmd.Osdist_repo.pick_signing_key keys with
   | Some k ->
       Alcotest.(check string)
-        "picks the non-expired RSA"
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" k.fingerprint
+        "picks the non-expired RSA" "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+        k.fingerprint
   | None -> Alcotest.fail "expected the surviving key to be picked"
 
 let test_gpg_empty () =
   let keys = Oi_cmd.Osdist_repo.parse_signing_keys "" in
   Alcotest.(check int) "no keys" 0 (List.length keys);
-  Alcotest.(check bool) "nothing to pick" true
+  Alcotest.(check bool)
+    "nothing to pick" true
     (Oi_cmd.Osdist_repo.pick_signing_key keys = None)
 
 (* -- suite ------------------------------------------------------------- *)
@@ -343,7 +368,8 @@ let suite =
       Alcotest.test_case "sidecar round-trip" `Quick test_sidecar_roundtrip;
       Alcotest.test_case "sidecar_path" `Quick test_sidecar_path;
       Alcotest.test_case "deb control" `Quick test_deb_control;
-      Alcotest.test_case "deb rules $@ preserved" `Quick test_deb_rules_dollar_at;
+      Alcotest.test_case "deb rules $@ preserved" `Quick
+        test_deb_rules_dollar_at;
       Alcotest.test_case "deb changelog" `Quick test_deb_changelog_epoch;
       Alcotest.test_case "deb dockerfile" `Quick test_deb_dockerfile;
       Alcotest.test_case "deb filename" `Quick test_deb_filename;
@@ -357,8 +383,7 @@ let suite =
         test_gpg_pick_ed25519;
       Alcotest.test_case "gpg keys: cert-only primary + sign subkey" `Quick
         test_gpg_subkey_signing;
-      Alcotest.test_case "gpg keys: skip expired" `Quick
-        test_gpg_skip_expired;
+      Alcotest.test_case "gpg keys: skip expired" `Quick test_gpg_skip_expired;
       Alcotest.test_case "gpg keys: empty keyring picks nothing" `Quick
         test_gpg_empty;
     ] )

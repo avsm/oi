@@ -13,9 +13,23 @@ let epoch_evr (s : Spec.t) =
 (* Base toolchain for an rpm-family build. *)
 let base_build_depexts =
   [
-    "gcc"; "gcc-c++"; "make"; "m4"; "perl-interpreter"; "pkgconf-pkg-config";
-    "patch"; "rsync"; "tar"; "gzip"; "bzip2"; "xz"; "zstd";
-    "git"; "curl"; "ca-certificates"; "ocaml";
+    "gcc";
+    "gcc-c++";
+    "make";
+    "m4";
+    "perl-interpreter";
+    "pkgconf-pkg-config";
+    "patch";
+    "rsync";
+    "tar";
+    "gzip";
+    "bzip2";
+    "xz";
+    "zstd";
+    "git";
+    "curl";
+    "ca-certificates";
+    "ocaml";
   ]
 
 (* Tools to drive rpmbuild itself. *)
@@ -30,7 +44,9 @@ let dist_macro (t : Target.t) =
   (* [%{?dist}] on [Release:] expands at rpmbuild time to the chroot's
      own [%dist] value (e.g. [.fc44]), so we just need to emit it for
      rpm-family targets — no per-distro hardcoding required. *)
-  match t.family with Target.Rpm -> "%{?dist}" | _ -> ""
+  match t.family with
+  | Target.Rpm -> "%{?dist}"
+  | _ -> ""
 
 (* Per-distro [.fcN] / [.elN] suffix derived from
    [Distro.tag_of_distro] (e.g. ["fedora-44"] -> [".fc44"],
@@ -42,10 +58,10 @@ let dist_filename_suffix (t : Target.t) =
       let tag = Dockerfile_opam.Distro.tag_of_distro t.distro in
       match String.index_opt tag '-' with
       | None -> ""
-      | Some i ->
+      | Some i -> (
           let name = String.sub tag 0 i in
           let version = String.sub tag (i + 1) (String.length tag - i - 1) in
-          (match name with
+          match name with
           | "fedora" -> Fmt.str ".fc%s" version
           | "centos" | "oraclelinux" | "rhel" -> Fmt.str ".el%s" version
           | _ -> ""))
@@ -77,7 +93,8 @@ let spec (s : Spec.t) (t : Target.t) ~overlay_depexts ~date_rpm =
      URL:            %s\n\
      Source0:        %s-%s.tar.gz\n\
      ExclusiveArch:  %s aarch64\n\n\
-     %s\n%s\n\n\
+     %s\n\
+     %s\n\n\
      %%description\n\
      %s\n\n\
      %%prep\n\
@@ -123,22 +140,25 @@ let dockerfile (s : Spec.t) (t : Target.t) ~overlay_depexts =
   (* /artefacts is the volume mountpoint; [0777] so the runtime [cp]
      from [builder] succeeds regardless of the host bind-mount owner. *)
   @@ DF.run "mkdir -p /artefacts && chmod 0777 /artefacts"
-  @@ DF.user "builder"
-  @@ DF.workdir "/home/builder"
+  @@ DF.user "builder" @@ DF.workdir "/home/builder"
   @@ DF.run "rpmdev-setuptree"
   @@ DF.copy ~chown:"builder:builder"
        ~src:[ Fmt.str "%s-%s.tar.gz" s.package s.version ]
-       ~dst:(Fmt.str "/home/builder/rpmbuild/SOURCES/%s-%s.tar.gz"
-               s.package s.version)
+       ~dst:
+         (Fmt.str "/home/builder/rpmbuild/SOURCES/%s-%s.tar.gz" s.package
+            s.version)
        ()
   @@ DF.copy ~chown:"builder:builder"
        ~src:[ Fmt.str "%s.spec" s.package ]
        ~dst:(Fmt.str "/home/builder/rpmbuild/SPECS/%s.spec" s.package)
        ()
   @@ DF.cmd_exec
-       [ "sh"; "-c";
+       [
+         "sh";
+         "-c";
          Fmt.str
-           "set -eu; rpmbuild -bb --define \"_topdir \
-            /home/builder/rpmbuild\" rpmbuild/SPECS/%s.spec && cp \
-            /home/builder/rpmbuild/RPMS/%s/*.rpm /artefacts/"
-           s.package t.arch ]
+           "set -eu; rpmbuild -bb --define \"_topdir /home/builder/rpmbuild\" \
+            rpmbuild/SPECS/%s.spec && cp /home/builder/rpmbuild/RPMS/%s/*.rpm \
+            /artefacts/"
+           s.package t.arch;
+       ]

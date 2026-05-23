@@ -15,7 +15,7 @@ val run_makefile :
   output:string ->
   unit
 (** [run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
-    ~with_deps ~toolchain_override ~targets ~output] solves the requested
+     ~with_deps ~toolchain_override ~targets ~output] solves the requested
     target (or the cwd project, when [targets = []]), runs a validating
-    [oi build], and emits a portable Makefile + per-distro Dockerfiles
-    into [output]. *)
+    [oi build], and emits a portable Makefile + per-distro Dockerfiles into
+    [output]. *)

@@ -102,8 +102,7 @@ let compute_depexts ~harness ~refresh : (string * string list) list =
   in
   List.map
     (fun (d, l) ->
-      ( Dockerfile_opam.Distro.tag_of_distro d,
-        List.sort_uniq String.compare l ))
+      (Dockerfile_opam.Distro.tag_of_distro d, List.sort_uniq String.compare l))
     raw
 
 (* Coerce a resolved opam version into a packaging-friendly form. Both
@@ -189,13 +188,13 @@ let resolved_node ~plan_path ~name : D10ir.Plan.node option =
       let s = In_channel.with_open_text plan_path In_channel.input_all in
       match D10ir.Plan.of_string s with
       | Error _ -> None
-      | Ok plan ->
+      | Ok plan -> (
           let nodes = plan.D10ir.Plan.nodes in
           let by_name (n : D10ir.Plan.node) = n.package.name = name in
           let is_root (n : D10ir.Plan.node) =
             List.mem n.layer_hash plan.D10ir.Plan.roots
           in
-          (match List.find_opt (fun n -> is_root n && by_name n) nodes with
+          match List.find_opt (fun n -> is_root n && by_name n) nodes with
           | Some _ as r -> r
           | None -> List.find_opt by_name nodes)
     with Sys_error _ | End_of_file -> None
@@ -239,7 +238,9 @@ let enrich_spec_from_opam (spec : Osdist.Spec.t) ~opam_path =
       spec
   | Ok o ->
       let placeholder_maint = "Maintainer <maintainer@example.org>" in
-      let placeholder_synopsis = Fmt.str "%s — packaged by osdist" spec.package in
+      let placeholder_synopsis =
+        Fmt.str "%s — packaged by osdist" spec.package
+      in
       let placeholder_desc =
         Fmt.str "%s, built and packaged by osdist." spec.package
       in
@@ -291,15 +292,13 @@ let sha256_sidecar ~sys ~tarball =
   let cwd_save = Sys.getcwd () in
   let line =
     Fun.protect
-      ~finally:(fun () ->
-        try Sys.chdir cwd_save with Sys_error _ -> ())
+      ~finally:(fun () -> try Sys.chdir cwd_save with Sys_error _ -> ())
       (fun () ->
         Sys.chdir dir;
         cmd_out ~sys [ "sha256sum"; base ])
   in
   let payload = if String.length line > 0 then line ^ "\n" else "" in
-  Out_channel.with_open_bin out (fun oc ->
-      Out_channel.output_string oc payload);
+  Out_channel.with_open_bin out (fun oc -> Out_channel.output_string oc payload);
   out
 
 (* Apply packaging-policy version normalisation, emitting an info log
@@ -355,12 +354,12 @@ let run_makefile_into_staging ~fs ~harness ~refresh ~registry ~use_registry
   if Sys.file_exists staging_dir then
     Eio.Path.rmtree ~missing_ok:true Eio.Path.(fs / staging_dir);
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / staging_dir);
-  Dist_runner.run_makefile ~harness ~refresh ~registry ~use_registry
-    ~with_repos ~with_deps ~toolchain_override ~targets ~output:staging_dir
+  Dist_runner.run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
+    ~with_deps ~toolchain_override ~targets ~output:staging_dir
 
 let produce ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
-    ~toolchain_override ~targets ~pkg_name ~version ~epoch ~maintainer
-    ~homepage ~license ~prefix ~output =
+    ~toolchain_override ~targets ~pkg_name ~version ~epoch ~maintainer ~homepage
+    ~license ~prefix ~output =
   let { Harness.fs; sys; _ } = harness in
   let spec =
     derive_spec ~fs ~targets ~pkg_name ~version ~epoch ~maintainer ~homepage
@@ -369,7 +368,7 @@ let produce ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
   in
   Oi.Say.step "solving %s" spec.package;
   let bundle_root = output / "bundle" in
-  let staging_dir = bundle_root / spec.package ^ ".staging" in
+  let staging_dir = (bundle_root / spec.package) ^ ".staging" in
   run_makefile_into_staging ~fs ~harness ~refresh ~registry ~use_registry
     ~with_repos ~with_deps ~toolchain_override ~targets ~staging_dir;
   let spec =

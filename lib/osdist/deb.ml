@@ -20,9 +20,23 @@ let epoch_prefix (s : Spec.t) =
    does not depend on [lib/cmd]. *)
 let base_build_depexts =
   [
-    "gcc"; "g++"; "make"; "m4"; "perl"; "pkg-config";
-    "patch"; "rsync"; "tar"; "gzip"; "bzip2"; "xz-utils"; "zstd";
-    "git"; "curl"; "ca-certificates"; "ocaml";
+    "gcc";
+    "g++";
+    "make";
+    "m4";
+    "perl";
+    "pkg-config";
+    "patch";
+    "rsync";
+    "tar";
+    "gzip";
+    "bzip2";
+    "xz-utils";
+    "zstd";
+    "git";
+    "curl";
+    "ca-certificates";
+    "ocaml";
   ]
 
 (* Tools needed to produce a .deb from a source tree. [build-essential]
@@ -59,7 +73,8 @@ let control (s : Spec.t) (t : Target.t) ~overlay_depexts =
      Section: devel\n\
      Priority: optional\n\
      Maintainer: %s\n\
-     Build-Depends:\n %s\n\
+     Build-Depends:\n\
+    \ %s\n\
      Standards-Version: 4.7.0\n\
      %sRules-Requires-Root: no\n\n\
      Package: %s\n\
@@ -70,9 +85,7 @@ let control (s : Spec.t) (t : Target.t) ~overlay_depexts =
     s.package s.maintainer bd homepage_line s.package
     (if s.synopsis = "" then "Packaged by osdist" else s.synopsis)
     (if s.description = "" then " Built for " ^ codename ^ "."
-     else
-       " "
-       ^ String.concat "\n " (String.split_on_char '\n' s.description))
+     else " " ^ String.concat "\n " (String.split_on_char '\n' s.description))
 
 (* -- debian/rules ------------------------------------------------------- *)
 
@@ -151,16 +164,15 @@ let dockerfile (s : Spec.t) (t : Target.t) ~overlay_depexts =
   @@ DF.from t.base_image
   @@ DF.env [ ("DEBIAN_FRONTEND", "noninteractive") ]
   @@ DF.run
-       "apt-get update && apt-get install -y --no-install-recommends %s && \
-        rm -rf /var/lib/apt/lists/*"
+       "apt-get update && apt-get install -y --no-install-recommends %s && rm \
+        -rf /var/lib/apt/lists/*"
        pkgs
   @@ DF.workdir "/work"
   (* Bundle tarball is the upstream .orig: drop it in with the canonical
      "<name>_<ver>.orig.tar.gz" name expected by dpkg-source. *)
   @@ DF.copy
        ~src:[ Fmt.str "%s-%s.tar.gz" s.package s.version ]
-       ~dst:(Fmt.str "/work/%s" orig)
-       ()
+       ~dst:(Fmt.str "/work/%s" orig) ()
   @@ DF.run "tar -xzf %s" orig
   @@ DF.copy ~src:[ "debian" ] ~dst:(Fmt.str "/work/%s/debian" srcdir) ()
   @@ DF.run "chmod 0755 /work/%s/debian/rules" srcdir
@@ -171,5 +183,8 @@ let dockerfile (s : Spec.t) (t : Target.t) ~overlay_depexts =
   @@ DF.run "mkdir -p /artefacts && chmod 0777 /artefacts"
   @@ DF.workdir "/work/%s" srcdir
   @@ DF.cmd_exec
-       [ "sh"; "-c";
-         "set -eu; dpkg-buildpackage -b -uc -us && cp /work/*.deb /artefacts/" ]
+       [
+         "sh";
+         "-c";
+         "set -eu; dpkg-buildpackage -b -uc -us && cp /work/*.deb /artefacts/";
+       ]

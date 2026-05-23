@@ -17,8 +17,8 @@ val parse_signing_keys : string -> signing_key list
 (** [parse_signing_keys output] decodes the colon-format dump produced by
     [gpg --list-secret-keys --with-colons --with-fingerprint] into one
     {!signing_key} per usable, sign-capable secret key (expired / revoked /
-    invalid entries are dropped). Both the primary and any sign-capable
-    subkeys contribute their algo + curve. *)
+    invalid entries are dropped). Both the primary and any sign-capable subkeys
+    contribute their algo + curve. *)
 
 val pick_signing_key : signing_key list -> signing_key option
 (** [pick_signing_key keys] returns the most preferable key for signing repo
