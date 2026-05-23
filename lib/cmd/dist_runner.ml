@@ -154,12 +154,75 @@ let local_root ~sys ~fs ~local_mode ~plan ~bin_roots ~cwd_s ~output :
           {
             Makefile_export.name = "local";
             sha256 = "source";
-            strip = 0;
             script;
             env = last.D10ir.Plan.env;
             prefix = sent;
             deps = bin_roots;
           }
+
+(* Statically explode every buildable node's pre-baked archive into
+   [<output>/sources/<sha>/] so the emitted Makefile has no fetch
+   phase. The cache is content-addressed: same sha => same tree, so we
+   skip if the target dir already looks populated.
+
+   The d10 cache may not have every archive: [oi build] short-circuits
+   on cached layers and never pulls their underlying source. So before
+   unpacking, prefetch any missing [<sha>.tar.zst] from the registry
+   so this command works against a partially-populated cache. *)
+let unpack_sources ~harness ~registry ~(plan : D10ir.Plan.t) ~output =
+  let { Harness.fs; proc_mgr; clock; cache; http_session; _ } = harness in
+  let cache_root = Oi.Cache.root_s cache in
+  let ext = Hashtbl.create 16 in
+  List.iter
+    (fun h -> Hashtbl.replace ext (D10ir.Layer_hash.to_string h) ())
+    plan.external_layers;
+  let buildable =
+    List.filter
+      (fun (n : D10ir.Plan.node) ->
+        not (Hashtbl.mem ext (D10ir.Layer_hash.to_string n.layer_hash)))
+      plan.nodes
+  in
+  let archive_for (n : D10ir.Plan.node) =
+    Filename.concat cache_root
+      (Filename.concat "d10ir" ("archives" / (n.archive.sha256 ^ ".tar.zst")))
+  in
+  let missing =
+    List.filter_map
+      (fun (n : D10ir.Plan.node) ->
+        if Sys.file_exists (archive_for n) then None else Some n.archive.sha256)
+      buildable
+    |> List.sort_uniq compare
+  in
+  (if missing <> [] then
+     let summary =
+       D10ir.Registry.prefetch
+         ~clock:(clock :> _ Eio.Time.clock_ty Eio.Resource.t)
+         ~fs ~session:http_session ~cache_root ~remote:(`Http_remote registry)
+         missing
+     in
+     if summary.missing <> [] then
+       Oi.Error.fail_config_error
+         "oi dist makefile: %d source archive(s) missing locally and not on %s:\n\
+         \  %s\n\
+          Run [oi repo bump] on the overlay to bake them, or point \
+          [--registry] at a registry that publishes them."
+         (List.length summary.missing)
+         registry
+         (String.concat "\n  " summary.missing));
+  let sources_dir = output / "sources" in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / sources_dir);
+  List.iter
+    (fun (n : D10ir.Plan.node) ->
+      let dst = sources_dir / n.archive.sha256 in
+      let populated =
+        match Sys.readdir dst with
+        | entries -> Array.length entries > 0
+        | exception _ -> false
+      in
+      if not populated then
+        D10ir.Direct.unpack_archive ~proc_mgr ~fs ~plan_dir:output
+          ~archive_root:plan.D10ir.Plan.archive_root n ~build_dir:dst)
+    buildable
 
 let coalesce_targets targets : Oi.Build_pipeline.target list =
   let toks, handles, extra =
@@ -249,7 +312,8 @@ let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
       let local =
         local_root ~sys ~fs ~local_mode ~plan ~bin_roots ~cwd_s ~output
       in
-      Makefile_export.emit plan ~output ~registry ~binaries ~bin_roots ?local ();
+      unpack_sources ~harness ~registry ~plan ~output;
+      Makefile_export.emit plan ~output ~binaries ~bin_roots ?local ();
       if binaries <> [] then
         Oi.Say.field "binaries" "%s" (String.concat " " binaries);
       emit_dockerfiles ~harness ~refresh ~output

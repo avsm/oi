@@ -67,8 +67,7 @@ let sample () =
 
 let test_emit () =
   let out = Helpers.fresh_dir ~prefix:"mk" () in
-  Oi_cmd.Makefile_export.emit (sample ()) ~output:out
-    ~registry:"https://example.test" ();
+  Oi_cmd.Makefile_export.emit (sample ()) ~output:out ();
   let mk = read (out / "Makefile") in
   (* External toolchain layer filtered everywhere. *)
   Alcotest.(check bool)
@@ -77,21 +76,29 @@ let test_emit () =
   Alcotest.(check bool)
     "no rule for external tc" false
     (contains ~needle:"/.stamp/layer/tcHASH:" mk);
+  (* Layer-hash-keyed stamp rule with dep stamp, no fetch dependency. *)
   Alcotest.(check bool)
-    "root rule present" true
-    (contains ~needle:"$(SRC)/.stamp/layer/rootHASH: $(SRC)/.stamp/fetch/bb22"
-       mk);
+    "root rule depends only on layer stamps" true
+    (contains
+       ~needle:"$(SRC)/.stamp/layer/rootHASH: $(SRC)/.stamp/layer/depHASH" mk);
+  Alcotest.(check bool)
+    "no fetch rule emitted" false
+    (contains ~needle:".stamp/fetch/" mk);
+  Alcotest.(check bool)
+    "no REGISTRY variable" false
+    (contains ~needle:"REGISTRY" mk);
+  Alcotest.(check bool) "no curl command" false (contains ~needle:"curl" mk);
+  Alcotest.(check bool)
+    "no ARCHIVES variable" false
+    (contains ~needle:"ARCHIVES" mk);
   Alcotest.(check bool)
     "scratch dir is src/ not dist/" true
     (contains ~needle:"SRC       := src\n" mk
     && not (contains ~needle:"$(DIST)" mk));
-  (* Transitive staging arg list passed to the builder: dep, not tc. *)
+  (* Builder invocation: layer hash, archive sha, transitive deps. *)
   Alcotest.(check bool)
     "root stages dep" true
-    (contains ~needle:"./oi-build-node.sh rootHASH bb22 1 depHASH" mk);
-  Alcotest.(check bool)
-    "registry threaded" true
-    (contains ~needle:"REGISTRY ?= https://example.test" mk);
+    (contains ~needle:"./oi-build-node.sh rootHASH bb22 depHASH" mk);
   (* Sidecars. *)
   Alcotest.(check string)
     "root script" "make install"
@@ -124,7 +131,7 @@ let test_missing_archive_is_fatal () =
        "oi dist makefile: 1 package(s) have no pre-baked source archive (need \
         x-d10-archive): bad.1.0. Run `oi repo bump` to bake them, or drop them \
         from the target set.") (fun () ->
-      Oi_cmd.Makefile_export.emit p ~output:out ~registry:"r" ())
+      Oi_cmd.Makefile_export.emit p ~output:out ())
 
 let suite =
   ( "makefile_export",

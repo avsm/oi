@@ -99,6 +99,20 @@ type result = {
           when [failed = 0]. *)
 }
 
+val unpack_archive :
+  proc_mgr:_ Eio.Process.mgr ->
+  fs:Eio.Fs.dir_ty Eio.Path.t ->
+  plan_dir:string ->
+  archive_root:string ->
+  Plan.node ->
+  build_dir:string ->
+  unit
+(** [unpack_archive ~proc_mgr ~fs ~plan_dir ~archive_root n ~build_dir] wipes
+    [build_dir], recreates it, and extracts [n]'s archive into it
+    ([tar -x --strip-components=n.archive.strip_components]). The archive path
+    is resolved relative to [plan_dir]/[archive_root] when not absolute. Raises
+    if the archive file is missing. *)
+
 val run :
   config:Config.t ->
   d10:D10.Config.t ->

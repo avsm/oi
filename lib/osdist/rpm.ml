@@ -103,8 +103,8 @@ let spec (s : Spec.t) (t : Target.t) ~overlay_depexts ~date_rpm =
      ./build.sh build %%{?_smp_build_ncpus}%%{!?_smp_build_ncpus:$(nproc)}\n\n\
      %%install\n\
      ./build.sh install %s %%{buildroot}\n\
-     ( cd %%{buildroot} && find . \\( -type f -o -type l \\) -printf '/%%%%P\\n' ) \
-     > %%{_builddir}/%s.files\n\n\
+     ( cd %%{buildroot} && find . \\( -type f -o -type l \\) -printf \
+     '/%%%%P\\n' ) > %%{_builddir}/%s.files\n\n\
      %%files -f %%{_builddir}/%s.files\n\n\
      %%changelog\n\
      * %s %s - %s%s-%s\n\
