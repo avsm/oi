@@ -10,11 +10,15 @@
     --output type=local,dest=…] to extract the binaries, then tars them into
     {!tarball_filename}. *)
 
-val dockerfile : Spec.t -> Target.t -> Dockerfile.t
-(** [dockerfile s t] is the static-musl multi-stage [Dockerfile.t] for [s]
-    on [t]: an [oi-builder] alpine+ocaml stage that runs the bundle's
-    [build.sh] with [OI_STATIC=1], then a [scratch] final stage carrying
-    just [/bin]. *)
+val dockerfile :
+  ?overlay_depexts:string list -> Spec.t -> Target.t -> Dockerfile.t
+(** [dockerfile ?overlay_depexts s t] is the static-musl multi-stage
+    [Dockerfile.t] for [s] on [t]: an [oi-builder] alpine+ocaml stage that
+    runs the bundle's [build.sh] with [OI_STATIC=1], then a [scratch] final
+    stage carrying just [/bin]. [overlay_depexts] are extra alpine packages
+    (evaluated from the closure's [depexts:] filters against
+    [os-distribution = "alpine"]) to install on top of the bootstrap
+    toolchain. *)
 
 val tarball_filename : Spec.t -> Target.t -> string
 (** [tarball_filename s t] is the basename of the static-binary tarball:

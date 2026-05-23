@@ -17,8 +17,10 @@ type t = {
           ["fedora-44"], ["alpine-static"]. Doubles as the [out/<tag>/]
           subdirectory name and the dnf repo path. *)
   family : family;
-  distro : Dockerfile_opam.Distro.t option;
-      (** [None] for {!Static} (the alpine image is hard-coded). *)
+  distro : Dockerfile_opam.Distro.t;
+      (** The distro whose package manager / depext filters apply. {!Static}
+          pins [`Alpine `V3_22] so alpine-keyed depexts in the bundle
+          sidecar are looked up for the static build. *)
   base_image : string;  (** Docker image used by this target's build stage. *)
   codename : string option;
       (** Debian/Ubuntu series ([noble], [resolute], [trixie]); [None] for
@@ -29,13 +31,32 @@ type t = {
   arch : string;  (** ["x86_64"] currently. *)
 }
 
+val make :
+  ?codename:string ->
+  ?debrev:string ->
+  ?rpmrel:string ->
+  ?arch:string ->
+  ?tag:string ->
+  ?base_image:string ->
+  Dockerfile_opam.Distro.t ->
+  t
+(** [make distro] builds a {!t} for [distro], deriving [tag] from
+    {!Dockerfile_opam.Distro.tag_of_distro}, [family] from the distro's
+    package manager (Apt -> Deb, Yum -> Rpm, Apk -> Static), and
+    [base_image] from {!Dockerfile_opam.Distro.base_distro_tag}. The
+    optional arguments are project-policy fields the upstream library
+    doesn't carry: [codename] and [debrev] for deb targets, [rpmrel]
+    for rpm. [tag] and [base_image] are overridable for unusual targets
+    (notably {!alpine_static}, which keeps the bare ["alpine-static"]
+    tag and uses the [ocaml/opam:alpine-3.22-ocaml-5.4] image). *)
+
 val ubuntu_24_04 : t
 (** [ubuntu_24_04] is the Ubuntu 24.04 (noble) [.deb] target on the
-    [ubuntu:24.04] base image. *)
+    [ubuntu:noble] base image. *)
 
 val ubuntu_26_04 : t
 (** [ubuntu_26_04] is the Ubuntu 26.04 (resolute) [.deb] target on the
-    [ubuntu:26.04] base image. *)
+    [ubuntu:resolute] base image. *)
 
 val debian_13 : t
 (** [debian_13] is the Debian 13 (trixie) [.deb] target on the

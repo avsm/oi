@@ -73,26 +73,36 @@ let cmd =
     Cmd.info "dist"
       ~doc:
         "Emit portable build artefacts (Dockerfiles, obuilder specs, \
-         Makefiles) for a target."
+         Makefiles, .deb/.rpm/static-musl) for a target."
       ~man:
         [
           `S Manpage.s_description;
           `P
             "Generate a self-contained build description for the current \
-             project or a $(b,TARGET):";
-          `I ("$(b,oi dist docker)", "Dockerfiles (project / CI / registry).");
-          `I ("$(b,oi dist obuilder)", "obuilder specs (s-expressions).");
+             project or a $(b,TARGET).";
+          `S "SUBCOMMANDS";
+          `I ("$(b,oi dist docker)",
+              "Per-distro Dockerfiles (project / CI / registry).");
+          `I ("$(b,oi dist obuilder)",
+              "obuilder specs (s-expressions).");
           `I
             ( "$(b,oi dist makefile)",
-              "a portable Makefile (plus per-distro Dockerfiles) that needs no \
-               $(b,oi) at build time." );
+              "Portable Makefile + per-distro Dockerfiles; no $(b,oi) needed \
+               at build time." );
           `I
             ( "$(b,oi dist duniverse)",
-              "vendor a target's sources into a self-contained bundle." );
+              "Vendor a target's sources into a self-contained bundle." );
           `I
-            ( "$(b,oi dist pkg / repo)",
-              "build a source bundle, package it as signed .deb/.rpm + \
-               static-musl binaries, and publish to a repo tree." );
+            ( "$(b,oi dist pkg)",
+              "Emit a source bundle + per-distro packaging tree \
+               (Dockerfiles, $(b,debian/), $(b,.spec)); with $(b,--build) \
+               drives $(b,docker compose up --build) to produce .deb / .rpm \
+               / static-musl artefacts in parallel." );
+          `I
+            ( "$(b,oi dist repo)",
+              "Sign and assemble those artefacts into a published APT / DNF \
+               / static-bin repo, idempotently. Auto-selects an Ed25519 \
+               signing key from your keyring." );
         ]
   in
   Cmd.group info

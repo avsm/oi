@@ -136,6 +136,188 @@ let build_signer_ctx () =
   in
   { uid; gid; home; xdg_runtime }
 
+(* -- GPG key auto-detection -------------------------------------------- *)
+
+(* One signing-capable secret key as reported by [gpg --list-secret-keys
+   --with-colons]. [algos] and [curves] cover the primary + every
+   sign-capable subkey (in [gpg]'s listing order); a cert-only primary
+   with an Ed25519 signing subkey still surfaces "ed25519" here, which
+   matters because gpg picks the right subkey automatically when given
+   the primary fingerprint. *)
+type signing_key = {
+  fingerprint : string;
+  algos : string list;
+  curves : string list;
+  uid : string;
+}
+
+(* Parse [gpg --list-secret-keys --with-colons --with-fingerprint]. Each
+   secret key starts with a [sec:] line followed by its [fpr:],
+   [uid:], and zero-or-more [ssb:] (subkey) records before the next
+   [sec:]. We collect sec records the whole key can sign with ([s] in
+   the primary or [S] aggregated from subkeys, field 12), filter out
+   expired / revoked / disabled / invalid ones (field 2), and fold in
+   the algo / curve of any sign-capable subkey alongside the
+   primary's. *)
+let parse_signing_keys output =
+  let valid_status v = not (List.mem v [ "i"; "d"; "r"; "e" ]) in
+  let signs caps = String.contains caps 's' || String.contains caps 'S' in
+  let lines = String.split_on_char '\n' output in
+  let keys = ref [] in
+  let current = ref None in
+  let flush () =
+    (match !current with
+    | Some k when k.fingerprint <> "" -> keys := k :: !keys
+    | _ -> ());
+    current := None
+  in
+  let field arr i = if i < Array.length arr then arr.(i) else "" in
+  List.iter
+    (fun line ->
+      let f = String.split_on_char ':' line |> Array.of_list in
+      match field f 0 with
+      | "sec" ->
+          flush ();
+          let caps = field f 11 in
+          let status = field f 1 in
+          if valid_status status && signs caps then
+            current :=
+              Some
+                {
+                  fingerprint = "";
+                  algos = [ field f 3 ];
+                  curves = [ field f 16 ];
+                  uid = "";
+                }
+      | "ssb" -> (
+          (* Sign-capable subkey: append its algo + curve so a
+             cert-only primary with an Ed25519 sign subkey scores as
+             ed25519 in [pick_signing_key]. *)
+          match !current with
+          | None -> ()
+          | Some k ->
+              let caps = field f 11 in
+              let status = field f 1 in
+              if valid_status status && signs caps then
+                current :=
+                  Some
+                    {
+                      k with
+                      algos = k.algos @ [ field f 3 ];
+                      curves = k.curves @ [ field f 16 ];
+                    })
+      | "fpr" -> (
+          match !current with
+          | Some k when k.fingerprint = "" ->
+              current := Some { k with fingerprint = field f 9 }
+          | _ -> ())
+      | "uid" -> (
+          match !current with
+          | Some k when k.uid = "" ->
+              current := Some { k with uid = field f 9 }
+          | _ -> ())
+      | _ -> ())
+    lines;
+  flush ();
+  List.rev !keys
+
+(* List the host's signing-capable secret keys via the host gpg. Goes
+   through [D10.Sysops.Cmd.run_out_quiet] so stderr is muzzled (gpg
+   prints "gpg: no secret keys" to stderr if the keyring is empty —
+   not an error). Returns [[]] when gpg isn't installed or the
+   process exits non-zero. *)
+let list_signing_keys ~sys =
+  try
+    parse_signing_keys
+      (D10.Sysops.Cmd.run_out_quiet sys
+         [ "gpg"; "--list-secret-keys"; "--with-colons"; "--with-fingerprint" ])
+  with _ -> []
+
+(* Ed25519 anywhere in the key (primary or subkey) first; otherwise
+   the first sign-capable key gpg returned. *)
+let pick_signing_key keys =
+  match List.find_opt (fun k -> List.mem "ed25519" k.curves) keys with
+  | Some _ as r -> r
+  | None -> List.nth_opt keys 0
+
+let algo_name = function
+  | "1" -> "rsa"
+  | "17" -> "dsa"
+  | "19" -> "ecdsa"
+  | "22" -> "eddsa"
+  | other -> "algo-" ^ other
+
+(* Short label for the auto-selection log line: [ed25519] when it's
+   the primary or any subkey's curve; otherwise the primary's curve
+   (if named) or its algorithm code. *)
+let key_kind k =
+  if List.mem "ed25519" k.curves then "ed25519"
+  else
+    match (k.curves, k.algos) with
+    | c :: _, _ when c <> "" -> c
+    | _, a :: _ -> algo_name a
+    | _ -> "unknown"
+
+let no_key_help =
+  "no GPG signing key found in your keyring.\n\
+  \  Generate one (Ed25519 recommended) with:\n\
+  \    gpg --quick-generate-key 'Your Name <you@example.com>' ed25519 default 1y\n\
+  \  Then re-run; --gpg-key picks it up automatically."
+
+(* Resolve [--gpg-key]: use what the user passed (verbatim), otherwise
+   auto-pick from the host keyring (Ed25519 preferred) and log it.
+   Aborts with generation instructions when neither path yields a
+   usable signing key. *)
+let resolve_gpg_key ~sys cli_key =
+  match cli_key with
+  | Some k when k <> "" -> k
+  | _ -> (
+      match pick_signing_key (list_signing_keys ~sys) with
+      | None -> Oi.Error.fail_config_error "oi dist repo: %s" no_key_help
+      | Some k ->
+          Oi.Say.info "auto-selected gpg key %s (%s, %s)" k.fingerprint
+            (key_kind k) k.uid;
+          k.fingerprint)
+
+(* Force the host gpg-agent to cache the unlocked signing key NOW, by
+   running a throwaway [gpg --sign /dev/null] on the host with
+   [GPG_TTY] pointing at the controlling terminal (resolved via the
+   POSIX [tty] command so the path is correct on Linux and macOS
+   alike; we deliberately don't read [/proc/self/fd/0] since /proc is
+   Linux-only). After this, any [reprepro] / [gpg] call inside the
+   signer container reaches the host agent through the bind-mounted
+   socket and hits the cached key — no pinentry, no "Inappropriate
+   ioctl for device".
+
+   [Sys.command] (rather than [D10.Sysops.Cmd]) so the shell inherits
+   our stdin/stdout/stderr: [tty(1)] reports the device of its stdin,
+   and pinentry-curses takes over the terminal while it prompts. macOS
+   users with [pinentry-mac] get a native dialog instead and don't
+   actually need GPG_TTY, but setting it does no harm there.
+
+   Best-effort: skipped silently when not on a TTY (CI scenarios with
+   passphraseless / pre-cached keys); on failure we surface a warning
+   with the manual recovery command rather than aborting — the actual
+   sign might still succeed via a graphical pinentry. *)
+let prewarm_gpg_agent ~key =
+  if not (Unix.isatty Unix.stdin) then ()
+  else begin
+    Oi.Say.step "pre-unlocking gpg key %s" key;
+    let cmd =
+      Fmt.str
+        "GPG_TTY=$(tty 2>/dev/null) gpg --yes --local-user %s --output \
+         /dev/null --sign /dev/null > /dev/null"
+        (Filename.quote key)
+    in
+    let rc = Sys.command cmd in
+    if rc <> 0 then
+      Oi.Say.warn
+        "pre-unlock failed (rc=%d); container-side signing may still \
+         trip on pinentry. To recover manually run:@\n  \
+         GPG_TTY=$(tty) gpg --local-user %s --sign /dev/null > /dev/null"
+        rc key
+  end
+
 (* Build the signer image once. [docker build] is content-addressed, so a
    second call with the same Dockerfile is essentially free; we still rerun
    it so a Debian point release flows in automatically. *)
@@ -384,37 +566,71 @@ let static_assemble ~into ~pkg_dir ~(spec : Osdist.Spec.t) ~targets =
       static_targets
   end
 
-(* Identify the source bundle hardlinked into one of the per-target dirs;
-   we read its sidecar to recover the Spec. *)
+(* Locate the source bundle [<pkg>-<ver>.tar.gz] whose [.osdist.json]
+   sidecar carries the Spec we need. Canonical location is the
+   [<pkg_dir>/bundle/] dir [oi dist pkg] emits; fall back to the
+   per-target hardlinks (which materialise_target also drops in each
+   [<pkg_dir>/<tag>/] so users can build a single target standalone). *)
+(* The bundle dir hosts both the source tarball and (for alpine
+   targets) per-arch static tarballs named [...-static.tar.gz]. Only
+   the former carries the [.osdist.json] sidecar we need, so filter
+   the static ones out by suffix. *)
+let is_source_bundle path =
+  not (Filename.check_suffix (Filename.basename path) "-static.tar.gz")
+
 let locate_sample_bundle ~pkg_dir =
-  let candidates =
-    Osdist.Target.default_targets
-    |> List.map (fun (t : Osdist.Target.t) -> pkg_dir / t.tag)
-    |> List.filter Sys.file_exists
+  let bundle_dir = pkg_dir / "bundle" in
+  let from_bundle_dir =
+    if Sys.file_exists bundle_dir then
+      files_in ~suffix:".tar.gz" bundle_dir |> List.filter is_source_bundle
+    else []
   in
-  let is_source_bundle path =
-    let b = Filename.basename path in
-    let suffix = "-static.tar.gz" in
-    not
-      (String.length b >= String.length suffix
-       && String.sub b
-            (String.length b - String.length suffix)
-            (String.length suffix)
-          = suffix)
-  in
-  match
-    List.concat_map (fun d -> files_in ~suffix:".tar.gz" d) candidates
-    |> List.filter is_source_bundle
-  with
-  | [] ->
-      Oi.Error.fail_config_error
-        "oi dist repo: no source bundle under %s/<target>/" pkg_dir
+  match from_bundle_dir with
   | b :: _ -> b
+  | [] ->
+      let per_target_candidates =
+        Osdist.Target.default_targets
+        |> List.map (fun (t : Osdist.Target.t) -> pkg_dir / t.tag)
+        |> List.filter Sys.file_exists
+      in
+      (match
+         List.concat_map
+           (fun d -> files_in ~suffix:".tar.gz" d)
+           per_target_candidates
+         |> List.filter is_source_bundle
+       with
+      | b :: _ -> b
+      | [] ->
+          Oi.Error.fail_config_error
+            "oi dist repo: no source bundle under %s/bundle/ or \
+             %s/<target>/. Run `oi dist pkg -o %s` first."
+            pkg_dir pkg_dir pkg_dir)
+
+(* Accept [--pkg-dir] pointing either at the [oi dist pkg -o] output
+   root (the canonical form, containing per-target subdirs + an
+   [artefacts/<tag>/] sibling) or at the [artefacts/] subdir directly
+   — climb one level up in the latter case so [locate_sample_bundle]
+   still finds the source bundle hardlinked into [<pkg_dir>/<tag>/]. *)
+let resolve_pkg_dir pkg_dir =
+  if not (Sys.file_exists pkg_dir) then
+    Oi.Error.fail_config_error
+      "oi dist repo: --pkg-dir not found: %s@\n\
+       Pass the output directory you gave to `oi dist pkg -o DIR` (the \
+       parent of the artefacts/ subdir)." pkg_dir
+  else if not (Sys.is_directory pkg_dir) then
+    Oi.Error.fail_config_error "oi dist repo: --pkg-dir is not a directory: %s"
+      pkg_dir
+  else if Filename.basename pkg_dir = "artefacts"
+          && Sys.file_exists (Filename.dirname pkg_dir / "bundle")
+  then
+    let climbed = Filename.dirname pkg_dir in
+    Oi.Say.info "--pkg-dir points at the artefacts subdir; using %s" climbed;
+    climbed
+  else pkg_dir
 
 let run_body ~sys ~baseurl ~gpg_key ~origin ~label ~description
     ~pubkey_filename ~pkg_dir ~into =
-  if not (Sys.file_exists pkg_dir) then
-    Oi.Error.fail_config_error "oi dist repo: --pkg-dir not found: %s" pkg_dir;
+  let pkg_dir = resolve_pkg_dir pkg_dir in
   mkdir_p into;
   let any_bundle = locate_sample_bundle ~pkg_dir in
   let sidecar = Osdist.Spec.sidecar_path ~bundle_path:any_bundle in
@@ -442,6 +658,7 @@ let run_body ~sys ~baseurl ~gpg_key ~origin ~label ~description
   Oi.Say.step "preparing osdist-signer image";
   ensure_signer_image ~sys;
   let sx = build_signer_ctx () in
+  prewarm_gpg_agent ~key:gpg_key;
   let pubkey = gpg_export_armored ~sys ~sx ~key:gpg_key in
   let targets = Osdist.Target.default_targets in
   apt_assemble ~sys ~sx ~into ~pkg_dir ~spec ~targets ~cfg ~pubkey;
@@ -464,6 +681,7 @@ let repo_run (c : Terms.common) baseurl gpg_key origin label description
   let harness =
     Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env c.cache_dir
   in
+  let gpg_key = resolve_gpg_key ~sys:harness.Harness.sys gpg_key in
   run_body ~sys:harness.Harness.sys ~baseurl ~gpg_key ~origin ~label
     ~description ~pubkey_filename ~pkg_dir ~into
 
@@ -471,31 +689,48 @@ let repo_man =
   [
     `S Manpage.s_description;
     `P
-      "Assemble a signed APT / DNF / static-bin repository from the artefacts \
-       produced by $(b,oi dist pkg --build). Idempotent: re-runs merge new \
-       packages into the existing tree, preserving prior versions in the \
-       indices.";
+      "Sign and publish the artefacts under $(i,PKGDIR)$(b,/artefacts/) \
+       (produced by $(b,oi dist pkg --build)) into $(i,REPO): an APT pool \
+       for .debs, a per-target DNF tree for .rpms, and a $(b,bin/) dir for \
+       static-musl tarballs. Idempotent — re-runs merge new versions into \
+       the existing tree without dropping older ones.";
     `P
-      "All external tools (gpg, rpmsign, reprepro, createrepo_c) run inside \
-       a throwaway $(b,osdist-signer) container that bind-mounts your \
-       $(b,~/.gnupg) and gpg-agent socket — only $(b,docker) needs to be \
-       installed on the host. Built once from an embedded Dockerfile and \
-       cached by docker for subsequent runs.";
+      "$(b,gpg), $(b,rpmsign), $(b,reprepro), and $(b,createrepo_c) all run \
+       inside a throwaway $(b,osdist-signer) container that bind-mounts your \
+       $(b,~/.gnupg) and gpg-agent socket. Only $(b,docker) and $(b,gpg) \
+       need to be on the host.";
+    `S "OUTPUT LAYOUT";
+    `Pre
+      "  REPO/apt/                 reprepro pool + dists/<codename>/Release.gpg + InRelease\n\
+      \  REPO/rpm/<tag>/           signed *.rpm + createrepo_c metadata + repomd.xml.asc\n\
+      \  REPO/bin/                 static tarballs + *.sha256 + <pkg>-latest-*.tar.gz symlink\n\
+      \  REPO/<pkg>.asc            armored gpg pubkey\n\
+      \  REPO/install.sh           one-shot client installer (baseurl baked in)\n\
+      \  REPO/INSTALL.md           copy-paste apt / dnf / curl snippets";
     `S Manpage.s_examples;
     `Pre
-      "  oi dist repo --pkg-dir ./pkg --into ./repo --gpg-key 0xDEADBEEF \
-       --baseurl https://example.org/repo";
+      "  # auto-pick signing key from your keyring:\n\
+      \  oi dist repo --pkg-dir ./pkg --into ./repo --baseurl https://example.org/repo\n\
+      \  # pin a specific gpg key:\n\
+      \  oi dist repo --pkg-dir ./pkg --into ./repo --baseurl https://example.org/repo --gpg-key 0xDEADBEEF";
+    `S "SEE ALSO";
+    `P "$(b,oi dist pkg)(1)";
   ]
 
 let repo_cmd =
   let pkg_dir =
+    (* [string] (not [dir]) so [resolve_pkg_dir] can emit the
+       "pass the dir you gave to oi dist pkg -o" hint when the
+       path is missing; cmdliner's [dir] validator would short-circuit
+       with a generic "no DIR directory" instead. *)
     Arg.(
       required
-      & opt (some dir) None
+      & opt (some string) None
       & info ~docv:"DIR"
           ~doc:
-            "Directory containing $(b,oi dist pkg --build) artefacts (one \
-             $(b,<tag>/artefacts/) subdir per target)."
+            "Output dir from $(b,oi dist pkg -o) (the parent of \
+             $(b,artefacts/); passing $(b,artefacts/) directly is also \
+             tolerated)."
           [ "pkg-dir" ])
   in
   let into =
@@ -508,9 +743,13 @@ let repo_cmd =
   in
   let gpg_key =
     Arg.(
-      required
+      value
       & opt (some string) None
-      & info ~docv:"KEYID" ~doc:"GPG signing key identifier or fingerprint."
+      & info ~docv:"KEYID"
+          ~doc:
+            "GPG fingerprint or key id. Default: auto-pick from the host \
+             keyring (Ed25519 preferred over RSA). Aborts with generation \
+             instructions if no sign-capable secret key is present."
           [ "gpg-key" ])
   in
   let baseurl =
@@ -519,41 +758,42 @@ let repo_cmd =
       & opt (some string) None
       & info ~docv:"URL"
           ~doc:
-            "Public base URL where the repo will be served. Baked into the \
-             generated client snippets and dnf .repo files."
+            "Public base URL the repo will be served from. Baked into \
+             apt sources lists, dnf .repo files, and $(b,install.sh)."
           [ "baseurl" ])
   in
   let origin =
     Arg.(
       value & opt string ""
       & info ~docv:"STR"
-          ~doc:"APT Origin: field (defaults to the package name)." [ "origin" ])
+          ~doc:"APT Origin: field (default: package name)." [ "origin" ])
   in
   let label =
     Arg.(
       value & opt string ""
       & info ~docv:"STR"
-          ~doc:"APT Label: field (defaults to the package name)." [ "label" ])
+          ~doc:"APT Label: field (default: package name)." [ "label" ])
   in
   let description =
     Arg.(
       value & opt string ""
       & info ~docv:"STR"
-          ~doc:"One-line description used in the Release files."
+          ~doc:"One-line Release-file description (default: \
+                $(b,<pkg> package repository))."
           [ "description" ])
   in
   let pubkey_filename =
     Arg.(
       value & opt string ""
       & info ~docv:"NAME"
-          ~doc:
-            "Filename for the armored pubkey under the repo root (default: \
-             $(b,<pkg>.asc))."
+          ~doc:"Filename of the armored pubkey under $(i,REPO) (default: \
+                $(b,<pkg>.asc))."
           [ "pubkey-name" ])
   in
   Cmd.v
     (Cmd.info "repo"
-       ~doc:"Assemble a signed apt/dnf/bin repository from pkg artefacts"
+       ~doc:"Assemble a signed apt / dnf / static-bin repository from \
+             $(b,oi dist pkg) artefacts"
        ~man:repo_man)
     Term.(
       const repo_run $ Terms.common $ baseurl $ gpg_key $ origin $ label

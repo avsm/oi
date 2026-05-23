@@ -80,13 +80,14 @@ let cmd_out ~sys argv =
 
 (* Compute per-distro overlay depexts and key them by
    [Distro.tag_of_distro] so [oi dist pkg]'s materialiser can look them
-   up by Target.tag. The alpine-static target is omitted (it builds
-   inside an Alpine container with the bundled musl toolchain and
-   doesn't consume distro depexts). *)
+   up by Target.tag. The alpine-static target's depexts ride the same
+   probe — its [distro] is pinned to [`Alpine `V3_22] so e.g.
+   [linux-headers] from [uring]'s alpine depexts: stanza lands on the
+   apk install line. *)
 let compute_depexts ~harness ~refresh : (string * string list) list =
   let { Harness.fs; sys; cache; data_dir; platform; _ } = harness in
   let distros =
-    List.filter_map
+    List.map
       (fun (t : Osdist.Target.t) -> t.distro)
       Osdist.Target.default_targets
   in
