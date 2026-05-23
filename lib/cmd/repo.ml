@@ -639,6 +639,14 @@ module Bump = struct
         | _ -> ());
     !restored
 
+  (* Normalise trailing slash off a base URL so [<base>/<sha>] never
+     grows a double slash. Used by the registry probe and the upload
+     callback. *)
+  let strip_trailing_slash u =
+    if String.length u > 0 && u.[String.length u - 1] = '/' then
+      String.sub u 0 (String.length u - 1)
+    else u
+
   (* Walk v2/<handle>/ and fetch+tar every package whose opam still
      lacks x-d10-archive (i.e. wasn't restored from the snapshot).
      Returns (baked, failed) counts. [?on_baked] fires for each
@@ -658,8 +666,23 @@ module Bump = struct
     in
     Sys.file_exists (Filename.concat archives_dir (sha ^ ".json"))
 
-  let bake_changed_archives ?on_baked ~proc_mgr ~fs ~d10 ~cache_root ~platform
-      ~reporepo ~handle () =
+  (* Fall-back for [sidecar_present]: HEAD-probe [<registry>/d10ir-archives/<sha>.tar.zst]
+     and [.json]. Both must be present — the same pair the local gate
+     requires — so an incomplete previous upload (tarball but no
+     sidecar) still triggers a re-bake. Empty [registry] disables the
+     probe; archive content is content-addressed so a 200 at the same
+     key is byte-identical to whatever a fresh bake would produce. *)
+  let published_on_registry ~sys ~registry ~sha =
+    if registry = "" then false
+    else
+      let base = strip_trailing_slash registry ^ "/d10ir-archives" in
+      let tar_url = Fmt.str "%s/%s.tar.zst" base sha in
+      let json_url = Fmt.str "%s/%s.json" base sha in
+      D10.Sysops.Http.head sys ~url:tar_url
+      && D10.Sysops.Http.head sys ~url:json_url
+
+  let bake_changed_archives ?on_baked ~sys ~proc_mgr ~fs ~d10 ~cache_root
+      ~platform ~registry ~reporepo ~handle () =
     let baked = ref 0 in
     let failed = ref 0 in
     iter_handle_opams ~reporepo ~handle
@@ -667,6 +690,11 @@ module Bump = struct
         match read_source_identity_and_sha opam_path with
         | Some (_, Some sha) when sidecar_present ~d10 ~sha ->
             () (* already has x-d10-archive AND a sidecar — nothing to do *)
+        | Some (_, Some sha) when published_on_registry ~sys ~registry ~sha ->
+            Fmt.pr "  %a %s.%s already at %s/d10ir-archives/%s@."
+              Oi.Style.pp_dim_string "on-registry" pkg version
+              (strip_trailing_slash registry)
+              sha
         | _ -> (
             try
               let built =
@@ -781,13 +809,6 @@ module Bump = struct
        caller can decide what to commit with. *)
     entry
 
-  (* Normalise trailing slash off the archives-URL so [<base>/<sha>] never
-     grows a double slash. *)
-  let strip_trailing_slash u =
-    if String.length u > 0 && u.[String.length u - 1] = '/' then
-      String.sub u 0 (String.length u - 1)
-    else u
-
   (* [--upload-archives]: for each fresh bake, [s3cmd put] both the
      [.tar.zst] archive and its sibling [.json] source-manifest sidecar
      so the bucket stays self-describing. Skipping the sidecar (as we
@@ -872,6 +893,7 @@ module Bump = struct
     d10 : D10.Config.t;
     cache_root : string;
     platform : Osrel.t;
+    registry : string;
     reporepo : string;
     no_bake : bool;
     rebake : bool;
@@ -897,10 +919,10 @@ module Bump = struct
     if not ctx.no_bake then begin
       Fmt.pr "Baking x-d10-archive for new or changed sources ...@.";
       let baked, failed =
-        bake_changed_archives ?on_baked:ctx.upload_on_baked
+        bake_changed_archives ?on_baked:ctx.upload_on_baked ~sys:ctx.sys
           ~proc_mgr:ctx.proc_mgr ~fs:ctx.fs ~d10:ctx.d10
           ~cache_root:ctx.cache_root ~platform:ctx.platform
-          ~reporepo:ctx.reporepo ~handle ()
+          ~registry:ctx.registry ~reporepo:ctx.reporepo ~handle ()
       in
       Fmt.pr "  %d baked, %d failed@." baked failed
     end
@@ -1004,6 +1026,7 @@ module Bump = struct
           d10;
           cache_root;
           platform;
+          registry;
           reporepo;
           no_bake;
           rebake;
@@ -1177,8 +1200,8 @@ module Bake = struct
 
   (* Bake every missing archive for a handle, strip files dirs, then
      publish the resulting shas as hardlinks into [to_dir]. *)
-  let bake_one ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~reporepo ~to_dir
-      handle =
+  let bake_one ~sys ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~registry
+      ~reporepo ~to_dir handle =
     let missing = Bump.count_packages_missing_archive ~reporepo ~handle in
     if missing = 0 then
       Fmt.pr "@.%a %s: every package already baked@." Oi.Style.pp_ok_string "✓"
@@ -1187,8 +1210,8 @@ module Bake = struct
       Fmt.pr "@.%a %s: baking %d missing archive(s)...@."
         Oi.Style.pp_info_string "▸" handle missing;
       let baked, failed =
-        Bump.bake_changed_archives ~proc_mgr ~fs ~d10 ~cache_root ~platform
-          ~reporepo ~handle ()
+        Bump.bake_changed_archives ~sys ~proc_mgr ~fs ~d10 ~cache_root ~platform
+          ~registry ~reporepo ~handle ()
       in
       Fmt.pr "  %d baked, %d failed@." baked failed
     end;
@@ -1223,7 +1246,8 @@ module Bake = struct
     else List.iter bake_handle handles
 
   let cmd =
-    let run (c : Terms.common) reporepo reporepo_url handle_opt to_dir =
+    let run (c : Terms.common) registry reporepo reporepo_url handle_opt to_dir
+        =
       Harness.run @@ fun ~sw env ->
       let { Harness.proc_mgr; fs; clock; sys; platform; os_key; cache; _ } =
         Harness.bootstrap ~sw ~data_dir:c.data_dir ~format:c.format env
@@ -1236,8 +1260,8 @@ module Bake = struct
       in
       let cache_root = Oi.Cache.root_s cache in
       let bake_handle h =
-        bake_one ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~reporepo
-          ~to_dir h
+        bake_one ~sys ~proc_mgr ~fs ~d10 ~cache_root ~platform ~cache ~registry
+          ~reporepo ~to_dir h
       in
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 Eio.Path.(fs / to_dir);
       match handle_opt with
@@ -1290,8 +1314,8 @@ module Bake = struct
     in
     Cmd.v info
       Term.(
-        const run $ Terms.common $ reporepo_term $ reporepo_url_term $ handle
-        $ to_dir)
+        const run $ Terms.common $ Terms.registry $ reporepo_term
+        $ reporepo_url_term $ handle $ to_dir)
 end
 
 (* The standalone [oi repo index] (a re-encoder of the local cache into
