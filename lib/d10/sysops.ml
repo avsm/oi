@@ -435,6 +435,26 @@ module Http = struct
     with_http_timeout ~clock:t.clock ~url @@ fun () ->
     Eio.Switch.run (fetch_in_switch ?on_progress t ~url ~dst)
 
+  (* HEAD probe. Same one-shot connection model as [fetch] (no session),
+     same timeout cap, same "never raises, return bool" contract. Used by
+     [oi repo bump --upload-archives] to skip re-uploads of objects
+     already at the public read URL. *)
+  let head_in_switch t ~url sw =
+    try
+      let resp = Requests.One.head ~sw ~clock:t.clock ~net:t.net url in
+      let ok = Requests.Response.ok resp in
+      if not ok then
+        Log.debug (fun m ->
+            m "http HEAD %s: status %d" url (Requests.Response.status_code resp));
+      ok
+    with exn ->
+      Log.debug (fun m -> m "http HEAD %s: %s" url (Printexc.to_string exn));
+      false
+
+  let head t ~url =
+    with_http_timeout ~clock:t.clock ~url @@ fun () ->
+    Eio.Switch.run (head_in_switch t ~url)
+
   (* -- Session-based pooled HTTP -------------------------------------------
 
      [Requests.One.get]/[head] open a fresh TCP+TLS connection per call, so a

@@ -807,18 +807,33 @@ module Bump = struct
   let put_one ~sys ~src ~url =
     D10.Sysops.Cmd.run sys (s3cmd_argv [ "put"; "--quiet"; src; url ])
 
-  let upload_tar ~sys ~pkg ~src ~url =
-    try
-      put_one ~sys ~src ~url;
-      Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded" pkg url
-    with exn ->
-      Fmt.pr "    %a upload %s: %s@." Oi.Style.pp_warn_string "skip" pkg
-        (Printexc.to_string exn)
+  (* Existence probe: HTTP HEAD via the in-process [requests] client
+     against the public-read URL the same archives are served from.
+     One round-trip, no body downloaded, no auth, no subprocess. The
+     filename is the sha256 of the bytes, so a 200 at the same key
+     implies the remote object is byte-identical to the local one and
+     the upload can be skipped. *)
+  let remote_exists ~sys ~public_url = D10.Sysops.Http.head sys ~url:public_url
 
-  let upload_sidecar ~sys ~pkg ~json_path ~json_url =
+  let upload_tar ~sys ~pkg ~src ~url ~public_url =
+    if remote_exists ~sys ~public_url then
+      Fmt.pr "    %a %s already at %s@." Oi.Style.pp_dim_string "exists" pkg
+        public_url
+    else
+      try
+        put_one ~sys ~src ~url;
+        Fmt.pr "    %a %s -> %s@." Oi.Style.pp_ok_string "uploaded" pkg url
+      with exn ->
+        Fmt.pr "    %a upload %s: %s@." Oi.Style.pp_warn_string "skip" pkg
+          (Printexc.to_string exn)
+
+  let upload_sidecar ~sys ~pkg ~json_path ~json_url ~public_url =
     if not (Sys.file_exists json_path) then
       Fmt.pr "    %a sidecar %s: %s missing@." Oi.Style.pp_warn_string "skip"
         pkg json_path
+    else if remote_exists ~sys ~public_url then
+      Fmt.pr "    %a %s sidecar already at %s@." Oi.Style.pp_dim_string "exists"
+        pkg public_url
     else
       try
         put_one ~sys ~src:json_path ~url:json_url;
@@ -828,18 +843,27 @@ module Bump = struct
         Fmt.pr "    %a sidecar %s: %s@." Oi.Style.pp_warn_string "skip" pkg
           (Printexc.to_string exn)
 
-  let make_upload_callback ~sys ~upload_archives ~archives_url =
+  (* The public-read URL for HEAD probes mirrors [D10ir.Registry]'s
+     layout, [<registry>/d10ir-archives/<sha>.<ext>] — same path the
+     [oi build] fetcher pulls from. Re-uses [Terms.registry] so we
+     never need a second flag for the public mirror. *)
+  let make_upload_callback ~sys ~upload_archives ~archives_url ~registry =
     if not upload_archives then None
     else
-      let base = strip_trailing_slash archives_url in
+      let s3_base = strip_trailing_slash archives_url in
+      let public_base = strip_trailing_slash registry ^ "/d10ir-archives" in
       Some
         (fun ~name ~version ~sha ~path ->
           let pkg = Fmt.str "%s.%s" name version in
-          let tar_url = Fmt.str "%s/%s.tar.zst" base sha in
-          let json_path = Filename.dirname path / Fmt.str "%s.json" sha in
-          let json_url = Fmt.str "%s/%s.json" base sha in
-          upload_tar ~sys ~pkg ~src:path ~url:tar_url;
-          upload_sidecar ~sys ~pkg ~json_path ~json_url)
+          let tar_name = Fmt.str "%s.tar.zst" sha in
+          let json_name = Fmt.str "%s.json" sha in
+          let tar_url = Fmt.str "%s/%s" s3_base tar_name in
+          let json_url = Fmt.str "%s/%s" s3_base json_name in
+          let tar_public = Fmt.str "%s/%s" public_base tar_name in
+          let json_public = Fmt.str "%s/%s" public_base json_name in
+          let json_path = Filename.dirname path / json_name in
+          upload_tar ~sys ~pkg ~src:path ~url:tar_url ~public_url:tar_public;
+          upload_sidecar ~sys ~pkg ~json_path ~json_url ~public_url:json_public)
 
   type bump_ctx = {
     proc_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
@@ -941,8 +965,8 @@ module Bump = struct
       handles
 
   let cmd =
-    let run (c : Terms.common) reporepo reporepo_url handle_opt all url ref_
-        toolchain depend_specs default no_bake rebake upload_archives
+    let run (c : Terms.common) registry reporepo reporepo_url handle_opt all url
+        ref_ toolchain depend_specs default no_bake rebake upload_archives
         archives_url =
       Harness.run @@ fun ~sw env ->
       let { Harness.proc_mgr; fs; clock; sys; platform; os_key; cache; _ } =
@@ -959,7 +983,7 @@ module Bump = struct
         exit 1
       end;
       let upload_on_baked =
-        make_upload_callback ~sys ~upload_archives ~archives_url
+        make_upload_callback ~sys ~upload_archives ~archives_url ~registry
       in
       Oi.Source.Reporepo.ensure_clone ~fs ~sys ~refresh:false ~path:reporepo
         ~url:reporepo_url ();
@@ -1107,9 +1131,11 @@ module Bump = struct
               "Upload each freshly baked $(b,x-d10-archive) tarball $(i,and \
                its $(b,.json) source-manifest sidecar) to $(b,--archives-url) \
                via $(b,s3cmd put). Requires a working $(b,~/.s3cfg) (or \
-               $(b,OI_S3CFG) pointing at a config). Already-present archives \
-               are not re-uploaded (we only upload what was freshly baked this \
-               run)."
+               $(b,OI_S3CFG) pointing at a config). Each object is HEAD-probed \
+               against $(b,<--registry>/d10ir-archives/<sha>.<ext>) first and \
+               skipped if already present — archives are content-addressed by \
+               sha256, so an object at the same key is byte-identical to the \
+               local one."
             [ "upload-archives" ])
     in
     let archives_url =
@@ -1125,9 +1151,10 @@ module Bump = struct
     in
     Cmd.v info
       Term.(
-        const run $ Terms.common $ reporepo_term $ reporepo_url_term $ handle
-        $ all $ url $ ref_term $ toolchain_repo_term $ depend_term $ default
-        $ no_bake $ rebake $ upload_archives $ archives_url)
+        const run $ Terms.common $ Terms.registry $ reporepo_term
+        $ reporepo_url_term $ handle $ all $ url $ ref_term
+        $ toolchain_repo_term $ depend_term $ default $ no_bake $ rebake
+        $ upload_archives $ archives_url)
 end
 
 module Bake = struct

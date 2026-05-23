@@ -95,6 +95,12 @@ module Http : sig
       size isn't known up front. The final invocation always fires with the
       final byte count so a UI bar can settle at 100%. *)
 
+  val head : t -> url:string -> bool
+  (** [head t ~url] issues a HEAD request via the in-process HTTP client.
+      Returns [true] on a 2xx response, [false] on any other status, network
+      failure, TLS error, or timeout. Never raises. Useful as a presence probe
+      for content-addressed remote objects where the body is irrelevant. *)
+
   (** {2 Pooled HTTP sessions}
 
       [Requests.One] opens a fresh connection per call. A [session] keeps a
