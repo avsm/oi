@@ -50,15 +50,15 @@ val close : db -> unit
 (** [close db] closes the database handle. *)
 
 val indexer_version : string
-(** [indexer_version] Stamp that {!rebuild} writes into the [index_meta] table
-    per [os_key]. Callers compare {!indexer_stamp} against this to decide
-    whether the on-disk index was produced by the current logic shape; a
-    mismatch is the "force a full rebuild" signal. *)
+(** Stamp that {!rebuild} writes into the [index_meta] table per [os_key].
+    Callers compare {!indexer_stamp} against this to decide whether the on-disk
+    index was produced by the current logic shape; a mismatch is the "force a
+    full rebuild" signal. *)
 
 val indexer_stamp : db -> os_key:string -> string option
-(** [indexer_stamp] Read the indexer-version stamp recorded for [os_key], or
-    [None] when no rebuild has run for that platform yet (e.g. on a legacy
-    [index.db] that pre-dates the [index_meta] table). *)
+(** [indexer_stamp db ~os_key] reads the indexer-version stamp recorded for
+    [os_key], or [None] when no rebuild has run for that platform yet (e.g. on a
+    legacy [index.db] that pre-dates the [index_meta] table). *)
 
 (** {1 Layer-fs scanners}
 

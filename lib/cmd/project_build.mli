@@ -52,6 +52,7 @@ val depexts :
   cwd:string ->
   unit ->
   int
-(** [depexts] Solve the project's dep closure (no build), then print the union
-    of [depexts:] declared by the solved packages, one per line. Backs
+(** [depexts ?refresh ?skip_local ?with_repos ?with_deps ?toolchain ~cwd ()]
+    solves the project's dep closure (no build), then prints the union of
+    [depexts:] declared by the solved packages, one per line. Backs
     [oi build --depext] in project mode. *)

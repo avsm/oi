@@ -182,18 +182,60 @@ let man =
   [
     `S Manpage.s_description;
     `P
-      "Print $(b,export) statements for $(b,PATH), $(b,OCAMLLIB), and the \
-       other OCaml variables pointing at $(b,_oi/prefix/). Non-$(b,direnv) \
-       equivalent of $(b,.envrc).";
+      "Print POSIX $(b,export) statements that point your shell at the cwd \
+       project's OCaml prefix ($(b,_oi/prefix/)). Wrap the output in $(b,eval) \
+       to activate the environment in the current shell.";
     `Pre "  eval \"\\$(oi env)\"";
     `P
-      "Reuses $(b,_oi/prefix/) when it exists and no extras are requested. \
-       With $(b,--with), $(b,--with-repo), $(b,--toolchain), \
-       $(b,--skip-local), or a missing prefix, builds a one-shot prefix \
-       in-process; $(b,.envrc) and dev tools are not updated. Use $(b,oi build \
-       --deps-only) for that.";
+      "After that, $(b,ocaml), $(b,dune), $(b,ocamlfind), and every library in \
+       the prefix resolve as if the project's dependencies were a system \
+       install — without mutating $(b,~/.opam) or your real $(b,PATH) defaults \
+       beyond this shell.";
+    `S "WHEN TO USE THIS";
+    `I
+      ( "$(b,eval) $(b,\"\\$\\(oi env\\)\")",
+        "Activate in the current shell, ad-hoc. Most common case." );
+    `I
+      ( "$(b,direnv allow)",
+        "If $(b,direnv) is installed, $(b,oi build) already wrote a \
+         $(b,.envrc) and you don't need $(b,oi env) at all — directory entry \
+         handles activation." );
+    `I
+      ( "$(b,oi exec) -- $(i,CMD)",
+        "One-off: run $(i,CMD) with the env applied, leave the parent shell \
+         untouched. Best for scripts and CI." );
+    `I
+      ( "$(b,oi run) $(i,TOOL)",
+        "Run a single opam-packaged binary without touching the project env at \
+         all. Preferred when you don't need $(b,dune)/$(b,ocaml) themselves." );
+    `S "WHAT GETS EXPORTED";
+    `P "The output is a block of plain $(b,export VAR=\"...\") lines:";
+    `I ("$(b,PATH)", "Prepends $(b,_oi/tools/bin) then $(b,_oi/prefix/bin).");
+    `I
+      ( "$(b,OCAMLPATH), $(b,OCAMLLIB), $(b,OCAMLFIND_CONF), \
+         $(b,OCAMLFIND_DESTDIR), $(b,OCAMLTOP_INCLUDE_PATH), \
+         $(b,OCAML_TOPLEVEL_PATH), $(b,CAML_LD_LIBRARY_PATH)",
+        "OCaml + findlib resolution under $(b,_oi/prefix/)." );
+    `I ("$(b,OPAM_SWITCH_PREFIX)", "Compatibility with opam-aware tools.");
+    `I
+      ( "$(b,DUNE_CACHE), $(b,DUNE_CACHE_ROOT), $(b,DUNE_CACHE_STORAGE_MODE)",
+        "Dune cache pointed at $(b,\\$OI_CACHE_DIR/dune) so builds across \
+         projects share artefacts." );
+    `S "PREFIX REUSE VS ONE-SHOT";
+    `P
+      "By default $(b,oi env) reuses $(b,_oi/prefix/) verbatim — instant if it \
+       exists, otherwise built once. It writes nothing to disk on reuse.";
+    `P "A one-shot in-process prefix is built when any of these holds:";
+    `I ("(a)", "$(b,_oi/prefix/) is missing.");
+    `I ("(b)", "$(b,--with), $(b,--with-repo), or $(b,--toolchain) is given.");
+    `I ("(c)", "$(b,--skip-local) is set.");
+    `P
+      "In one-shot mode $(b,.envrc) and dev tools under $(b,_oi/tools/) are \
+       NOT updated — only the printed exports reflect the request. Run $(b,oi \
+       build) (no args) in the project root to persist a fresh prefix, dev \
+       tools, and $(b,.envrc).";
     `S "TOOLCHAIN";
-    `P "Active toolchain, in order:";
+    `P "Active toolchain, in order of precedence:";
     `I ("1.", "$(b,--toolchain=NAME).");
     `I
       ( "2.",
@@ -201,6 +243,26 @@ let man =
          $(b,--with-repo=@h), $(b,--with=@h/pkg), or the project's \
          $(b,x-repos:). Conflicting tags error out." );
     `I ("3.", "Reporepo entry flagged $(b,x-oi-default-toolchain: true).");
+    `S "SHELL COMPATIBILITY";
+    `P
+      "Output is POSIX-shell syntax ($(b,bash), $(b,zsh), $(b,sh), $(b,ash), \
+       $(b,dash)). For $(b,fish) use $(b,bass): $(b,bass eval (oi env)). For \
+       $(b,csh)/$(b,tcsh) translate $(b,export X=Y) to $(b,setenv X Y) — \
+       there's no first-class support today.";
+    `S "DEACTIVATION";
+    `P
+      "Open a new shell, or manually $(b,unset) each variable listed above. \
+       $(b,oi env) doesn't emit an undo script.";
+    `S Manpage.s_examples;
+    `Pre
+      "  eval \"\\$(oi env)\"                           # activate for this \
+       shell\n\
+      \  oi env --toolchain=oxcaml | tee .envrc.local  # capture exports\n\
+      \  oi env --with=alcotest                       # one-shot, include test \
+       deps\n\
+      \  oi env --skip-local                          # ignore cwd *.opam";
+    `S "SEE ALSO";
+    `P "$(b,oi build)(1), $(b,oi exec)(1), $(b,oi run)(1), $(b,direnv)(1)";
   ]
 
 let cmd =

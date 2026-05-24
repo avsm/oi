@@ -2029,7 +2029,10 @@ let cmd_info =
         `I ("$(b,PKG)", "Single package.");
         `I ("$(b,@HANDLE/PKG)", "Package from overlay $(i,HANDLE).");
         `I ("$(b,@HANDLE)", "Every package in overlay $(i,HANDLE).");
-        `I ("$(b,--all)", "Every overlay's $(b,x-root-packages).");
+        `I
+          ( "$(b,--all)",
+            "Every overlay's $(b,x-root-packages). Use $(b,--only=HANDLE) / \
+             $(b,--skip=HANDLE) to scope." );
         `S "PROJECT EXTRAS";
         `P "In project mode the cwd metadata feeds the solve:";
         `I
@@ -2039,14 +2042,73 @@ let cmd_info =
           ( "$(b,packages/) + $(b,repo)",
             "Project-local $(b,packages/) tree is layered as the \
              highest-priority opam repository." );
+        `S "MODES";
+        `P "Beyond the default build, $(b,oi build) supports:";
+        `I
+          ( "$(b,--depext)",
+            "Solve only; print system depexts, one per line. Pipe into \
+             $(b,sudo apt install -y -) / $(b,dnf install) etc." );
+        `I
+          ( "$(b,--archives-only)",
+            "Populate the local source mirror but skip the build. With \
+             $(b,--every-version), mirror every reporepo entry (not just the \
+             solved set)." );
+        `I
+          ( "$(b,--upload-archive=URL)",
+            "After building, mirror each archive's $(b,.json) sidecar (and \
+             with $(b,--archive-sources), the $(b,.tar.zst) too) to \
+             $(i,URL/d10ir-archives/<sha>.{json,tar.zst}) via $(b,s3cmd) — the \
+             registry layout other oi installs consume." );
+        `I
+          ( "$(b,--snapshot-reporepo)",
+            "When publishing, also snapshot the reporepo tree itself to \
+             $(i,URL/reporepo/) so consumers cloning your registry get a \
+             matching overlay set." );
+        `I
+          ( "$(b,--dist=DIR)",
+            "Copy each root layer's $(b,bin/) + $(b,sbin/) into \
+             $(i,DIR/{bin,sbin}/) after build (used by the multi-stage $(b,oi \
+             dist docker) image)." );
+        `I
+          ( "$(b,--save-d10ir=DIR)",
+            "Write the d10ir recipe for each solve group to \
+             $(i,DIR/<root>.d10ir.json). Independent of $(b,oi ir emit) — use \
+             this to capture the recipe a live build is about to execute." );
+        `S "OFFLINE / REPRODUCIBILITY";
+        `I
+          ( "$(b,--locked)",
+            "Forbid registry fetches and reporepo refreshes; fail fast on \
+             cache miss. Implies $(b,--use-registry=never); overrides \
+             $(b,--refresh)." );
+        `I
+          ( "$(b,--use-registry=MODE)",
+            "$(b,all) (default), $(b,archives) (skip binary layers, fetch \
+             sources from registry), or $(b,never)." );
+        `I
+          ( "$(b,--refresh)",
+            "Force re-fetch of every reporepo / pin / URL clone, ignoring \
+             freshness sentinels." );
+        `S "TOOLCHAIN";
+        `P
+          "$(b,--toolchain=HANDLE) selects a reporepo-defined toolchain (see \
+           $(b,oi config) for the list). Without it, the toolchain is \
+           auto-picked from in-scope $(b,@HANDLE) overlays' \
+           $(b,x-oi-toolchain) tags or the reporepo default.";
+        `S "PARALLELISM";
+        `P
+          "$(b,-j N) caps both per-package compile jobs and concurrent fetch \
+           streams. Default $(b,4).";
         `S Manpage.s_examples;
         `Pre
-          "  oi build\n\
+          "  oi build                                  # cwd project\n\
           \  oi build dune\n\
           \  oi build @avsm/owntracks\n\
           \  oi build @avsm\n\
-          \  oi build --all --upload-archive=s3://oiu/\n\
-          \  oi build --all --depext | sudo apt install -y -";
+          \  oi build --all --only=avsm --only=mirage\n\
+          \  oi build --all --depext | sudo apt install -y -\n\
+          \  oi build --all --archives-only             # warm source mirror\n\
+          \  oi build --all --upload-archive=s3://oiu/  # publish a registry\n\
+          \  oi build --locked                          # offline, no fallback";
       ]
 
 let cmd =

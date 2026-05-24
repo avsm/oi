@@ -57,9 +57,9 @@ val load_meta : _ Eio.Path.t -> meta option
     if the file does not exist or cannot be parsed. *)
 
 val meta_codec : meta Jsont.t
-(** [meta_codec] Same codec [save_meta] / [load_meta] use for [layer.json].
-    Exposed so higher-level commands can embed [meta] inside their own JSON
-    envelopes (e.g. [oi cache show --format=json]). *)
+(** Codec [save_meta] / [load_meta] use for [layer.json]. Exposed so
+    higher-level commands can embed [meta] inside their own JSON envelopes (e.g.
+    [oi cache show --format=json]). *)
 
 (** {1 Paths and queries} *)
 

@@ -47,9 +47,11 @@ val prepare :
   ?extra_constraints:OpamFormula.version_constraint OpamPackage.Name.Map.t ->
   unit ->
   prepared
-(** [prepare] Run the shared opam-init / reporepo / project / toolchain pipeline
-    and build the {!Oi.Build_pipeline.request} a downstream solve/build call
-    consumes.
+(** [prepare ~harness ~refresh ~locked ~skip_local ~registry ~use_registry
+     ~with_repos ~with_deps ~toolchain_override ~targets ?extra_handles
+     ?extra_pins ?extra_constraints ()] runs the shared opam-init / reporepo /
+    project / toolchain pipeline and builds the {!Oi.Build_pipeline.request} a
+    downstream solve/build call consumes.
 
     [~locked] propagates into [refresh] (locked forces it off) and
     [use_registry] (locked forces {!Oi.Use_registry.Never}). [~skip_local]

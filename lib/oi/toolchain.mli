@@ -85,10 +85,10 @@ type info = {
 }
 
 val opam_ctx_of_info : info -> Solver.Ctx.toolchain
-(** [opam_ctx_of_info] Project a {!info} down to the {!Solver.Ctx.toolchain}
-    subset that [Solver.Ctx.create] / [Solver.solve] / [Prefix.make_env] need.
-    Single source of truth for the conversion, used by all the CLI commands that
-    thread a toolchain through. *)
+(** [opam_ctx_of_info i] projects [i] down to the {!Solver.Ctx.toolchain} subset
+    that [Solver.Ctx.create] / [Solver.solve] / [Prefix.make_env] need. Single
+    source of truth for the conversion, used by all the CLI commands that thread
+    a toolchain through. *)
 
 val apply_conf : info option -> Solver.Ctx.conf -> Solver.Ctx.conf
 (** [apply_conf info conf] is [conf] with [ocaml_version] replaced by the
@@ -97,7 +97,7 @@ val apply_conf : info option -> Solver.Ctx.conf -> Solver.Ctx.conf
     this so [ocaml:version] resolves to the toolchain's compiler. *)
 
 val default_root : unit -> string
-(** [default_root] Root dir under which toolchains are installed, i.e.
+(** [default_root ()] is the root dir under which toolchains are installed, i.e.
     [$XDG_CACHE_HOME/oi/toolchains]. *)
 
 val resolve :
@@ -107,12 +107,13 @@ val resolve :
   conf:Solver.Ctx.conf ->
   handle:string ->
   info
-(** [resolve] Look up [handle] (the CLI toolchain name) in the reporepo: find
-    the latest entry whose [x-oi-toolchain-name] matches, resolve its [depends:]
-    transitively, materialise the URL-bearing overlays, solve the
-    [x-oi-toolchain-roots], compute the effective hash, and return [info].
-    Auto-clones the reporepo if missing. Raises {!Error.fail_config_error} if no
-    entry defines a toolchain with that name. *)
+(** [resolve ~fs ~sys ~data_dir ~conf ~handle] looks up [handle] (the CLI
+    toolchain name) in the reporepo: finds the latest entry whose
+    [x-oi-toolchain-name] matches, resolves its [depends:] transitively,
+    materialises the URL-bearing overlays, solves the [x-oi-toolchain-roots],
+    computes the effective hash, and returns the {!info}. Auto-clones the
+    reporepo if missing. Raises {!Error.fail_config_error} if no entry defines a
+    toolchain with that name. *)
 
 val url_of : handle:string -> string option
 (** [url_of ~handle] returns the URL of the toolchain's primary source — by
@@ -147,20 +148,19 @@ type summary = {
 }
 
 val available : unit -> summary list
-(** [available] Snapshot of every toolchain definition the reporepo currently
-    advertises (entries carrying [x-oi-toolchain-name]). Cheap (no solve, no
-    network), so safe for [oi config]. Empty when the reporepo has no toolchain
-    entries — fresh machines need to clone or create them. *)
+(** [available ()] is a snapshot of every toolchain definition the reporepo
+    currently advertises (entries carrying [x-oi-toolchain-name]). Cheap (no
+    solve, no network), so safe for [oi config]. Empty when the reporepo has no
+    toolchain entries — fresh machines need to clone or create them. *)
 
 val ensure_installed : ?reporter:Build_progress.reporter -> info -> unit
-(** [ensure_installed] Ensure the toolchain is usable. No-op for relocatable
-    toolchains (the compiler is built into the consumer prefix by the normal
-    solve). For a non-relocatable toolchain it probes
-    [<info.install_prefix>/bin/ocamlc]; the {e populating} of that prefix is
+(** [ensure_installed ?reporter i] ensures toolchain [i] is usable. No-op for
+    relocatable toolchains (the compiler is built into the consumer prefix by
+    the normal solve). For a non-relocatable toolchain it probes
+    [<i.install_prefix>/bin/ocamlc]; the {e populating} of that prefix is
     {!Oi.Aux_install.ensure}'s job and runs ahead of the per-consumer build via
-    the {!Build_pipeline.aux_installer} plumbing.
-
-    [?reporter] receives [Status] events around the probe. *)
+    the {!Build_pipeline.aux_installer} plumbing. [?reporter] receives [Status]
+    events around the probe. *)
 
 val is_ready : info -> bool
 (** [is_ready info] is the general predicate for "this toolchain is usable".

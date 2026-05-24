@@ -21,8 +21,8 @@ type phase =
   | Assembling  (** Prefix assembly post-build. *)
 
 val string_of_phase : phase -> string
-(** [string_of_phase] Lowercase kebab-case label, e.g. ["solving"],
-    ["building"]. *)
+(** [string_of_phase p] is a lowercase kebab-case label for [p], e.g.
+    ["solving"], ["building"]. *)
 
 (** The kind of asset being fetched. Affects how the UI labels per-row progress
     (binary layer vs. raw source archive). *)

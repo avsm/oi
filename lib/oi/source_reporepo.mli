@@ -70,15 +70,15 @@ val latest : entry list -> handle:string -> entry option
 (** Highest-versioned entry for a given handle. *)
 
 val default_toolchain : entry list -> entry option
-(** [default_toolchain] Latest version of the toolchain definition flagged
+(** Latest version of the toolchain definition flagged
     [x-oi-default-toolchain: true], or [None] if no entry carries the flag.
     {!load} guarantees at most one toolchain handle is so flagged. *)
 
 type root = { handle : string; version : string option }
 
 val resolve : entry list -> roots:root list -> entry list
-(** [resolve] Transitive closure in dependency order (deps before dependents).
-    If a root has no [version], the highest version is picked. *)
+(** Transitive closure in dependency order (deps before dependents). If a root
+    has no [version], the highest version is picked. *)
 
 (** {2 v1 overlay layout}
 
@@ -95,18 +95,18 @@ val iter_opam_files :
   ?skip_handles:string list ->
   (handle:string -> pkg:string -> version:string -> opam_path:string -> unit) ->
   unit
-(** [iter_opam_files] Visit every
-    [<path>/v2/<handle>/packages/<pkg>/<pkg.version>/opam] in the reporepo.
-    Empty [include_handles] means every overlay (including [default]);
+(** Visit every [<path>/v2/<handle>/packages/<pkg>/<pkg.version>/opam] in the
+    reporepo. Empty [include_handles] means every overlay (including [default]);
     [skip_handles] is applied last. The meta-overlay [reporepo] is always
     skipped — it holds handle-registration entries, not archives. *)
 
 val overlay_packages_dir : path:string -> handle:string -> string
-(** [overlay_packages_dir] — directly consumable as a solver [packages_dir]. *)
+(** Path to an overlay's [packages/] tree — directly consumable as a solver
+    [packages_dir]. *)
 
 val assert_overlay_dir : path:string -> handle:string -> string
-(** [assert_overlay_dir] Like {!overlay_packages_dir}, but errors with a "run
-    [oi repo bump]" hint when the directory is missing on disk. *)
+(** Like {!overlay_packages_dir}, but errors with a "run [oi repo bump]" hint
+    when the directory is missing on disk. *)
 
 type materialise_summary = {
   handle : string;
@@ -125,8 +125,8 @@ val materialise_handle :
   url:string ->
   commit:string ->
   materialise_summary
-(** [materialise_handle] Clone [url] at [commit] into a scratch directory, walk
-    every [packages/<pkg>/<pkg>.<ver>/opam] file, rewrite each [url{}] block and
+(** Clone [url] at [commit] into a scratch directory, walk every
+    [packages/<pkg>/<pkg>.<ver>/opam] file, rewrite each [url{}] block and
     pin-depends entry to a content-addressed form, and write the result to
     [<reporepo>/v2/<handle>/]. The write is atomic from the caller's POV: a
     sibling [v2/<handle>.tmp/] is built first, then rotated into place at the
@@ -165,11 +165,11 @@ val ensure_base :
   ?reporter:Build_progress.reporter ->
   unit ->
   string list
-(** [ensure_base] Resolves the [relocatable] overlay (and its transitive deps)
-    from the reporepo and returns the [packages/] directories under
-    [v2/<handle>/] in solver priority order. Auto-clones the reporepo itself if
-    it doesn't already exist on disk. Errors when any base handle's [v2/] tree
-    is missing — run [oi repo bump <handle>] to populate.
+(** Resolves the [relocatable] overlay (and its transitive deps) from the
+    reporepo and returns the [packages/] directories under [v2/<handle>/] in
+    solver priority order. Auto-clones the reporepo itself if it doesn't already
+    exist on disk. Errors when any base handle's [v2/] tree is missing — run
+    [oi repo bump <handle>] to populate.
 
     When [refresh] is [false] (the default), the clone is auto-pulled if its
     last [git fetch]/[git pull] happened more than 1 hour ago — measured from
@@ -178,25 +178,23 @@ val ensure_base :
     [OI_REPOREPO_MAX_AGE] (positive float seconds; non-positive disables). *)
 
 val base_entries : unit -> entry list
-(** [base_entries] Resolved base overlays without cloning. Useful for display in
-    [oi config]. Empty list when the reporepo is missing or has no [relocatable]
-    entry. *)
+(** Resolved base overlays without cloning. Useful for display in [oi config].
+    Empty list when the reporepo is missing or has no [relocatable] entry. *)
 
 (** {2 Paths and bootstrapping} *)
 
 val default_path : string
-(** [default_path] , falling back to [$XDG_DATA_HOME/oi/reporepo] and then
+(** Default reporepo path: [$XDG_DATA_HOME/oi/reporepo], falling back to
     [~/.local/share/oi/reporepo]. *)
 
 val env_path : unit -> string
-(** [env_path] when set and non-empty, otherwise {!default_path}. *)
+(** [$OI_REPOREPO_PATH] when set and non-empty, otherwise {!default_path}. *)
 
 val default_url : string
-(** [default_url] Built-in upstream reporepo URL used when [OI_REPOREPO_URL] is
-    unset. *)
+(** Built-in upstream reporepo URL used when [$OI_REPOREPO_URL] is unset. *)
 
 val env_url : unit -> string
-(** [env_url] when set and non-empty, otherwise {!default_url}. *)
+(** [$OI_REPOREPO_URL] when set and non-empty, otherwise {!default_url}. *)
 
 val ensure_clone :
   ?reporter:Build_progress.reporter ->
@@ -234,10 +232,10 @@ val push :
 
 val commit_dirty :
   sys:D10.Sysops.t -> path:string -> msg:string -> unit -> string list
-(** [commit_dirty] Stage and commit any uncommitted changes in the reporepo at
-    [path] with commit message [msg]. Returns the list of files that were
-    committed (empty when the working tree is already clean, and no commit is
-    created in that case). *)
+(** Stage and commit any uncommitted changes in the reporepo at [path] with
+    commit message [msg]. Returns the list of files that were committed (empty
+    when the working tree is already clean, and no commit is created in that
+    case). *)
 
 val add :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
@@ -254,8 +252,8 @@ val add :
   ?force:bool ->
   unit ->
   entry
-(** [add] Create a new reporepo entry for [handle] tracking the upstream [url]
-    at optional [ref_]. Writes the freshly resolved opam metadata under
+(** Create a new reporepo entry for [handle] tracking the upstream [url] at
+    optional [ref_]. Writes the freshly resolved opam metadata under
     [v2/<handle>/packages/<handle>/<handle>.<ver>/] and returns the parsed
     {!entry}. Errors when an entry for [handle] already exists unless
     [?force:true]; the caller is expected to follow up with {!bump} for schema
@@ -289,9 +287,9 @@ val remove :
   ?version:string ->
   unit ->
   unit
-(** [remove] Delete a reporepo entry. With [?version] only the named version is
-    removed; without it every version of [handle] (and the materialised
-    [v2/<handle>/]) is purged. *)
+(** Delete a reporepo entry. With [?version] only the named version is removed;
+    without it every version of [handle] (and the materialised [v2/<handle>/])
+    is purged. *)
 
 val ls_remote_sha : sys:D10.Sysops.t -> ?ref_:string -> string -> string
 (** [ls_remote_sha ~sys ?ref_ url] runs [git ls-remote] against [url] and

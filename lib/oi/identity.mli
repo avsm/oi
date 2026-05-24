@@ -9,9 +9,8 @@ type t = { name : string; version : string }
 (** A name + version pair. ["foo"] / ["1.2.3"]. *)
 
 val of_string : string -> t
-(** [of_string] Parse a [name.version] string. Falls back to
-    [{ name = s; version = "" }] when the input doesn't match opam's package
-    shape. *)
+(** [of_string s] parses [s] as a [name.version] string. Falls back to
+    [{ name = s; version = "" }] when [s] doesn't match opam's package shape. *)
 
 val to_string : t -> string
 (** [to_string t] is [name ^ "." ^ version], or just [name] when [version] is
@@ -37,16 +36,16 @@ val dep_of_opam : OpamPackage.t -> hash:string -> dep
 type method_ = Source | Binary
 
 val string_of_method : method_ -> string
-(** [string_of_method] Lowercase tag (["source"] / ["binary"]) used in CLI
-    output and JSON. *)
+(** [string_of_method m] is the lowercase tag (["source"] / ["binary"]) used in
+    CLI output and JSON. *)
 
 (** {1 Codecs} *)
 
 val codec : t Jsont.t
-(** [codec] (de)serialises an {!t} as JSON. *)
+(** (de)serialises an {!t} as JSON. *)
 
 val dep_codec : dep Jsont.t
-(** [dep_codec] (de)serialises a {!dep} as JSON. *)
+(** (de)serialises a {!dep} as JSON. *)
 
 val method_codec : method_ Jsont.t
-(** [method_codec] (de)serialises a {!method_} as JSON. *)
+(** (de)serialises a {!method_} as JSON. *)

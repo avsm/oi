@@ -16,32 +16,30 @@
     Additive JSON fields a decoder ignores don't need a bump. *)
 
 val cache_schema : int
-(** [cache_schema] format. Bump for [layer.json] / [provenance.json] /
+(** [<cache>/] format version. Bump for [layer.json] / [provenance.json] /
     [plan.json] field renames, prefix-cache layout changes, run-cache key
     changes, or sqlite layer-index schema changes. *)
 
 val data_schema : int
-(** [data_schema] and [<data>/repos/] layout. Reporepo is NOT swept by this
+(** [<data>/] and [<data>/repos/] layout version. Reporepo is NOT swept by this
     bump. *)
 
 val toolchains_schema : int
-(** [toolchains_schema] layout. A bump forces every previously-built compiler to
-    be rebuilt on first use. *)
+(** Installed-toolchain layout version. A bump forces every previously-built
+    compiler to be rebuilt on first use. *)
 
 val solver_cache_schema : string
-(** [solver_cache_schema] Per-entry version baked into solver-cache keys at
-    [<cache>/solve-cache/]. Bump when the solver's input handling changes in a
-    way that would make an older memoised result wrong (e.g. a new
-    dependency-quirk filter, a change to the package universe shape). Stored as
-    a string for backwards compatibility with prior ["v7"]/["v8"] keys on disk.
-*)
+(** Per-entry version baked into solver-cache keys at [<cache>/solve-cache/].
+    Bump when the solver's input handling changes in a way that would make an
+    older memoised result wrong (e.g. a new dependency-quirk filter, a change to
+    the package universe shape). Stored as a string for backwards compatibility
+    with prior ["v7"]/["v8"] keys on disk. *)
 
 val json_schema_version : string
-(** [json_schema_version] Wire-format version string for every [--format=json]
-    document [oi] emits (commands' structured outputs and the JSON error
-    envelope). Bump on any backwards-incompatible JSON change: field rename,
-    field removal, type change. Add-only changes (new optional fields) don't
-    need a bump.
+(** Wire-format version string for every [--format=json] document [oi] emits
+    (commands' structured outputs and the JSON error envelope). Bump on any
+    backwards-incompatible JSON change: field rename, field removal, type
+    change. Add-only changes (new optional fields) don't need a bump.
 
     Embedded as the [schema_version] field at the top of every JSON document so
     agents can fail fast on a mismatch. Decoupled from the on-disk schemas above
@@ -49,8 +47,8 @@ val json_schema_version : string
 
 val ensure :
   fs:Eio.Fs.dir_ty Eio.Path.t -> cache:Cache.t -> data_dir:string -> unit
-(** [ensure] Read each store's [.oi-stamp]; for any whose recorded schema is
-    below the compiled-in constant, or whose stamp is missing while tracked
-    subpaths exist on disk, purge that store with [rmtree] and write a fresh
-    stamp. Prints one [▸] line per affected store; silent on the happy path.
-    Safe on a fresh install. *)
+(** [ensure ~fs ~cache ~data_dir] reads each store's [.oi-stamp]; for any whose
+    recorded schema is below the compiled-in constant, or whose stamp is missing
+    while tracked subpaths exist on disk, purges that store with [rmtree] and
+    writes a fresh stamp. Prints one [▸] line per affected store; silent on the
+    happy path. Safe on a fresh install. *)

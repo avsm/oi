@@ -9,7 +9,7 @@
 type t = { handle : string; version : string }
 
 val pp : t Fmt.t
-(** [pp] Pretty-print as [handle@version]. *)
+(** [pp ppf t] prints [t] as [handle@version]. *)
 
 (** {1 Codec} *)
 

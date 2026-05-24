@@ -7,9 +7,8 @@
     [oi run utop] works without spelling out the producing package. *)
 
 val cmd : unit Cmdliner.Cmd.t
-(** [cmd] The [oi run] subcommand. Honours [--skip-local] from the user. *)
+(** The [oi run] subcommand. Honours [--skip-local] from the user. *)
 
 val cmd_x : unit Cmdliner.Cmd.t
-(** [cmd_x] Top-level command for the [oix] binary: same logic as [oi run] but
-    with [--skip-local] forced on (and the flag itself omitted from the help).
-*)
+(** Top-level command for the [oix] binary: same logic as [oi run] but with
+    [--skip-local] forced on (and the flag itself omitted from the help). *)

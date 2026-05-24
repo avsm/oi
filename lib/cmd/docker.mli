@@ -4,13 +4,12 @@
     obuilder spec omits the docker-compose orchestration. *)
 
 val subcommands : unit Cmdliner.Cmd.t list
-(** [subcommands] are the [docker] and [obuilder] subcommands for the [oi dist]
-    group. *)
+(** The [docker] and [obuilder] subcommands for the [oi dist] group. *)
 
 val default_distros : Registry_docker.Distro.t list
-(** [default_distros] is the fixed per-distro matrix driving [--all] and the
-    [oi dist makefile] Dockerfile set (Alpine, Debian-stable, Ubuntu 24.04,
-    Ubuntu 26.04, Fedora). *)
+(** Fixed per-distro matrix driving [--all] and the [oi dist makefile]
+    Dockerfile set: Alpine, Debian-stable, Ubuntu 24.04, Ubuntu 26.04, Fedora.
+*)
 
 val compute_per_distro_depexts :
   fs:Eio.Fs.dir_ty Eio.Path.t ->

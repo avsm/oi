@@ -37,8 +37,8 @@ type phase =
   | Store_layer
 
 val string_of_phase : phase -> string
-(** [string_of_phase] Short kebab-case name suitable for a status column (e.g.
-    ["stage-deps"], ["run-script"]). *)
+(** [string_of_phase p] is a short kebab-case name for [p] suitable for a status
+    column (e.g. ["stage-deps"], ["run-script"]). *)
 
 (** Structured progress events.
 
@@ -124,9 +124,10 @@ val run :
   ?install_to:string ->
   Plan.t ->
   result
-(** [run] Execute every node in the plan. Returns aggregate counts.
+(** [run ~config ~d10 ~fs ~proc_mgr ~clock ?reporter ?plan_dir ?install_to plan]
+    executes every node in [plan] and returns aggregate counts.
 
-    [plan_dir] is the directory containing the plan (and its [archive_root]);
+    [plan_dir] is the directory containing [plan] (and its [archive_root]);
     defaults to the current working directory. Used to resolve [archive.path].
 
     [install_to] redirects the per-node install destination from the normal

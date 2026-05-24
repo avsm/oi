@@ -16,12 +16,12 @@
     share one display via [shared_display].) *)
 
 val set_active : (unit, unit) Progress.Display.t -> unit
-(** [set_active] Register [d] as the currently-active display. Subsequent log
+(** [set_active d] registers [d] as the currently-active display. Subsequent log
     emissions will pause [d] before writing. *)
 
 val clear_active : unit -> unit
-(** Unregister whatever display was set. Call from the bar's cleanup path.
-    Idempotent. *)
+(** [clear_active ()] unregisters whatever display was set. Call from the bar's
+    cleanup path. Idempotent. *)
 
 val interject : (unit -> 'a) -> 'a
 (** [interject f] runs [f] with the active display paused. If no display is

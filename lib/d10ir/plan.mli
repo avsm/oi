@@ -200,8 +200,8 @@ val validate :
 (** {1 Schedule} *)
 
 val producers_table : t -> (Layer_hash.t, node) Hashtbl.t
-(** [producers_table] Map from a node's [layer_hash] to the node, for O(1)
-    producer lookup. *)
+(** [producers_table t] is a map from a node's [layer_hash] to the node, for
+    O(1) producer lookup. *)
 
 val merge : t list -> (t, string) result
 (** [merge plans] folds a collection of plans into a single plan the executor

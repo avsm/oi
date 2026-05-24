@@ -38,9 +38,9 @@ val progress : string -> unit
     No-op on non-TTY. *)
 
 val progress_clear : unit -> unit
-(** [progress_clear] Erase the current in-place [progress] line without emitting
-    a newline. Use before a final {!step} so the summary lands cleanly on the
-    same row. No-op on non-TTY. *)
+(** [progress_clear ()] erases the current in-place {!progress} line without
+    emitting a newline. Use before a final {!step} so the summary lands cleanly
+    on the same row. No-op on non-TTY. *)
 
 val header : ('a, Format.formatter, unit, unit) format4 -> 'a
 (** [header fmt] prints the message in bold — used for section headers in
@@ -58,8 +58,8 @@ val error : ('a, Format.formatter, unit, unit) format4 -> 'a
 (** [error fmt] prints ["error: <msg>"] in red on stderr, then flushes. *)
 
 val newline : unit -> unit
-(** Emit a blank line on stdout — used to vertically separate logical sections.
-*)
+(** [newline ()] emits a blank line on stdout — used to vertically separate
+    logical sections. *)
 
 val set_around_emit : ((unit -> unit) -> unit) -> unit
 (** [set_around_emit hook] installs a hook that wraps every Say emission. Used

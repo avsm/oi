@@ -248,9 +248,10 @@ val solve :
   constraints:OpamFormula.version_constraint OpamTypes.name_map ->
   OpamPackage.Name.t list ->
   (OpamPackage.t list, string) result
-(** [solve] Resolve the dependency closure for [names]. Returns packages in
-    topological order. Successful solves are persisted via {!Memo} and re-used
-    when an identical input is presented again.
+(** [solve ?test ?doc ctx ~packages_dirs ~constraints names] resolves the
+    dependency closure for [names]. Returns packages in topological order.
+    Successful solves are persisted via {!Memo} and re-used when an identical
+    input is presented again.
 
     [test] / [doc] enable [{with-test}] / [{with-doc}] dependency filters for
     the named packages — typically the solve roots, so
@@ -271,9 +272,10 @@ val raw_solve :
   constraints:OpamFormula.version_constraint OpamTypes.name_map ->
   OpamPackage.Name.t list ->
   (OpamPackage.t list, string) result
-(** [raw_solve] Lower-level entrypoint. Runs [opam-0install] over
-    [packages_dirs] with exactly the [constraints] and [env] supplied — no
-    auto-pinning, no {!Ctx}, no memo. *)
+(** [raw_solve ?test ?doc ~env ~packages_dirs ~constraints names] is the
+    lower-level entrypoint. Runs [opam-0install] over [packages_dirs] with
+    exactly the [constraints] and [env] supplied — no auto-pinning, no {!Ctx},
+    no memo. *)
 
 val direct_deps_within :
   packages_dirs:string list ->
@@ -297,5 +299,6 @@ val topo_sort :
   conf:Ctx.conf ->
   OpamPackage.t list ->
   OpamPackage.t list
-(** [topo_sort] Re-order [pkgs] in dependency-first topological order under
-    [conf]'s filter env. Stable on already-sorted inputs. *)
+(** [topo_sort ~packages_dirs ~conf pkgs] re-orders [pkgs] in dependency- first
+    topological order under [conf]'s filter env. Stable on already-sorted
+    inputs. *)

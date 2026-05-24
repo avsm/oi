@@ -69,26 +69,27 @@ val opam_info_codec : opam_info Jsont.t
 (** [opam_info_codec] (de)serialises the {!opam_info} sub-record. *)
 
 val source_info_codec : source_info Jsont.t
-(** [source_info_codec] (de)serialises the {!source_info} sub-record. *)
+(** (de)serialises the {!source_info} sub-record. *)
 
 val build_env_codec : build_env Jsont.t
-(** [build_env_codec] (de)serialises the {!build_env} sub-record. *)
+(** (de)serialises the {!build_env} sub-record. *)
 
 (** {1 Storage} *)
 
 val path : cache_root:string -> os_key:string -> hash:string -> string
-(** [path] . *)
+(** [<cache>/layers/<os_key>/<hash>/provenance.json] — sidecar location for a
+    single layer's provenance record. *)
 
 val write : fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> t -> unit
-(** [write] Encode [r] and write to {!path}. The layer dir must already exist
-    (committed by [D10.Layer.store]); silently no-ops if it doesn't. Errors are
-    logged and swallowed: a logging failure must never abort the build. *)
+(** Encode [r] and write to {!path}. The layer dir must already exist (committed
+    by [D10.Layer.store]); silently no-ops if it doesn't. Errors are logged and
+    swallowed: a logging failure must never abort the build. *)
 
 val read_all :
   fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> os_key:string -> t list
-(** [read_all] Walk every [<cache>/layers/<os_key>/<hash>/provenance.json] and
-    decode. Layer dirs without a [provenance.json] are silently skipped. Files
-    that fail to decode are logged at debug and skipped. *)
+(** Walk every [<cache>/layers/<os_key>/<hash>/provenance.json] and decode.
+    Layer dirs without a [provenance.json] are silently skipped. Files that fail
+    to decode are logged at debug and skipped. *)
 
 val read_one :
   fs:Eio.Fs.dir_ty Eio.Path.t ->
@@ -114,6 +115,5 @@ val overlay_of_layer :
 (** {1 Helpers for producers} *)
 
 val hash_opam_file : path:string -> string
-(** [hash_opam_file] Hex SHA-256 of [path]'s [effective_part]-equivalent bytes.
-    Used by {!Plan} to populate {!opam_info.sha256}. Returns [""] if the file
-    can't be read. *)
+(** Hex SHA-256 of [path]'s [effective_part]-equivalent bytes. Used by {!Plan}
+    to populate {!opam_info.sha256}. Returns [""] if the file can't be read. *)

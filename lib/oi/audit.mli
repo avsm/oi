@@ -96,11 +96,11 @@ val ulid : unit -> string
 (** A Crockford-base32 ULID. 26 chars: 48-bit ms-since-epoch + 80-bit random. *)
 
 val invocation_id : unit -> string
-(** [invocation_id] Cached per-process ULID. Every event from a single [oi]
-    invocation shares this id. *)
+(** Cached per-process ULID. Every event from a single [oi] invocation shares
+    this id. *)
 
 val default_context : unit -> context
-(** [default_context] Construct a base [context] from the current process:
+(** [default_context ()] builds a base {!context} from the current process:
     [trigger] from [Sys.argv], [host] from [Unix.gethostname], and [overlay] /
     [toolchain] / [project] all left [None]. Producers fill in those three
     fields locally before calling {!append}. *)

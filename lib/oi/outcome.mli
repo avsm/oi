@@ -50,22 +50,22 @@ val kind_of : t -> kind
 val string_of_kind : kind -> string
 
 val pp : t Fmt.t
-(** [pp] renders an outcome via its {!kind_of} tag (no payload). *)
+(** [pp ppf t] renders [t] via its {!kind_of} tag (no payload). *)
 
 (** {1 Histogram helpers} *)
 
 val bump : kind -> (kind * int) list -> (kind * int) list
-(** [bump] Increment the count for [kind] in a histogram, preserving the
+(** [bump k h] increments the count for [k] in histogram [h], preserving the
     relative order of earlier entries (a new tag is appended at the end). *)
 
 val sort_histogram : (kind * int) list -> (kind * int) list
-(** [sort_histogram] Stable sort: highest count first, then alphabetic by
+(** [sort_histogram h] stably sorts [h]: highest count first, then alphabetic by
     [string_of_kind]. *)
 
 (** {1 Codecs} *)
 
 val codec : t Jsont.t
-(** [codec] (de)serialises an outcome as JSON. *)
+(** (de)serialises an outcome as JSON. *)
 
 val kind_codec : kind Jsont.t
-(** [kind_codec] (de)serialises a {!kind} tag as JSON. *)
+(** (de)serialises a {!kind} tag as JSON. *)

@@ -20,10 +20,12 @@ val emit :
   toolchain_layer:string ->
   Plan.t ->
   D10ir.Plan.t
-(** [emit] Uses [d10.root] to resolve the recipe's [archive_root] (i.e.
-    [<d10.root>/d10ir/archives/]). The archives themselves are NOT materialised
-    here — that's [oi repo bake] / [oi repo bump]'s job; the emitter reads each
-    package's [x-d10-archive] sha and references the archive by content hash.
+(** [emit ~d10 ?cli_invocation ?extra_owned_paths ~toolchain_name
+     ~toolchain_layer plan] uses [d10.root] to resolve the recipe's
+    [archive_root] (i.e. [<d10.root>/d10ir/archives/]). The archives themselves
+    are NOT materialised here — that's [oi repo bake] / [oi repo bump]'s job;
+    the emitter reads each package's [x-d10-archive] sha and references the
+    archive by content hash.
 
     [extra_owned_paths] are additional path prefixes treated as oi-owned when
     scrubbing each node's [PATH] (on top of [cache_root] and the toolchains

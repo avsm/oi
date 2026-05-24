@@ -72,10 +72,10 @@ val nodes : graph -> node list
 
 val overlay_of_pkg :
   packages_dirs:string list -> OpamPackage.t -> D10.Overlay.t option
-(** [overlay_of_pkg] Resolve the overlay that contributed [pkg]'s opam file, by
-    walking [packages_dirs] for a [<dir>/<name>/<name.version>/opam] hit.
-    Returns [None] for packages from a non-overlay source (pin-depends, raw URL,
-    local). *)
+(** [overlay_of_pkg ~packages_dirs pkg] resolves the overlay that contributed
+    [pkg]'s opam file, by walking [packages_dirs] for a
+    [<dir>/<name>/<name.version>/opam] hit. Returns [None] for packages from a
+    non-overlay source (pin-depends, raw URL, local). *)
 
 val layer_hashes : graph -> string list
 (** [layer_hashes g] returns the layer hash for each package in the plan, in

@@ -13,13 +13,15 @@
     [Oi.Source.Mirror.X] form. *)
 
 val dir : cache:Cache.t -> string
-(** [dir] Absolute path to the mirror root: [{cache_root}/mirror]. *)
+(** [dir ~cache] is the absolute mirror-root path: [{cache_root}/mirror]. *)
 
 val url : cache:Cache.t -> OpamUrl.t
-(** [url] , suitable for use as a [cache_url] in [OpamRepository.pull_*]. *)
+(** [url ~cache] is a [file://] URL pointing at {!dir}, suitable for use as a
+    [cache_url] in [OpamRepository.pull_*]. *)
 
 val remote_url : registry:string -> OpamUrl.t
-(** [remote_url] as an [OpamUrl.t]. *)
+(** [remote_url ~registry] is the registry's mirror endpoint as an [OpamUrl.t].
+*)
 
 type stats = { count : int; total_size : int64 }
 
@@ -27,8 +29,8 @@ val stats : cache:Cache.t -> stats
 (** Walk the mirror directory and report blob count + total size. *)
 
 val export : cache:Cache.t -> dst:Eio.Fs.dir_ty Eio.Path.t -> int
-(** [export] Hardlink-copy the mirror tree to [<dst>/sources/]. Returns the
-    number of blobs copied. *)
+(** [export ~cache ~dst] hardlink-copies the mirror tree to [<dst>/sources/].
+    Returns the number of blobs copied. *)
 
 val import_from_opam_cache :
   fs:Eio.Fs.dir_ty Eio.Path.t -> cache_root:string -> OpamHash.t list -> int
@@ -45,19 +47,19 @@ type archive = { url : OpamUrl.t; checksums : OpamHash.t list; pkg : string }
 
 val collect_archives :
   packages_dirs:string list -> OpamPackage.t list -> archive list
-(** [collect_archives] Resolve each [pkg]'s opam file from the first matching
-    [packages_dirs] entry, then extract its archives. Deduped by URL so packages
-    sharing a mirror tarball contribute one fetch. Drives
-    [oi build --archives-only] against the solver's resolved set. *)
+(** [collect_archives ~packages_dirs pkgs] resolves each [pkg]'s opam file from
+    the first matching [packages_dirs] entry, then extracts its archives.
+    Deduped by URL so packages sharing a mirror tarball contribute one fetch.
+    Drives [oi build --archives-only] against the solver's resolved set. *)
 
 val archives_of_opam_file : path:string -> pkg:string -> archive list
-(** [archives_of_opam_file] Parse the opam file at [path] directly. Returns [[]]
-    for unreadable or sourceless files. Drives
-    [oi build --archives-only --every-version], which walks the reporepo's
-    filesystem rather than the solver. *)
+(** [archives_of_opam_file ~path ~pkg] parses the opam file at [path] directly,
+    labelling each archive with [pkg]. Returns [[]] for unreadable or sourceless
+    files. Drives [oi build --archives-only --every-version], which walks the
+    reporepo's filesystem rather than the solver. *)
 
 val dedup_by_url : archive list -> archive list
-(** [dedup_by_url archives] is the first-occurrence dedup keyed on the URL
+(** [dedup_by_url xs] is a first-occurrence dedup of [xs] keyed on the URL
     string. Use after concatenating per-group results (e.g.
     [oi build --archives-only --all]) where the same archive is referenced
     across overlapping solves. *)
@@ -75,13 +77,13 @@ val fetch_archives :
   ?on_progress:(fetched:int -> total:int -> current:string option -> unit) ->
   archive list ->
   fetch_summary
-(** [fetch_archives] Fetch each archive and deposit it into the mirror. Skips
-    entries whose first declared checksum is already present (the [cached]
-    tally). On a hard failure (after retries), records the URL + message in
-    [failed] and moves on — no exception is raised. [on_progress] receives
-    [current=Some label] just before each fetch and [current=None] after the
-    last; [label] is the host + basename of the URL, suitable for an in-place
-    progress line. *)
+(** [fetch_archives ~fs ~cache ?on_progress xs] fetches each archive in [xs] and
+    deposits it into the mirror. Skips entries whose first declared checksum is
+    already present (the [cached] tally). On a hard failure (after retries),
+    records the URL + message in [failed] and moves on — no exception is raised.
+    [on_progress] receives [current=Some label] just before each fetch and
+    [current=None] after the last; [label] is the host + basename of the URL,
+    suitable for an in-place progress line. *)
 
 type origin =
   | Local_mirror of string

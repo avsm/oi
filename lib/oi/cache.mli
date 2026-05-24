@@ -24,12 +24,12 @@ val root_s : t -> string
 (** String form of {!root}, for env vars and APIs that take native paths. *)
 
 val dune_root : t -> string
-(** [dune_root] Directory used as the dune cache root ([<cache>/dune]). Threaded
-    into the [DUNE_CACHE_ROOT] env var for child dune invocations so layer
-    builds share one cache across [oi] runs. *)
+(** [dune_root t] is the directory used as the dune cache root ([<cache>/dune]).
+    Threaded into the [DUNE_CACHE_ROOT] env var for child dune invocations so
+    layer builds share one cache across [oi] runs. *)
 
 val fs : t -> Eio.Fs.dir_ty Eio.Path.t
-(** [fs] The underlying filesystem capability used to construct the cache;
+(** [fs t] is the underlying filesystem capability used to construct [t];
     exposed so modules that already thread a [Cache.t] don't need to duplicate
     the [fs] argument on every internal helper. *)
 
@@ -62,8 +62,8 @@ val toolchains_root : unit -> string
     was populated cleanly (partial fetches don't leave one behind). *)
 
 val refresh_max_age : float
-(** [refresh_max_age] Seconds. Default [86_400.0] (24h). A clone older than this
-    is pulled again on next use. *)
+(** Seconds before a sentinel-guarded clone is considered stale. Default
+    [86_400.0] (24h). *)
 
 val fresh : refresh:bool -> sentinel:string -> max_age:float -> bool
 (** [fresh ~refresh ~sentinel ~max_age] is [true] when a cache entry guarded by
@@ -107,27 +107,30 @@ type item = {
 }
 
 val items : t -> item list
-(** [items] Subdirs under [<cache>/]. Swept by {!Stamp.cache_schema} bumps. *)
+(** [items t] lists subdirs under [<cache>/]. Swept by {!Stamp.cache_schema}
+    bumps. *)
 
 val data_items : t -> data_dir:string -> item list
-(** [data_items] Subdirs under [<data>/] that are rebuildable cache (repos,
-    opam-root). Swept by {!Stamp.data_schema} bumps. The reporepo is
-    user-authored data and is NOT included. *)
+(** [data_items t ~data_dir] lists subdirs under [<data>/] that are rebuildable
+    cache (repos, opam-root). Swept by {!Stamp.data_schema} bumps. The reporepo
+    is user-authored data and is NOT included. *)
 
 val toolchain_items : t -> item list
-(** [toolchain_items] . Swept by {!Stamp.toolchains_schema} bumps. *)
+(** [toolchain_items t] lists installed-toolchain dirs under
+    [<cache>/toolchains/]. Swept by {!Stamp.toolchains_schema} bumps. *)
 
 val cleanable_items : t -> data_dir:string -> item list
-(** [cleanable_items t ~data_dir] is the concatenation of {!items},
-    {!data_items}, {!toolchain_items}. The [oi clean] CLI iterates this. *)
+(** [cleanable_items t ~data_dir] is {!items} ++ {!data_items} ++
+    {!toolchain_items}. The [oi clean] CLI iterates this. *)
 
 val purge_items : item list -> unit
-(** [purge_items] each item; no logging. *)
+(** [purge_items xs] removes each item in [xs]; no logging. *)
 
 val size : sys:D10.Sysops.t -> Eio.Fs.dir_ty Eio.Path.t -> int64
-(** [size ~sys path] is the recursive on-disk size of a directory in bytes,
-    computed via [du -sk] (with the result multiplied by 1024). Returns [0L]
-    when the path doesn't exist or the subprocess errors out. *)
+(** [size ~sys path] is the recursive on-disk size of [path] in bytes, computed
+    via [du -sk] (with the result multiplied by 1024). Returns [0L] when the
+    path doesn't exist or the subprocess errors out. *)
 
 val pp_size : int64 Fmt.t
-(** Pretty-print a byte count as a human-readable string (e.g. ["1.2 GB"]). *)
+(** [pp_size ppf n] formats [n] as a human-readable byte count (e.g.
+    ["1.2 GB"]). *)

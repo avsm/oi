@@ -28,10 +28,10 @@ val emit_local :
   output:string option ->
   cwd:string ->
   unit
-(** [emit_local] Project-mode counterpart to {!emit}: solves the cwd's [*.opam]
-    closure to derive the archive sha list, then writes a multi-stage Dockerfile
-    that [COPY]s the local sources, re-solves inside the container (so reporepo
-    changes between bake and [docker build] are picked up), runs
+(** [emit_local …] is the project-mode counterpart to {!emit}: solves the cwd's
+    [*.opam] closure to derive the archive sha list, then writes a multi-stage
+    Dockerfile that [COPY]s the local sources, re-solves inside the container
+    (so reporepo changes between bake and [docker build] are picked up), runs
     [oi build --dist=/dist] (which drives the project's [dune build] and gathers
     install-tree binaries / share data), and finally [COPY]s the gathered tree
     into a clean depext-equipped runtime image. Output filename is
@@ -45,8 +45,9 @@ val emit_no_recipe :
   output:string option ->
   targets:string list ->
   unit
-(** [emit_no_recipe] is the source-independent counterpart to {!emit}: emit a
-    Dockerfile that doesn't bake a recipe.json. At [docker build] time, [oi]
+(** [emit_no_recipe ~distro ~oi_version ~registry ~no_cache_mount ~output
+     ~targets] is the source-independent counterpart to {!emit}: emit a
+    Dockerfile that doesn't bake a [recipe.json]. At [docker build] time, [oi]
     itself solves [targets] against the configured registry / reporepo, fetches
     archives, and builds. The image is reproducible only insofar as
     [OI_VERSION], the reporepo URL, and the registry index are stable; every
@@ -74,13 +75,15 @@ val emit :
   output:string option ->
   targets:string list ->
   unit
-(** [emit] solves [targets] under [distro]'s os_key via [Build_pipeline.solve],
-    collects unique archive shas from the merged [D10ir.Plan.t], and writes a
-    single Dockerfile to [<output>/Dockerfile.oi-<slug>.<distro>] (or that name
-    in the cwd when [output] is [None]). The plan is only used at generation
-    time to derive the sha list embedded in the fetch step; the container
-    re-solves at build time via [oi build TARGET] so no recipe sidecar is
-    emitted.
+(** [emit ~fs ~proc_mgr ~clock ~sys ~os_key ~cache ~data_dir ~session ~platform
+     ~refresh ~registry ~distro ~oi_version ~no_cache_mount ~obuilder ~output
+     ~targets] solves [targets] under [distro]'s os_key via
+    [Build_pipeline.solve], collects unique archive shas from the merged
+    [D10ir.Plan.t], and writes a single Dockerfile to
+    [<output>/Dockerfile.oi-<slug>.<distro>] (or that name in the cwd when
+    [output] is [None]). The plan is only used at generation time to derive the
+    sha list embedded in the fetch step; the container re-solves at build time
+    via [oi build TARGET] so no recipe sidecar is emitted.
 
     [oi_version] is passed through as the default for the [ARG OI_VERSION] in
     the emitted Dockerfile ([latest] resolves at docker-build time via the

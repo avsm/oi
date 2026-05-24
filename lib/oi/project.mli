@@ -47,9 +47,8 @@ val load : fs:Eio.Fs.dir_ty Eio.Path.t -> string -> t
     view. Returns {!empty} when [dir] has no opam files. *)
 
 val empty : t
-(** [empty] Empty project metadata: no deps, no pins, no overlays. Used by
-    callers that need to bypass the cwd probe (e.g. when [--skip-local] is set).
-*)
+(** Empty project metadata: no deps, no pins, no overlays. Used by callers that
+    need to bypass the cwd probe (e.g. when [--skip-local] is set). *)
 
 val pp : t Fmt.t
 (** [pp ppf t] renders the deps / local-packages / overlays / pins counts. *)

@@ -49,24 +49,24 @@ exception E of t
 (** The single exception used for all user-facing errors. *)
 
 val raise : t -> 'a
-(** [raise e] raises {!E}[ e]. *)
+(** [raise e] raises [E e]. *)
 
 val pp : t Fmt.t
-(** Pretty-print with ANSI colours. Intended for the human terminal path in
-    {!Cmd.Harness}; the JSON path uses {!codec} instead. *)
+(** [pp ppf e] pretty-prints [e] with ANSI colours. Intended for the human
+    terminal path in {!Cmd.Harness}; the JSON path uses {!codec} instead. *)
 
 val kind : t -> kind
-(** Project an error to its stable kind. *)
+(** [kind e] projects [e] to its stable categorisation tag. *)
 
 val kind_string : kind -> string
-(** [kind_string] Snake-case identifier (["not_found"], ["no_solution"], …) used
-    as the [kind] field in the JSON envelope. *)
+(** [kind_string k] is the snake-case identifier (["not_found"],
+    ["no_solution"], …) used as the [kind] field in the JSON envelope. *)
 
 val code : t -> int
-(** Exit code per the table above. *)
+(** [code e] is the process exit status for [e] per the table above. *)
 
 val codec : t Jsont.t
-(** [codec] JSON envelope of an error:
+(** JSON envelope of an error:
     {[
       {
         "schema_version": "<version>",
@@ -83,27 +83,31 @@ val codec : t Jsont.t
     [url]/[log]). *)
 
 val to_json : t -> string
-(** [to_json] Encode [t] via {!codec} and pretty-print as a JSON string with a
-    trailing newline. Falls back to a minimal ASCII envelope if the codec fails
-    (which it shouldn't). *)
+(** [to_json e] encodes [e] via {!codec} and returns a pretty-printed JSON
+    string with a trailing newline. Falls back to a minimal ASCII envelope if
+    the codec fails (which it shouldn't). *)
 
 (** {1 Constructors} *)
 
 val fail_not_found : string -> ('a, Format.formatter, unit, 'b) format4 -> 'a
-(** Raise a {!Not_found}. *)
+(** [fail_not_found target fmt …] raises a {!Not_found} carrying [target] and a
+    [fmt]-formatted message. Exit code [65]. *)
 
 val fail_msg : ('a, Format.formatter, unit, 'b) format4 -> 'a
-(** [fail_msg] Raise a generic {!Msg}. Exit code [1]. *)
+(** [fail_msg fmt …] raises a generic {!Msg} with the [fmt]-formatted text. Exit
+    code [1]. *)
 
 val no_solution : string -> 'a
-(** [no_solution] Raise a {!No_solution}. Exit code [20]. *)
+(** [no_solution msg] raises a {!No_solution} carrying [msg]. Exit code [20]. *)
 
 val fail_config_error : ('a, Format.formatter, unit, 'b) format4 -> 'a
-(** [fail_config_error] Raise a {!Config_error}. Exit code [10]. *)
+(** [fail_config_error fmt …] raises a {!Config_error}. Exit code [10]. *)
 
 val build_failed : pkg:string -> cmd:string -> output:string -> 'a
-(** [build_failed] Raise a {!Build_failed}. Exit code [31]. *)
+(** [build_failed ~pkg ~cmd ~output] raises a {!Build_failed} naming the
+    package, the failed command, and the captured output. Exit code [31]. *)
 
 val fail_fetch_failed :
   url:string -> ('a, Format.formatter, unit, 'b) format4 -> 'a
-(** [fail_fetch_failed] Raise a {!Fetch_failed}. Exit code [30]. *)
+(** [fail_fetch_failed ~url fmt …] raises a {!Fetch_failed} for [url] with a
+    [fmt]-formatted reason. Exit code [30]. *)

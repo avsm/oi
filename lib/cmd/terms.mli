@@ -7,23 +7,23 @@
     they don't appear elsewhere. *)
 
 val log : unit Cmdliner.Term.t
-(** [log] Wires [Fmt_cli], [Logs_cli], and the progress-aware logs reporter.
-    Under [CI=true] (or any other truthy [CI=…] value), forces ANSI off and
-    bumps the default log level from [Warning] to [Info] unless the user passed
-    [--color] / [--verbosity] explicitly. *)
+(** Wires [Fmt_cli], [Logs_cli], and the progress-aware logs reporter. Under
+    [CI=true] (or any other truthy [CI=…] value), forces ANSI off and bumps the
+    default log level from [Warning] to [Info] unless the user passed [--color]
+    / [--verbosity] explicitly. *)
 
 val in_ci : unit -> bool
-(** [in_ci] when the process appears to be running under a CI runner — checks
+(** [true] when the process appears to be running under a CI runner — checks
     [$CI] for a truthy value (anything other than empty, ["false"], or ["0"]).
     Used by other commands to surface more output (e.g. tailing failed-build
     logs at the end of [oi build]). *)
 
 val data_dir : string Cmdliner.Term.t
-(** [data_dir] . Honours [$OI_DATA_DIR] then [$XDG_DATA_HOME] then
+(** [--data-dir DIR]. Honours [$OI_DATA_DIR] then [$XDG_DATA_HOME] then
     [~/.local/share/oi]. *)
 
 val cache_dir : string Cmdliner.Term.t
-(** [cache_dir] . Honours [$OI_CACHE_DIR] / [$XDG_CACHE_HOME]. *)
+(** [--cache-dir DIR]. Honours [$OI_CACHE_DIR] / [$XDG_CACHE_HOME]. *)
 
 type format =
   | Text
@@ -73,15 +73,15 @@ val registry : string Cmdliner.Term.t
 (** {1 Env-reading helpers tied to the terms} *)
 
 val reporepo_path : unit -> string
-(** [reporepo_path] Active reporepo path: [$OI_REPOREPO] or
-    {!Oi.Source.Reporepo.default_path}. *)
+(** Active reporepo path: [$OI_REPOREPO] or {!Oi.Source.Reporepo.default_path}.
+*)
 
 val reporepo_url : unit -> string
-(** [reporepo_url] Active reporepo URL: [$OI_REPOREPO_URL] or
+(** Active reporepo URL: [$OI_REPOREPO_URL] or
     {!Oi.Source.Reporepo.default_url}. *)
 
 val default_registry : string
-(** [default_registry] . *)
+(** Built-in default value for [--registry] (the public oi registry URL). *)
 
 val use_registry : Oi.Use_registry.t Cmdliner.Term.t
 (** [use_registry] term, accepting [all], [archives], or [never]. Defaults to

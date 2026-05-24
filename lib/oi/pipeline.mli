@@ -23,13 +23,13 @@ val d10 :
   cache:Cache.t ->
   os_key:string ->
   D10.Config.t
-(** [d10] Construct a {!D10.Config.t} from the standard capabilities — the value
-    every layer-store call expects. Combines [cache]'s root with [os_key] so
-    layers from different platforms land in their own subdirectories. *)
+(** [d10 ~fs ~clock ~sys ~cache ~os_key] constructs the {!D10.Config.t} every
+    layer-store call expects. Combines [cache]'s root with [os_key] so layers
+    from different platforms land in their own subdirectories. *)
 
 val init_opam_root : fs:Eio.Fs.dir_ty Eio.Path.t -> data_dir:string -> unit
-(** [init_opam_root] Create [<data_dir>/opam-root/] (if absent) and call
-    {!Solver.Ctx.init_opam} so the rest of the pipeline can construct
+(** [init_opam_root ~fs ~data_dir] creates [<data_dir>/opam-root/] (if absent)
+    and calls {!Solver.Ctx.init_opam} so the rest of the pipeline can construct
     {!Solver.Ctx.t}s. Idempotent. *)
 
 (** {1 Toolchain resolution} *)
@@ -117,7 +117,8 @@ val filter_compatible_overlays :
   toolchain:Toolchain.info option ->
   string list ->
   string list
-(** [filter_compatible_overlays] Drop project-declared reporepo overlays tagged
+(** [filter_compatible_overlays ~reporepo_path ?override ~toolchain handles]
+    drops project-declared reporepo overlays from [handles] when they're tagged
     with an [x-oi-toolchain] that doesn't match the active toolchain handle.
     Overlays without [x-oi-toolchain] and overlays not present in the reporepo
     (URL-only handles) are kept.
@@ -161,5 +162,6 @@ val assemble_prefix :
   os_key:string ->
   layer_hashes:string list ->
   string
-(** [assemble_prefix] Hardlink-assemble a consumer prefix from [layer_hashes]
-    (in topo order) and return its absolute path. *)
+(** [assemble_prefix ~sys ~fs ~clock ~cache ~os_key ~layer_hashes]
+    hardlink-assembles a consumer prefix from [layer_hashes] (in topo order) and
+    returns its absolute path. *)

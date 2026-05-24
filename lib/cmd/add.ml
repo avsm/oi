@@ -138,6 +138,21 @@ let cmd_info =
           "Requires $(b,\\(generate_opam_files\\)) in $(b,dune-project). Use \
            $(b,-p NAME) to pick a stanza when the project declares several \
            packages.";
+        `S "PKG SYNTAX";
+        `I ("$(b,name)", "Just the package name; solver picks the version.");
+        `I
+          ( "$(b,name.version) / $(b,name>=1.0) / $(b,name=2.0)",
+            "Opam atom with a version constraint." );
+        `I
+          ( "$(b,@HANDLE/name)",
+            "Take $(i,name) from overlay $(i,HANDLE); the handle joins \
+             $(b,x-repos:) too." );
+        `S Manpage.s_examples;
+        `Pre
+          "  oi add logs\n\
+          \  oi add 'cmdliner>=2.0'\n\
+          \  oi add @avsm/eio-zmq\n\
+          \  oi add -p my-lib fmt          # multi-package project";
       ]
 
 let cmd =

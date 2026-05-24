@@ -9,10 +9,12 @@ type t =
   | Never  (** Skip the registry; upstream source fetches still happen. *)
 
 val of_string : string -> (t, string) result
-(** [of_string "all"] / ["archives"] / ["never"]. Case-insensitive. *)
+(** [of_string s] parses [s] as one of ["all"], ["archives"], or ["never"].
+    Case-insensitive. *)
 
 val to_string : t -> string
-(** [to_string] Lowercase tag: ["all"], ["archives"], or ["never"]. *)
+(** [to_string t] is the lowercase tag for [t]: ["all"], ["archives"], or
+    ["never"]. *)
 
 val pp : Format.formatter -> t -> unit
-(** Print the same tag as {!to_string}. *)
+(** [pp ppf t] prints the same tag as {!to_string}. *)

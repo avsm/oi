@@ -242,8 +242,8 @@ val build :
   ?reporter:Build_progress.reporter ->
   build_inputs ->
   D10ir.Direct.result option
-(** [build] Run the unified post-merge fetch + archive prefetch +
-    [D10ir.Direct.run] on [solved.merged].
+(** Run the unified post-merge fetch + archive prefetch + [D10ir.Direct.run] on
+    [solved.merged].
 
     Returns [None] when [solved.merged = None] (every group failed its solve /
     elaborate / emit, so there's nothing to build). Otherwise [Some result]
@@ -258,18 +258,17 @@ val build :
     [Phase_started Building] / [Build _] / [Build_summary]. *)
 
 val layer_hashes : solved -> string list
-(** [layer_hashes] Layer hashes from the first (and usually only) successful
-    group's [exec_plan], in topological order. Empty when [solved.groups] has no
+(** Layer hashes from the first (and usually only) successful group's
+    [exec_plan], in topological order. Empty when [solved.groups] has no
     successful entry. The shape every single-target caller ([oi env], [oi run],
     [oi self], [oi sync], [Script_runner]) uses to feed
     {!Pipeline.assemble_prefix}. *)
 
 val root_layer_hashes : solved -> string list
-(** [root_layer_hashes] Layer hashes of the user-requested packages across every
-    successful group, deduped. Differs from {!layer_hashes} by filtering
-    [exec_plan.packages] down to the names listed in each group's [group.names]
-    — i.e. the seed packages the solver was asked about, not the transitive
-    closure.
+(** Layer hashes of the user-requested packages across every successful group,
+    deduped. Differs from {!layer_hashes} by filtering [exec_plan.packages] down
+    to the names listed in each group's [group.names] — i.e. the seed packages
+    the solver was asked about, not the transitive closure.
 
     Use this (not [solved.merged.roots]) anywhere you want "the binaries the
     user actually asked for": [oi install] copies them to a prefix;

@@ -59,7 +59,6 @@ let man_quick_start =
     `Pre
       "  oi build               # sync deps + dev tools, run dune build\n\
       \  oi test                # dune runtest\n\
-      \  oi build --deps-only   # sync only (after editing a *.opam)\n\
       \  oi exec -- dune utop   # any command, project env applied\n\
       \  oi add logs            # edit dune-project + re-solve";
     `P

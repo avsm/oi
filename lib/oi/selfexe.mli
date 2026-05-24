@@ -6,11 +6,11 @@
     install. *)
 
 val current : unit -> string
-(** [current] Absolute path to the currently-running [oi] executable, with
-    symlinks resolved. Backed by [/proc/self/exe] on Linux (the most reliable
-    source — works even when invoked via [PATH] or via a hard / soft link) and
-    by [Sys.executable_name] on macOS, which the OCaml runtime populates via
-    [_NSGetExecutablePath].
+(** [current ()] is the absolute path to the currently-running [oi] executable,
+    with symlinks resolved. Backed by [/proc/self/exe] on Linux (the most
+    reliable source — works even when invoked via [PATH] or via a hard / soft
+    link) and by [Sys.executable_name] on macOS, which the OCaml runtime
+    populates via [_NSGetExecutablePath].
 
     Falls through to [Sys.executable_name] when [/proc/self/exe] isn't
     available; that's set to [argv.(0)] as a last resort. *)
