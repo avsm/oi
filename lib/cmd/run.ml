@@ -393,29 +393,16 @@ let layer_binaries ~fs ~cache ~os_key ~hashes ~want_name =
 
 (* -- build-result interpretation --------------------------------------- *)
 
-let group_error_kind = function
-  | Oi.Build_pipeline.Solve_failed _ -> "solve"
-  | Cycle _ -> "cycle"
-  | Empty_after_strip -> "empty"
-  | Elaborate_failed _ -> "elaborate"
-  | Emit_failed _ -> "emit"
-
 let fail_no_executable_plan (solved : Oi.Build_pipeline.solved) =
-  let group_msgs =
-    List.filter_map
-      (fun (gr : Oi.Build_pipeline.group_result) ->
-        match gr.error with
-        | Ok () -> None
-        | Error e ->
-            Fmt.kstr
-              (fun s -> Some s)
-              "%s: %s" gr.group.label (group_error_kind e))
-      solved.groups
-  in
   Oi.Error.fail_config_error
-    "build pipeline produced no executable plan (%s). Re-run with \
-     --verbosity=debug for the per-group trace."
-    (String.concat ", " group_msgs)
+    "@[<v>nothing to build.@,\
+     @,\
+     %a@,\
+     @,\
+     @[Hints:@ `oi show TARGET` prints the resolved plan;@ `oi search NAME` \
+     checks whether a package or binary by that name exists;@ -vv prints the \
+     full per-group trace.@]@]"
+    Oi.Build_pipeline.pp_failed_groups solved
 
 (* Direct.run was handed an empty plan. Two possibilities:
    (a) Warm cache — every solved package was marked [Binary] by
@@ -453,9 +440,8 @@ let fail_empty_plan_with_missing xs =
     "build pipeline ran with an empty d10ir plan, but %d package(s) claim \
      cached layers that aren't in the local d10 cache:@\n\
      %s@\n\
-     Likely a recipe-emit bug. Re-run with $(b,--refresh) to force a fresh \
-     solve, or $(b,oi clean --layers) followed by a normal build to repopulate \
-     them."
+     Likely a recipe-emit bug. Re-run with --refresh to force a fresh solve, \
+     or `oi clean --layers` followed by a normal build to repopulate them."
     (List.length xs) summary
 
 let fail_build_failures (r : D10ir.Direct.result) =
@@ -473,7 +459,7 @@ let fail_build_failures (r : D10ir.Direct.result) =
   else
     Oi.Error.fail_config_error
       "build failed: 0 nodes built, %d skipped (likely a dep chain broke \
-       upstream). Re-run with --verbosity=debug for the per-node trace."
+       upstream). Re-run with -vv for the per-node trace."
       r.skipped
 
 let check_empty_plan ~sys ~fs ~clock ~cache ~os_key solved =
@@ -579,32 +565,43 @@ let toolchain_bin_path ~fs ~binary_name = function
       if Workspace.path_exists fs p then Some p else None
   | _ -> None
 
-(* For [@handle/pkg], list the binaries that pkg's own layer ships
-   (not the whole prefix). For plain targets we don't yet know which
-   package owns the binary, so fall back to the whole prefix [bin/]. *)
-let bins_for_error ~ctx ~target_pin ~prefix ~layer_hashes =
-  match target_pin with
-  | Some (pin : Target.handle_pin) ->
-      let want_name = OpamPackage.Name.to_string pin.pkg in
-      layer_binaries ~fs:ctx.fs ~cache:ctx.cache ~os_key:ctx.os_key
-        ~hashes:layer_hashes ~want_name
-  | None -> (
+(* List the binaries the candidate leaf package's own layer ships, not
+   the whole prefix — otherwise a non-installing leaf like [re] gets
+   reported as "installs cmdliner, dune, ocaml, …" (the transitive
+   deps). [@handle/pkg] gives us the name directly via [target_pin];
+   plain targets pass it via [?leaf_pkg] (set by the dash-prefix /
+   target-as-pkg paths to whichever package they solved for). When
+   neither is set we genuinely don't know which leaf to filter to and
+   fall back to the whole [bin/] tree as a last-resort listing. *)
+let bins_for_error ~ctx ~target_pin ~leaf_pkg ~prefix ~layer_hashes =
+  let from_layers want_name =
+    layer_binaries ~fs:ctx.fs ~cache:ctx.cache ~os_key:ctx.os_key
+      ~hashes:layer_hashes ~want_name
+  in
+  match (target_pin, leaf_pkg) with
+  | Some (pin : Target.handle_pin), _ ->
+      from_layers (OpamPackage.Name.to_string pin.pkg)
+  | None, Some name -> from_layers name
+  | None, None -> (
       try
         Eio.Path.read_dir Eio.Path.(ctx.fs / prefix / "bin")
         |> List.sort String.compare
       with Eio.Exn.Io _ -> [])
 
-let solve_and_exec ~ctx ~binary_name ~target_pin ~unfound_bins ~args pkg_names =
+let solve_and_exec ~ctx ~binary_name ~target_pin ?leaf_pkg ~unfound_bins ~args
+    pkg_names =
   (* The solver dedups internally but the log line is noisy if [target]
      and [extra_names] overlap. Pre-dedup so the message reads cleanly. *)
   let pkg_names = List.sort_uniq String.compare pkg_names in
   Log.info (fun m ->
       m "Solving for packages: %s" (String.concat ", " pkg_names));
-  let names =
-    List.map OpamPackage.Name.of_string pkg_names
-    |> Oi.Pipeline.strip_compiler_roots_for_override
-         ~override:ctx.toolchain_override ~toolchain:ctx.toolchain
-  in
+  (* Don't pre-strip compiler-family names here: [Build_pipeline.solve]
+     already does that inside [strip_toolchain_tokens] (with the same
+     [toolchain_override]/[toolchain] inputs). Pre-stripping made the
+     group's tokens empty before [solve_group] could record them as the
+     group label, leaving downstream errors stamped "<unnamed group>"
+     when the user explicitly named the toolchain's compiler. *)
+  let names = List.map OpamPackage.Name.of_string pkg_names in
   let req = solve_request ctx ~names in
   let layer_hashes = drive_solve_and_build ~ctx ~target:binary_name ~req in
   Log.info (fun m -> m "Got %d layer hashes" (List.length layer_hashes));
@@ -625,7 +622,9 @@ let solve_and_exec ~ctx ~binary_name ~target_pin ~unfound_bins ~args pkg_names =
       Log.info (fun m -> m "Found %s in toolchain prefix: %s" binary_name p);
       exec_in_prefix ctx ~prefix ~tc_ctx ~bin_path:p ~args
   | None ->
-      let bins = bins_for_error ~ctx ~target_pin ~prefix ~layer_hashes in
+      let bins =
+        bins_for_error ~ctx ~target_pin ~leaf_pkg ~prefix ~layer_hashes
+      in
       unfound_bins := bins;
       Log.info (fun m ->
           m "Available binaries: %s"
@@ -868,15 +867,111 @@ let try_solve_of_index ~binary_name ~solve_with_extras index_result =
    prefix that doesn't exist as a package in any configured repo — a
    missing package name cannot possibly provide the binary, and
    attempting to solve for it wastes a full solver run. *)
-let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names
+(* Shared body shape: headline (printed inline after "error:"), then a
+   blank line, an indented body paragraph, another blank line, and a
+   "Hints" block of bullet-prefixed suggestions. Each piece uses Format
+   hints so the body wraps at the terminal margin and bullets each get
+   their own line. Bullet glyph + section header are dim so the eye
+   tracks the headline and the verbatim command lines first. *)
+(* Render a bullet list inside a vertical box. Each bullet is its own
+   horizontal-or-vertical sub-box so prose wraps at the terminal margin
+   without the outer v-box's per-word newline behaviour bleeding in. *)
+let pp_hints ppf hints =
+  let pp_one ppf s =
+    Fmt.pf ppf "@[<hov 4>%a %a@]" Oi.Style.pp_dim_string "•" Fmt.text s
+  in
+  Fmt.pf ppf "@[<v>%a@,  @[<v>%a@]@]" Oi.Style.pp_dim_string "Hints:"
+    Fmt.(list ~sep:cut pp_one)
+    hints
+
+(* A single body paragraph: prose that wraps at the margin, sitting
+   inside the outer v-box that frames the whole error. *)
+let pp_body ppf fmt =
+  Fmt.kstr (fun s -> Fmt.pf ppf "@[<hov 2>  %a@]" Fmt.text s) fmt
+
+let pp_no_package_or_binary ppf target =
+  Fmt.pf ppf "@[<v>no package or binary named %a in any in-scope overlay.@,@,"
+    Oi.Style.pp_accent_string target;
+  pp_body ppf
+    "Tried solving %s as a package name and looking up bin/%s in every cached \
+     layer and the registry index."
+    target target;
+  Fmt.pf ppf "@,@,%a@]" pp_hints
+    [
+      Fmt.str "`oi search %s` — find similar packages or binaries." target;
+      Fmt.str
+        "`oi run --with-repo=@HANDLE %s` — add an overlay to scope before the \
+         lookup."
+        target;
+      Fmt.str
+        "`oi run --with=PKG %s` — solve PKG alongside; useful when the binary \
+         ships in a sibling package."
+        target;
+    ]
+
+let pp_pkg_installs_nothing ppf ~pkg ~target =
+  Fmt.pf ppf "@[<v>%a installs no bin/%a.@,@," Oi.Style.pp_accent_string pkg
+    Oi.Style.pp_accent_string target;
+  pp_body ppf
+    "Package %s solved successfully but its install: stanza adds nothing under \
+     bin/. It may be a pure library, or the binary lives in a sibling package."
+    pkg;
+  Fmt.pf ppf "@,@,%a@]" pp_hints
+    [
+      Fmt.str
+        "`oi search %s` — find sibling packages (often `%s-cli`, `%s-tools`, \
+         `%s-bin`, …) that ship binaries."
+        pkg pkg pkg pkg;
+      "`oi cache show <pkg>` — inspect what the cached layer actually \
+       installed.";
+      "pass -vv to see the full per-package build log.";
+    ]
+
+let pp_pkg_wrong_binary ppf ~pkg ~target ~bins =
+  let hint_bin = List.hd bins in
+  Fmt.pf ppf
+    "@[<v>%a installs no bin/%a.@,\
+     @,\
+    \  @[<hov 2>%a does install:@ %a@]@,\
+     @,\
+    \  Run one of them:@,\
+    \    %a@,\
+     @,\
+     %a@]"
+    Oi.Style.pp_accent_string pkg Oi.Style.pp_accent_string target
+    Oi.Style.pp_accent_string pkg
+    Fmt.(list ~sep:(any ",@ ") (Oi.Style.pp Oi.Style.accent string))
+    bins
+    (Oi.Style.pp Oi.Style.accent Fmt.string)
+    (Fmt.str "oi run --with=%s %s" pkg hint_bin)
+    pp_hints
+    [
+      Fmt.str
+        "`oi search %s` — list sibling packages and the binaries each provides."
+        pkg;
+    ]
+
+let fail_no_binary ~target ~prefixes_tried ~unfound_bins =
+  let bins = !unfound_bins in
+  match (prefixes_tried, bins) with
+  | [], _ -> Oi.Error.fail_not_found target "%a" pp_no_package_or_binary target
+  | pkg :: _, [] ->
+      Oi.Error.fail_not_found target "%a"
+        (fun ppf () -> pp_pkg_installs_nothing ppf ~pkg ~target)
+        ()
+  | pkg :: _, bins ->
+      Oi.Error.fail_not_found target "%a"
+        (fun ppf () -> pp_pkg_wrong_binary ppf ~pkg ~target ~bins)
+        ()
+
+let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names ~unfound_bins
     ~solve_with_extras =
   let prefixes =
     dash_prefixes target
     |> List.filter (fun p -> not (List.mem p extra_names))
     |> List.filter (package_exists_in ~packages_dirs)
   in
-  if prefixes = [] then
-    Oi.Error.fail_not_found target "no package provides bin/%s" target
+  if prefixes = [] then fail_no_binary ~target ~prefixes_tried:[] ~unfound_bins
   else begin
     Log.info (fun m -> m "Trying packages: %s" (String.concat ", " prefixes));
     let found =
@@ -887,7 +982,10 @@ let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names
         prefixes
     in
     if not found then
-      Oi.Error.fail_not_found target "no package provides bin/%s" target
+      (* Pass the prefixes we actually solved for so the error can name
+         one in its [oi run --with=PKG BIN] suggestion. Longest-first
+         order means the most specific name is at the head. *)
+      fail_no_binary ~target ~prefixes_tried:prefixes ~unfound_bins
   end
 
 let binary ~ctx ~env ~pt ~unfound_bins ~args =
@@ -900,9 +998,14 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
       ctx.extra_deps
     @ ctx.url_project.roots
   in
+  (* [pkg_names] is the user-driven roots; the first one is the leaf
+     for "binary not found" reporting (so we list THAT package's bins
+     rather than the whole dep closure). [extra_names] is appended for
+     solving but never used as the leaf. *)
   let solve_with_extras pkg_names =
+    let leaf_pkg = match pkg_names with p :: _ -> Some p | [] -> None in
     solve_and_exec ~ctx ~binary_name:pt.binary_name ~target_pin:pt.target_pin
-      ~unfound_bins ~args (pkg_names @ extra_names)
+      ?leaf_pkg ~unfound_bins ~args (pkg_names @ extra_names)
   in
   let packages_dirs = Lazy.force (packages_dirs_lazy ctx) in
   let from_target =
@@ -910,6 +1013,13 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
   in
   let from_with =
     if from_target then from_target
+    else if extra_names = [] then
+      (* No --with / overlay-pin extras to feed into a fallback solve.
+         Skip it entirely so we don't trigger Empty_after_strip in the
+         pipeline (which produces a vague "no buildable packages"
+         message). The layer-index + dash-prefix lookups below give
+         focused errors: "no package provides bin/<target>". *)
+      false
     else
       try_step "fallback solve (extras + toolchain roots)" (fun () ->
           solve_and_exec ~ctx ~binary_name:pt.binary_name
@@ -930,7 +1040,7 @@ let binary ~ctx ~env ~pt ~unfound_bins ~args =
     in
     if not from_index then
       try_solve_dash_prefixes ~packages_dirs ~target:pt.target ~extra_names
-        ~solve_with_extras
+        ~unfound_bins ~solve_with_extras
   end
 
 (* -- top-level impl --------------------------------------------------- *)

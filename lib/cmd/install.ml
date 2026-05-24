@@ -232,8 +232,8 @@ let check_build_result = function
         r.skipped summary
   | Some (r : D10ir.Direct.result) ->
       Oi.Error.fail_config_error
-        "oi install: build failed (%d skipped). Re-run with --verbosity=debug \
-         for the per-node trace."
+        "oi install: build failed (%d skipped). Re-run with -vv for the \
+         per-node trace."
         r.skipped
 
 (* Run the solve + build under the progress UI and return both results.
@@ -301,7 +301,11 @@ let do_targets ~harness ~refresh ~locked ~registry ~use_registry ~with_repos
       solved.groups
   then
     Oi.Error.fail_config_error
-      "oi install: every solve group failed; nothing to install.";
+      "oi install: every solve group failed:@\n\
+       %a@\n\
+       Hints: try `oi show TARGET` for the resolved plan, `oi search NAME` to \
+       confirm the package exists, or -vv for the full per-group trace."
+      Oi.Build_pipeline.pp_failed_groups solved;
   check_build_result build_result;
   let root_hashes = Oi.Build_pipeline.root_layer_hashes solved in
   if root_hashes = [] then

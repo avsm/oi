@@ -52,8 +52,30 @@ let split_at_target argv =
   in
   loop [] 1
 
+(* Subcommand names that exist on [oi] but not on [oix] (oix IS the
+   runner — no subcommand). Pulled at run time from
+   {!Oi_cmd.Subcommands.names} so adding a new oi subcommand
+   automatically updates this guard. *)
+let maybe_hint_subcommand target_and_after =
+  match target_and_after with
+  | first :: rest when List.mem first (Oi_cmd.Subcommands.names ()) ->
+      let suggested =
+        match (first, rest) with
+        | "run", real_target :: _ -> Fmt.str "oix %s" real_target
+        | _, real_target :: _ -> Fmt.str "oi %s %s" first real_target
+        | _, [] -> Fmt.str "oi %s" first
+      in
+      Printf.eprintf
+        "oix: %S isn't a subcommand — oix is itself the runner.\n\
+         Try: %s\n\
+         (Use `oi %s …` if you wanted the real `%s` subcommand.)\n"
+        first suggested first first;
+      exit (Oi.Error.code (Oi.Error.Config_error { msg = "" }))
+  | _ -> ()
+
 let () =
   let oix_flags, target_and_after = split_at_target Sys.argv in
+  maybe_hint_subcommand target_and_after;
   let argv =
     let head = Sys.argv.(0) :: oix_flags in
     Array.of_list

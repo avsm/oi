@@ -62,7 +62,14 @@ let code e = code_of_kind (kind e)
 
 let pp fmt = function
   | Not_found { target; msg } ->
-      Fmt.pf fmt "%a %s: %s" Style.pp_error_string "error:" target msg
+      (* The constructor's [msg] is the full, user-shaped body — the
+         producer already names [target] in context (e.g. "no binary
+         `foo` …"), so the printer doesn't re-prepend it. Leaving
+         [target] in the constructor record keeps JSON consumers'
+         routing intact without leaking duplication into the human
+         render. *)
+      let _ = target in
+      Fmt.pf fmt "%a %s" Style.pp_error_string "error:" msg
   | No_solution { msg } ->
       Fmt.pf fmt "%a no solution found@,%s" Style.pp_error_string "error:" msg
   | Config_error { msg } ->
@@ -194,16 +201,37 @@ let to_json e =
 
 (* -- Constructors -------------------------------------------------------- *)
 
-let fail_not_found target fmt =
-  Fmt.kstr (fun msg -> raise (Not_found { target; msg })) fmt
+(* {!Fmt.kstr} formats through a fresh buffer-backed formatter whose
+   style renderer defaults to [None] — every [%a Style.pp_*] in the
+   message body silently collapses to plain text before the string is
+   even built, so by the time {!pp} hands the message to a styled
+   stderr there's nothing left to colourise.
 
-let fail_msg fmt = Fmt.kstr (fun s -> raise (Msg s)) fmt
+   [kstr_styled] pre-sets the buffer formatter's renderer from
+   [Fmt.stderr] (which {!Fmt_tty.setup_std_outputs} configures at
+   startup per [--color]). The result: ANSI escapes get baked into the
+   message string when stderr is styled, and stripped when it isn't —
+   matching what the user asked for. *)
+let kstr_styled k fmt =
+  let buf = Buffer.create 128 in
+  let ppf = Format.formatter_of_buffer buf in
+  Fmt.set_style_renderer ppf (Fmt.style_renderer Fmt.stderr);
+  Format.kfprintf
+    (fun _ ->
+      Format.pp_print_flush ppf ();
+      k (Buffer.contents buf))
+    ppf fmt
+
+let fail_not_found target fmt =
+  kstr_styled (fun msg -> raise (Not_found { target; msg })) fmt
+
+let fail_msg fmt = kstr_styled (fun s -> raise (Msg s)) fmt
 let no_solution diagnostic = raise (No_solution { msg = diagnostic })
 
 let fail_config_error fmt =
-  Fmt.kstr (fun msg -> raise (Config_error { msg })) fmt
+  kstr_styled (fun msg -> raise (Config_error { msg })) fmt
 
 let build_failed ~pkg ~cmd ~output = raise (Build_failed { pkg; cmd; output })
 
 let fail_fetch_failed ~url fmt =
-  Fmt.kstr (fun msg -> raise (Fetch_failed { url; msg })) fmt
+  kstr_styled (fun msg -> raise (Fetch_failed { url; msg })) fmt

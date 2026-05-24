@@ -422,7 +422,11 @@ let run_bundle ~harness ~refresh ~registry ~use_registry ~with_repos ~with_deps
   match recipe_solved.Oi.Build_pipeline.merged with
   | None ->
       Oi.Error.fail_config_error
-        "oi dist duniverse: every solve group failed; nothing to emit."
+        "oi dist duniverse: every solve group failed:@\n\
+         %a@\n\
+         Hints: try `oi show TARGET` to inspect the resolved plan, or -vv for \
+         the full per-group trace."
+        Oi.Build_pipeline.pp_failed_groups recipe_solved
   | Some plan ->
       (* 1. Prefetch + statically unpack every archive into
          [<output>/sources/<sha>/]. *)

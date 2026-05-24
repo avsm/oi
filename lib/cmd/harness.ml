@@ -96,6 +96,12 @@ let eprintf_raw fmt = Fmt.kstr (fun s -> Fmt.epr "%s@." s) fmt
 let eprintf fmt =
   Fmt.kstr (fun s -> Logs_progress.interject (fun () -> eprintf_raw "%s" s)) fmt
 
+(* Print [exn] directly to [Fmt.stderr] so {!Style} helpers consult its
+   ANSI renderer ([Fmt_tty.setup_std_outputs] sets it from
+   [--color=auto/always/never]). Going through [Fmt.kstr] first would
+   format into a plain string buffer with no renderer attached, so
+   every style attribute gets silently stripped before stderr ever
+   sees it. *)
 let exit_for_exn exn =
   match !error_format with
   | Json ->
@@ -103,7 +109,7 @@ let exit_for_exn exn =
           print_string (Oi.Error.to_json (error_of_exn exn)));
       exit (Oi.Error.code (error_of_exn exn))
   | Text ->
-      eprintf "%a" pp_one_exn exn;
+      Logs_progress.interject (fun () -> Fmt.epr "%a@." pp_one_exn exn);
       exit (Oi.Error.code (error_of_exn exn))
 
 let with_error_handling f =

@@ -87,8 +87,8 @@ let check_build_outcome ~handle ~solved = function
       match solve_error_of solved with
       | Some err ->
           Error.fail_config_error
-            "toolchain %s: solve failed (%s) — re-run with --verbosity=debug \
-             for the 0install trace"
+            "toolchain %s: solve failed (%s) — re-run with -vv for the \
+             0install trace"
             handle (format_group_error err)
       | None ->
           Log.info (fun m ->
@@ -107,7 +107,7 @@ let check_build_outcome ~handle ~solved = function
   | Some (r : D10ir.Direct.result) ->
       Error.fail_config_error
         "toolchain %s: install incomplete (%d failed, %d skipped); re-run with \
-         --verbosity=debug for the per-node trace"
+         -vv for the per-node trace"
         handle r.failed r.skipped
 
 (* The sub-build solves and constructs every root fresh, so we strip

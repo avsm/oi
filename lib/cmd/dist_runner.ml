@@ -306,7 +306,11 @@ let run_makefile ~harness ~refresh ~registry ~use_registry ~with_repos
   match recipe_solved.Oi.Build_pipeline.merged with
   | None ->
       Oi.Error.fail_config_error
-        "oi dist makefile: every solve group failed; nothing to emit."
+        "oi dist makefile: every solve group failed:@\n\
+         %a@\n\
+         Hints: try `oi show TARGET` to inspect the resolved plan, or -vv for \
+         the full per-group trace."
+        Oi.Build_pipeline.pp_failed_groups recipe_solved
   | Some plan ->
       let bin_roots = Oi.Build_pipeline.root_layer_hashes recipe_solved in
       let local =

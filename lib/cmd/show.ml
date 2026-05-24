@@ -1068,12 +1068,16 @@ let exec_plan_or_fail ~(group : Oi.Build_pipeline.group_result) ~targets =
   | Error (Cycle cycles) ->
       Oi.Error.fail_config_error "dependency cycle in solved packages:@\n%a"
         Oi.Plan.pp_cycles cycles
-  | Error (Empty_after_strip | Elaborate_failed _ | Emit_failed _) ->
-      Oi.Error.fail_msg "oi show: solve produced no plan"
+  | Error e ->
+      Oi.Error.fail_config_error "oi show: solve produced no plan — %a"
+        Oi.Build_pipeline.pp_group_error e
   | Ok () -> (
       match group.exec_plan with
       | Some xp -> xp
-      | None -> Oi.Error.fail_msg "oi show: empty solve result")
+      | None ->
+          Oi.Error.fail_msg
+            "oi show: empty solve result (likely a recipe-emit bug — re-run \
+             with --refresh)")
 
 let json_plan_node (p : Oi.Plan.package_plan) =
   let opam_pkg = opam_pkg_of_package_plan p in
@@ -1306,16 +1310,23 @@ let render_summary_view ~(conf : Oi.Solver.Ctx.conf) ~targets ~with_repos
   in
   pp_render_info ~target_label ~target_version ~target_opams ~overlay ~os_key
     ~ocaml_version:conf.ocaml_version ~n_cached ~n_source ~all_depexts
-    ~dep_status ~repositories ~binaries
+    ~dep_status ~repositories ~binaries;
+  Fmt.pr
+    "@[<v>@,\
+     @[<2>More:@ %a --tree shows the dep graph;@ %a --plan dumps build \
+     commands and layer hashes;@ %a --only-depexts prints depexts one per \
+     line.@]@]@."
+    Oi.Style.pp_dim_string "oi show" Oi.Style.pp_dim_string "oi show"
+    Oi.Style.pp_dim_string "oi show"
 
-let pick_view ~tree:_ ~plan_view ~summary ~only_depexts ~show_all =
-  (* [--tree] is the default, so the flag is accepted but never
-     branched on — present so users who explicitly type it get the
-     same behavior as the default. *)
+let pick_view ~tree ~plan_view ~summary:_ ~only_depexts ~show_all =
+  (* [--summary] is the default. [--tree] / [--plan] / [--only-depexts]
+     opt in to a richer view. [--summary] is still accepted as a no-op
+     so users who type it explicitly get the same behaviour. *)
   if only_depexts || show_all then `Existing
   else if plan_view then `Plan
-  else if summary then `Summary
-  else `Tree
+  else if tree then `Tree
+  else `Summary
 
 let render_view ~view ~conf ~packages_dirs ~exec_plan ~os_override
     ~(group : Oi.Build_pipeline.group_result) ~targets ~with_repos
@@ -1771,9 +1782,8 @@ let tree_arg =
     value & flag
     & info
         ~doc:
-          "Render the dependency graph as a Unicode tree (default view). \
-           Back-references to layers expanded earlier are prefixed with \
-           $(b,\u{21B0})."
+          "Render the dependency graph as a Unicode tree. Back-references to \
+           layers expanded earlier are prefixed with $(b,\u{21B0})."
         [ "tree"; "graph" ])
 
 let plan_view_arg =
@@ -1791,7 +1801,8 @@ let summary_arg =
     & info
         ~doc:
           "Print metadata, package counts, depexts (missing marked), and \
-           pinned overlays."
+           pinned overlays. This is the default view; the flag is accepted \
+           explicitly for symmetry with $(b,--tree) / $(b,--plan)."
         [ "summary"; "meta" ])
 
 let only_depexts_arg =

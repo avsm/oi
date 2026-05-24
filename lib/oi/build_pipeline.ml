@@ -108,7 +108,11 @@ let expand_targets ~fs ~sys ~reporepo_path ~reporepo_url (targets : target list)
   let expand_overlay_all handle =
     let entries = Lazy.force entries_lazy in
     match Source.Reporepo.latest entries ~handle with
-    | None -> Error.fail_config_error "no overlay @%s in reporepo" handle
+    | None ->
+        Error.fail_config_error
+          "no overlay @%s in reporepo. Run `oi repo list` to see registered \
+           handles, or `oi repo add %s <URL>` to register a new one."
+          handle handle
     | Some e ->
         List.map
           (fun group -> (group, [ handle ]))
@@ -1817,6 +1821,45 @@ let build env ?(reporter = Build_progress.null) (inp : build_inputs) :
       finalize_build_manifest ~env ~started_at ~finished_at inp.solved;
       upload_build_manifest_and_pointer ~env ~cache_root ~started_at inp;
       Some result
+
+let pp_group_error ppf = function
+  | Solve_failed { msg; log_path } ->
+      let trim s =
+        let s = String.trim s in
+        if String.length s <= 200 then s else String.sub s 0 200 ^ "…"
+      in
+      Fmt.pf ppf "@[<v>solve failed: @[%a@]%t@]" Fmt.text (trim msg) (fun ppf ->
+          if log_path <> "" then Fmt.pf ppf "@,full log: %s" log_path)
+  | Cycle cycles ->
+      let one cyc =
+        cyc |> List.map OpamPackage.to_string |> String.concat " → "
+      in
+      Fmt.pf ppf "@[<v>dependency cycle:%a@]"
+        (fun ppf -> List.iter (fun c -> Fmt.pf ppf "@,  %s" (one c)))
+        cycles
+  | Empty_after_strip ->
+      Fmt.pf ppf
+        "@[every requested package is part of the active toolchain. Drop \
+         --toolchain, or pick a package that isn't bundled with it.@]"
+  | Elaborate_failed { msg } ->
+      Fmt.pf ppf "@[internal error during elaborate: @[%a@]@]" Fmt.text msg
+  | Emit_failed { msg } ->
+      Fmt.pf ppf "@[internal error during recipe emit: @[%a@]@]" Fmt.text msg
+
+let pp_failed_groups ppf (s : solved) =
+  let pp_one ppf (gr : group_result) =
+    match gr.error with
+    | Ok () -> ()
+    | Error e ->
+        let label =
+          if gr.group.label = "" then "<unnamed group>" else gr.group.label
+        in
+        Fmt.pf ppf "@[<v 2>%s:@,%a@]" label pp_group_error e
+  in
+  let failures =
+    List.filter (fun (gr : group_result) -> Result.is_error gr.error) s.groups
+  in
+  Fmt.pf ppf "@[<v>%a@]" (Fmt.list ~sep:Fmt.cut pp_one) failures
 
 let layer_hashes (s : solved) : string list =
   match

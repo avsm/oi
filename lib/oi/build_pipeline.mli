@@ -257,6 +257,17 @@ val build :
     per-{!Fetch_started}/[Fetch_progress]/[Fetch_finished], then
     [Phase_started Building] / [Build _] / [Build_summary]. *)
 
+val pp_group_error : group_error Fmt.t
+(** [pp_group_error ppf e] formats [e] as a one-line human summary with the
+    failure reason inlined (and a log path for {!Solve_failed}) so a multi-group
+    failure list reads at a glance. *)
+
+val pp_failed_groups : solved Fmt.t
+(** [pp_failed_groups ppf s] formats every group in [s] that ended with an
+    [Error _] as ["  <label> — <reason>"], newline-separated. Use immediately
+    after a [solve] returns no merged plan to surface why each group failed
+    instead of the generic "nothing to build". *)
+
 val layer_hashes : solved -> string list
 (** Layer hashes from the first (and usually only) successful group's
     [exec_plan], in topological order. Empty when [solved.groups] has no

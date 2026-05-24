@@ -316,26 +316,6 @@ let say_field_list ~quiet label items =
     end
   else Oi.Say.field_list label items
 
-(* Build the human-readable error summary for a sync that returned no
-   plan: each group's failure kind, suitable for [fail_config_error]. *)
-let group_error_lines (groups : Oi.Build_pipeline.group_result list) =
-  List.filter_map
-    (fun (gr : Oi.Build_pipeline.group_result) ->
-      match gr.error with
-      | Ok () -> None
-      | Error e ->
-          let kind =
-            match e with
-            | Solve_failed { msg; log_path } ->
-                Fmt.str "solve: %s (see %s)" msg log_path
-            | Cycle _ -> "cycle"
-            | Empty_after_strip -> "empty"
-            | Elaborate_failed { msg } -> Fmt.str "elaborate: %s" msg
-            | Emit_failed { msg } -> Fmt.str "emit: %s" msg
-          in
-          Fmt.kstr (fun s -> Some s) "%s — %s" gr.group.label kind)
-    groups
-
 (* Surface solve/build failures: a discarded build result lets a failed
    solve fall through to [Prefix.assemble ~layer_hashes:[]], which
    silently produces an empty [_oi/prefix] and then dies further
@@ -343,12 +323,12 @@ let group_error_lines (groups : Oi.Build_pipeline.group_result list) =
 let check_sync_outcome ~solved ~build_result =
   match build_result with
   | None ->
-      let lines = group_error_lines solved.Oi.Build_pipeline.groups in
       Oi.Error.fail_config_error
         "project sync produced no executable plan:@\n\
-        \  %s@\n\
-         Re-run with --verbosity=debug for the full per-group trace."
-        (String.concat "\n  " lines)
+         %a@\n\
+         Hints: check your project's `*.opam` depends:, run `oi show` for the \
+         resolved plan, or -vv for the full per-group trace."
+        Oi.Build_pipeline.pp_failed_groups solved
   | Some r when r.D10ir.Direct.failed > 0 ->
       let pp_fail (f : D10ir.Direct.failure) =
         Fmt.str "%s.%s @ %s — see %s" f.package.name f.package.version

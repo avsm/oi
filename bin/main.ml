@@ -188,26 +188,6 @@ let force_plain_help_when_redirected argv =
       argv
 
 let () =
-  let group =
-    Cmd.group info
-      [
-        Oi_cmd.Run.cmd;
-        Oi_cmd.Build.cmd;
-        Oi_cmd.Build.test_cmd;
-        Oi_cmd.Install.cmd;
-        Oi_cmd.Ir.cmd;
-        Oi_cmd.Dist_cmd.cmd;
-        Oi_cmd.Add.cmd;
-        Oi_cmd.Exec.cmd;
-        Oi_cmd.Search.cmd;
-        Oi_cmd.Show.cmd;
-        Oi_cmd.Env.cmd;
-        Oi_cmd.Config.cmd;
-        Oi_cmd.Repo.cmd;
-        Oi_cmd.Clean.cmd;
-        Oi_cmd.Cache.cmd;
-        Oi_cmd.Self.cmd;
-      ]
-  in
+  let group = Cmd.group info Oi_cmd.Subcommands.all in
   let argv = force_plain_help_when_redirected Sys.argv in
   exit (Cmd.eval ~argv group)
