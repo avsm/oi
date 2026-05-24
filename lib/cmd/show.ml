@@ -188,6 +188,11 @@ let pp_package_binaries ~cache_root ~os_key ~layer_hash =
    chain (relocatable / default). Plus any overlays named
    explicitly in [with_repos], in that order, deduplicated by
    handle. *)
+(* Real packageful overlays only — toolchain meta-handles (whose
+   reporepo entry has no [url:] of its own, just a [depends:] bag) are
+   filtered out and surfaced separately by {!pp_toolchain}. Keeps
+   "Repositories:" honest: every row is something that actually ships
+   opam files the solver reads. *)
 let pp_repositories ?toolchain ~with_repos () =
   let entries =
     try Oi.Source.Reporepo.load ~path:(Terms.reporepo_path ())
@@ -195,7 +200,7 @@ let pp_repositories ?toolchain ~with_repos () =
   in
   let base_handles =
     match toolchain with
-    | Some (info : Oi.Toolchain.info) -> info.handle :: info.dep_handles
+    | Some (info : Oi.Toolchain.info) -> info.dep_handles
     | None ->
         Oi.Source.Reporepo.base_entries ()
         |> List.map (fun (e : Oi.Source.Reporepo.entry) -> e.handle)
@@ -223,11 +228,7 @@ let pp_repositories ?toolchain ~with_repos () =
       | Some (e : Oi.Source.Reporepo.entry) ->
           let url = if e.commit = "" then e.url else e.url ^ "#" ^ e.commit in
           Some (h, e.version, url)
-      | None -> (
-          (* Toolchain overlay: not in reporepo, but we know its URL. *)
-          match Oi.Toolchain.url_of ~handle:h with
-          | Some url -> Some (h, "builtin", url)
-          | None -> None))
+      | None -> None)
     ordered
 
 (* Print one indented metadata line. Mirrors [pp_meta_line]'s 11-char
@@ -295,9 +296,23 @@ let render_target_opams = function
   | [ entry ] -> render_single_opam entry
   | many -> render_many_opams many
 
+(* Tri-state binary report: cached + non-empty lists names; cached but
+   empty says "library only"; uncached tells the user to build. The
+   line is always emitted so a user scanning [oi show] always knows
+   what they're getting — never silently absent. *)
+type binaries_state =
+  | Bin_cached of string list  (** Layer is built; these are its bins. *)
+  | Bin_library_only  (** Layer is built and installs no bins. *)
+  | Bin_not_built  (** Layer hasn't been built locally yet. *)
+
 let pp_binaries = function
-  | [] -> ()
-  | bs -> pp_meta_line "Binaries" (String.concat ", " bs)
+  | Bin_cached bs -> pp_meta_line "Binaries" (String.concat ", " bs)
+  | Bin_library_only ->
+      Fmt.kstr (pp_meta_line "Binaries") "%a" Oi.Style.pp_dim_string
+        "(library only — no executables installed)"
+  | Bin_not_built ->
+      Fmt.kstr (pp_meta_line "Binaries") "%a" Oi.Style.pp_dim_string
+        "(not built locally — run `oi build` to populate)"
 
 let pp_overlay_tag = function
   | None -> ()
@@ -366,8 +381,11 @@ let pp_repositories_section = function
           Fmt.pr "  %a  %s@," Oi.Style.pp_info_string (Fmt.str "%-*s" col l) url)
         rows left
 
-let pp_description_body body =
-  String.split_on_char '\n' body |> List.iter (fun line -> Fmt.pr "  %s@," line)
+(* Render the package description with proper terminal wrapping.
+   {!Fmt.paragraphs} handles blank-line separation and intra-paragraph
+   space/newline collapsing; the surrounding [@[<hov 2>...@]] gives a
+   2-column indent and lets prose wrap at the terminal margin. *)
+let pp_description_body body = Fmt.pr "@[<hov 2>  %a@]@," Fmt.paragraphs body
 
 let pp_descriptions = function
   | [] -> ()
@@ -390,9 +408,31 @@ let pp_descriptions = function
    single-package project (legacy inline layout), and length >=2 for a
    multi-package project (one indented block per package, headed by
    the package name). *)
+(* Surface the active toolchain as its own field. The toolchain handle
+   is a meta-entry in the reporepo (an [x-oi-toolchain-name] alias
+   with no [url:] of its own), so listing it among the packageful
+   overlays in "Repositories:" was confusing — every other row there
+   ships actual opam files. Naming it here, with its depends chain,
+   makes the relationship explicit. *)
+let pp_toolchain = function
+  | None -> ()
+  | Some (info : Oi.Toolchain.info) ->
+      let depends =
+        if info.dep_handles = [] then ""
+        else
+          Fmt.str " via %s"
+            (info.dep_handles
+            |> List.map (fun h -> "@" ^ h)
+            |> String.concat " + ")
+      in
+      let flavour =
+        if info.relocatable then "relocatable" else "fixed-prefix"
+      in
+      pp_meta_line "Toolchain" (Fmt.str "%s (%s)%s" info.handle flavour depends)
+
 let pp_render_info ~target_label ~target_version ~target_opams ~overlay ~os_key
-    ~ocaml_version ~n_cached ~n_source ~all_depexts ~dep_status ~repositories
-    ~binaries =
+    ~ocaml_version ~toolchain ~n_cached ~n_source ~all_depexts ~dep_status
+    ~repositories ~binaries =
   Fmt.pr "@[<v>";
   pp_target_line ~target_label ~target_version;
   let descriptions = render_target_opams target_opams in
@@ -400,6 +440,7 @@ let pp_render_info ~target_label ~target_version ~target_opams ~overlay ~os_key
   pp_overlay_tag overlay;
   pp_meta_line "Platform" os_key;
   pp_meta_line "OCaml" ocaml_version;
+  pp_toolchain toolchain;
   Fmt.pr "@,";
   pp_package_counts ~n_cached ~n_source;
   Fmt.pr "@,";
@@ -1305,12 +1346,19 @@ let render_summary_view ~(conf : Oi.Solver.Ctx.conf) ~targets ~with_repos
   let repositories = pp_repositories ?toolchain ~with_repos () in
   let binaries =
     match target_layer_hash with
-    | None -> []
-    | Some h -> pp_package_binaries ~cache_root ~os_key ~layer_hash:h
+    | None -> Bin_not_built
+    | Some h -> (
+        let layer_dir = cache_root / "layers" / os_key / h in
+        let cached = Sys.file_exists (layer_dir / "layer.json") in
+        if not cached then Bin_not_built
+        else
+          match pp_package_binaries ~cache_root ~os_key ~layer_hash:h with
+          | [] -> Bin_library_only
+          | bs -> Bin_cached bs)
   in
   pp_render_info ~target_label ~target_version ~target_opams ~overlay ~os_key
-    ~ocaml_version:conf.ocaml_version ~n_cached ~n_source ~all_depexts
-    ~dep_status ~repositories ~binaries;
+    ~ocaml_version:conf.ocaml_version ~toolchain ~n_cached ~n_source
+    ~all_depexts ~dep_status ~repositories ~binaries;
   Fmt.pr
     "@[<v>@,\
      @[<2>More:@ %a --tree shows the dep graph;@ %a --plan dumps build \

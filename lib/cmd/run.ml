@@ -889,16 +889,30 @@ let pp_hints ppf hints =
 let pp_body ppf fmt =
   Fmt.kstr (fun s -> Fmt.pf ppf "@[<hov 2>  %a@]" Fmt.text s) fmt
 
-let pp_no_package_or_binary ppf target =
+let pp_no_package_or_binary ppf ~packages_dirs target =
   Fmt.pf ppf "@[<v>no package or binary named %a in any in-scope overlay.@,@,"
     Oi.Style.pp_accent_string target;
   pp_body ppf
     "Tried solving %s as a package name and looking up bin/%s in every cached \
      layer and the registry index."
     target target;
+  (* Substring-search the in-scope packages_dirs for plausible typos.
+     {!Fmt.did_you_mean} handles the natural-language join ("either A
+     or B", "one of A, B or C") so we don't have to. *)
+  let suggestions =
+    Show.suggest_for ~pkgs_dirs:packages_dirs target
+    |> List.filteri (fun i _ -> i < 8)
+  in
+  (if suggestions <> [] then
+     let pp_v = Oi.Style.pp Oi.Style.accent Fmt.string in
+     Fmt.pf ppf "@,@,  %a"
+       (Fmt.did_you_mean ~pre:Fmt.nop ~kind:"package" pp_v)
+       (target, suggestions));
   Fmt.pf ppf "@,@,%a@]" pp_hints
     [
-      Fmt.str "`oi search %s` — find similar packages or binaries." target;
+      Fmt.str
+        "`oi search %s` — broader fuzzy match across packages and binaries."
+        target;
       Fmt.str
         "`oi run --with-repo=@HANDLE %s` — add an overlay to scope before the \
          lookup."
@@ -951,10 +965,13 @@ let pp_pkg_wrong_binary ppf ~pkg ~target ~bins =
         pkg;
     ]
 
-let fail_no_binary ~target ~prefixes_tried ~unfound_bins =
+let fail_no_binary ~packages_dirs ~target ~prefixes_tried ~unfound_bins =
   let bins = !unfound_bins in
   match (prefixes_tried, bins) with
-  | [], _ -> Oi.Error.fail_not_found target "%a" pp_no_package_or_binary target
+  | [], _ ->
+      Oi.Error.fail_not_found target "%a"
+        (fun ppf () -> pp_no_package_or_binary ppf ~packages_dirs target)
+        ()
   | pkg :: _, [] ->
       Oi.Error.fail_not_found target "%a"
         (fun ppf () -> pp_pkg_installs_nothing ppf ~pkg ~target)
@@ -971,7 +988,8 @@ let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names ~unfound_bins
     |> List.filter (fun p -> not (List.mem p extra_names))
     |> List.filter (package_exists_in ~packages_dirs)
   in
-  if prefixes = [] then fail_no_binary ~target ~prefixes_tried:[] ~unfound_bins
+  if prefixes = [] then
+    fail_no_binary ~packages_dirs ~target ~prefixes_tried:[] ~unfound_bins
   else begin
     Log.info (fun m -> m "Trying packages: %s" (String.concat ", " prefixes));
     let found =
@@ -985,7 +1003,8 @@ let try_solve_dash_prefixes ~packages_dirs ~target ~extra_names ~unfound_bins
       (* Pass the prefixes we actually solved for so the error can name
          one in its [oi run --with=PKG BIN] suggestion. Longest-first
          order means the most specific name is at the head. *)
-      fail_no_binary ~target ~prefixes_tried:prefixes ~unfound_bins
+      fail_no_binary ~packages_dirs ~target ~prefixes_tried:prefixes
+        ~unfound_bins
   end
 
 let binary ~ctx ~env ~pt ~unfound_bins ~args =
