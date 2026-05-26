@@ -139,6 +139,68 @@ let replace_existing dst_p f =
     (try Eio.Path.unlink dst_p with Eio.Exn.Io _ -> ());
     f ()
 
+(* WORKAROUND: dune ≥ 3 writes absolute install paths into the
+   [(sections …)] block of [lib/<pkg>/dune-package] for any package
+   with non-default install sections (notably [stublibs] and [doc] —
+   ctypes, ctypes-foreign, and caqti hit this in practice). The
+   absolute path is the build-time prefix, i.e. oi's per-layer staging
+   dir, which no longer exists when a downstream consumer restores the
+   layer under its *own* per-layer staging dir. Dune then reports
+   every file as "File unavailable" when expanding [(package <pkg>)]
+   in the consumer's build rules.
+
+   To make layers relocatable across staging-dir hashes we substitute
+   the build-time prefix with the sentinel below at store time and
+   reverse the substitution against the consumer's staging dir at
+   restore time. Remove once dune supports relocatable installs
+   natively (its [dune-package] sections would then either be relative
+   or rebased on read). *)
+let prefix_sentinel = "__OI_PREFIX__"
+
+(* dune emits non-default-section absolute paths in [lib/<pkg>/dune-package].
+   Restricting to that exact layout keeps the rewrite scope tiny — every
+   other file in the layer keeps its fast hardlink path. *)
+let is_relocatable_dune_package rel_path =
+  Filename.basename rel_path = "dune-package"
+  &&
+  match String.split_on_char '/' rel_path with
+  | [ "lib"; _; "dune-package" ] -> true
+  | _ -> false
+
+let substitute ~from_ ~to_ s =
+  if from_ = "" || from_ = to_ then s
+  else
+    let buf = Buffer.create (String.length s) in
+    let n = String.length s and m = String.length from_ in
+    let i = ref 0 in
+    while !i < n do
+      if !i + m <= n && String.sub s !i m = from_ then begin
+        Buffer.add_string buf to_;
+        i := !i + m
+      end
+      else begin
+        Buffer.add_char buf s.[!i];
+        incr i
+      end
+    done;
+    Buffer.contents buf
+
+(* Read [src_p], substitute [from_] → [to_] in its content, write the
+   result to [dst_p] with the source's mode bits. Always unlinks
+   [dst_p] first so [save]'s in-place truncation does not mutate a
+   hardlinked inode that some other restore-target still aliases.
+
+   Used in place of [link_or_copy] for [dune-package] files where the
+   stored content embeds the build-time staging-dir prefix and must be
+   rewritten before consumers see it. *)
+let install_with_substitution ~fs ~src ~dst ~from_ ~to_ =
+  let src_p = Eio.Path.(fs / src) in
+  let dst_p = Eio.Path.(fs / dst) in
+  let perm = (Eio.Path.stat ~follow:false src_p).perm in
+  let rewritten = substitute ~from_ ~to_ (Eio.Path.load src_p) in
+  (try Eio.Path.unlink dst_p with Eio.Exn.Io _ -> ());
+  Eio.Path.save ~create:(`Or_truncate perm) dst_p rewritten
+
 let install_one_file (c : Config.t) ~prefix ~fs_dir rel_path =
   let src = prefix / rel_path in
   let dst = fs_dir / rel_path in
@@ -157,7 +219,10 @@ let install_one_file (c : Config.t) ~prefix ~fs_dir rel_path =
   | Some `Regular_file ->
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o755
         Eio.Path.(c.fs / Filename.dirname dst);
-      replace_existing dst_p (fun () -> link_or_copy ~fs:c.fs ~src ~dst)
+      if is_relocatable_dune_package rel_path then
+        install_with_substitution ~fs:c.fs ~src ~dst ~from_:prefix
+          ~to_:prefix_sentinel
+      else replace_existing dst_p (fun () -> link_or_copy ~fs:c.fs ~src ~dst)
   | _ -> ()
 
 let do_store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
@@ -194,10 +259,44 @@ let store (c : Config.t) ~hash ~prefix ~files ~package ~deps ~parent_hashes
     do_store c ~hash ~prefix ~files ~package ~deps ~parent_hashes ~exit_status
       ~recipe_json
 
+(* See {!prefix_sentinel}. Post-pass after [link_tree] rewrites every
+   [lib/<pkg>/dune-package] file so the sentinel becomes the
+   consumer's actual staging dir. The hardlink from [link_tree] is
+   broken (unlink-then-save) so the canonical layer file in
+   [layers/<hash>/fs/] keeps the sentinel form for the next restore
+   into a different prefix. *)
+let rewrite_dune_packages_after_restore (c : Config.t) ~prefix =
+  let lib_p = Eio.Path.(c.fs / prefix / "lib") in
+  let dir_kind p =
+    try Some (Eio.Path.stat ~follow:false p).kind with Eio.Exn.Io _ -> None
+  in
+  match dir_kind lib_p with
+  | Some `Directory ->
+      let entries = try Eio.Path.read_dir lib_p with Eio.Exn.Io _ -> [] in
+      List.iter
+        (fun pkg ->
+          let dp_p = Eio.Path.(lib_p / pkg / "dune-package") in
+          match dir_kind dp_p with
+          | Some `Regular_file ->
+              let perm = (Eio.Path.stat ~follow:false dp_p).perm in
+              let content = Eio.Path.load dp_p in
+              let rewritten =
+                substitute ~from_:prefix_sentinel ~to_:prefix content
+              in
+              if rewritten <> content then begin
+                (try Eio.Path.unlink dp_p with Eio.Exn.Io _ -> ());
+                Eio.Path.save ~create:(`Or_truncate perm) dp_p rewritten
+              end
+          | _ -> ())
+        entries
+  | _ -> ()
+
 let restore (c : Config.t) ~hash ~prefix =
   let fs_dir = fs_path c ~hash in
-  if Sysops.file_exists fs_dir then
-    Sysops.link_tree c.sys ~src:fs_dir ~dst:Eio.Path.(c.fs / prefix)
+  if Sysops.file_exists fs_dir then begin
+    Sysops.link_tree c.sys ~src:fs_dir ~dst:Eio.Path.(c.fs / prefix);
+    rewrite_dune_packages_after_restore c ~prefix
+  end
 
 (* -- Remote registry ----------------------------------------------------- *)
 
